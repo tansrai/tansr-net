@@ -25,17 +25,26 @@ internal sealed class MediaForm : Form
     private readonly List<Button> _actions = new();
     private readonly string _alias = "tansr" + Guid.NewGuid().ToString("N");
     private WindowsAudioRecorder? _recorder;
-    private SpeechBatch? _batch;
     private bool _busy, _closed, _playing;
     internal MediaForm(MediaWorkspace workspace, Action<string> draft, string text)
     {
         _workspace = workspace; _draft = draft; _text.Text = text; Text = "媒体 · 原生预览 / 转写 / 分段朗读"; Width = 1100; Height = 760; Padding = new Padding(10);
+        Name = "MediaWindow"; _items.Name = "MediaItems"; _text.Name = "MediaText"; _status.Name = "MediaStatus";
+        _image.Name = "MediaImage"; _video.Name = "MediaPlayer";
+        _model.Name = "MediaSpeechModel"; _asr.Name = "MediaTranscriptionModel"; _segment.Name = "MediaAllowSegmentation";
+        if (workspace.Speech != null) _text.Text = workspace.Speech.Plan.Text;
         var top = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         top.Controls.Add(new Label { Text = "媒体下载主机来自 TANSR_MEDIA_HOSTS；空名单只允许内嵌材料。ASR 只回填草稿。播放使用 Windows 媒体组件，缺少解码器时仍可保存。", AutoSize = true, MaximumSize = new Size(1000, 0) });
         top.Controls.Add(Row(Button("刷新模型目录", CatalogAsync), _asr, Button("音频文件转草稿", FileAsrAsync), Button("开始录音", StartRecordingAsync), Button("停止并转草稿", FinishRecordingAsync)));
         top.Controls.Add(Row(_model, _voice, _format, _segment)); top.Controls.Add(_text);
         top.Controls.Add(Row(Button("建立新朗读批次", PrepareAsync), Button("合成 / 续合下一段", SpeakNextAsync), Button("恢复历史媒体", async () => { await _workspace.LoadHistoryAsync(Token); RefreshItems(); }), Button("刷新产物", () => { RefreshItems(); return Task.CompletedTask; })));
-        var cancel = new Button { Text = "取消当前媒体请求", AutoSize = true }; cancel.Click += (_, _) => _operation?.Cancel(); top.Controls.Add(cancel);
+        var cancel = new Button { Name = "MediaCancel", Text = "取消当前媒体请求", AutoSize = true };
+        cancel.Click += (_, _) =>
+        {
+            _operation?.Cancel();
+            if (_recorder != null) { _recorder.Dispose(); _recorder = null; _status.Text = "录音已取消并丢弃，未上传或转写。"; }
+        };
+        top.Controls.Add(cancel);
         var bottom = Row(Button("预览选中产物", PreviewAsync), Button("保存选中产物", SaveAsync), Button("停止播放", () => { StopPlayer(); return Task.CompletedTask; })); bottom.Dock = DockStyle.Bottom;
         Controls.Add(_video); Controls.Add(_image); Controls.Add(_items); Controls.Add(bottom); Controls.Add(_status); Controls.Add(top);
         _model.SelectedIndexChanged += (_, _) => SelectModel(); _video.Resize += (_, _) => { if (_playing) mciSendString("put " + _alias + " window at 0 0 " + _video.Width + " " + _video.Height, null, 0, IntPtr.Zero); };
@@ -45,7 +54,7 @@ internal sealed class MediaForm : Form
     private static ComboBox Choice(int width) => new() { Width = width, DropDownStyle = ComboBoxStyle.DropDownList };
     private CancellationToken Token => _operation?.Token ?? _stop.Token;
     private static FlowLayoutPanel Row(params Control[] controls) { var row = new FlowLayoutPanel { AutoSize = true }; row.Controls.AddRange(controls); return row; }
-    private Button Button(string label, Func<Task> action) { var b = new Button { Text = label, AutoSize = true }; b.Click += async (_, _) => await RunAsync(action); _actions.Add(b); return b; }
+    private Button Button(string label, Func<Task> action) { var b = new Button { Name = "MediaAction:" + label, Text = label, AutoSize = true }; b.Click += async (_, _) => await RunAsync(action); _actions.Add(b); return b; }
     private async Task RunAsync(Func<Task> action)
     {
         if (_busy || _closed) return; _busy = true; foreach (var b in _actions) b.Enabled = false; _operation = CancellationTokenSource.CreateLinkedTokenSource(_stop.Token);
@@ -59,7 +68,7 @@ internal sealed class MediaForm : Form
     private async Task CatalogAsync()
     {
         await _workspace.LoadCatalogAsync(Token); _model.Items.Clear(); _model.Items.AddRange(_workspace.SpeechModels.Cast<object>().ToArray()); if (_model.Items.Count > 0) _model.SelectedIndex = 0;
-        _asr.Items.Clear(); _asr.Items.AddRange(_workspace.TranscriptionModels.Cast<object>().ToArray()); if (_asr.Items.Count > 0) _asr.SelectedIndex = 0; _status.Text = "已读取服务端模型目录和实际朗读输入约束。";
+        _asr.Items.Clear(); _asr.Items.AddRange(_workspace.TranscriptionModels.Cast<object>().ToArray()); if (_asr.Items.Count > 0) _asr.SelectedIndex = 0; _status.Text = "已读取服务端模型目录和实际朗读输入约束。" + _workspace.SpeechStatus;
     }
     private void SelectModel()
     {
@@ -84,15 +93,15 @@ internal sealed class MediaForm : Form
     private Task PrepareAsync()
     {
         var model = _model.SelectedItem as SpeechModel ?? throw new MediaException("speech_model_unavailable");
-        if (_batch != null && _batch.States.Any(x => x != SpeechSegmentState.Ready) && MessageBox.Show(this, "新批次可能重复计费；已成功或未知片段不会跨批次去重。确认新建？", "建立新批次", MessageBoxButtons.OKCancel) != DialogResult.OK) return Task.CompletedTask;
-        _batch = new SpeechBatch(model.Plan(_text.Text, _segment.Checked), new SpeechOptions { Model = model.Model, Voice = _voice.SelectedItem as string, Format = _format.SelectedItem as string });
-        _status.Text = "已规划 " + _batch.Plan.Segments.Count + " 段，估算字符 " + _batch.Plan.EstimatedCharacters + "；每次按钮合成下一段。"; return Task.CompletedTask;
+        if (_workspace.Speech != null && _workspace.Speech.States.Any(x => x != SpeechSegmentState.Ready) && MessageBox.Show(this, "新批次可能重复计费；已成功或未知片段不会跨批次去重。确认新建？", "建立新批次", MessageBoxButtons.OKCancel) != DialogResult.OK) return Task.CompletedTask;
+        var batch = _workspace.PrepareSpeech(_text.Text, model, _voice.SelectedItem as string, _format.SelectedItem as string, _segment.Checked, true);
+        _status.Text = "已规划 " + batch.Plan.Segments.Count + " 段，估算字符 " + batch.Plan.EstimatedCharacters + "；每次按钮合成下一段。"; return Task.CompletedTask;
     }
     private async Task SpeakNextAsync()
     {
-        var batch = _batch ?? throw new MediaException("speech_batch_not_prepared"); if (batch.States.Any(x => x == SpeechSegmentState.Unknown)) throw new MediaException("speech_result_unknown_do_not_repeat");
+        var batch = _workspace.Speech ?? throw new MediaException("speech_batch_not_prepared"); if (batch.States.Any(x => x == SpeechSegmentState.Unknown)) throw new MediaException("speech_result_unknown_do_not_repeat");
         var index = batch.States.ToList().FindIndex(x => x == SpeechSegmentState.Ready); if (index < 0) { _status.Text = "全部片段已完成；预览不重复调用模型。"; return; }
-        var response = await batch.SpeakSegmentAsync(index, _workspace.Session.SpeakAsync, Token); _workspace.Add(response, "朗读段 " + (index + 1)); _status.Text = "已完成片段 " + (index + 1) + "/" + batch.Plan.Segments.Count;
+        await _workspace.SpeakNextAsync(Token); _status.Text = "已完成片段 " + (index + 1) + "/" + batch.Plan.Segments.Count;
     }
     private MediaItem Selected => _items.SelectedItem as MediaItem ?? throw new MediaException("media_selection_required");
     private async Task PreviewAsync()

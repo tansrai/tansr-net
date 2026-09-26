@@ -1,4 +1,5 @@
 using System.IO;
+using System.Globalization;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
@@ -6,7 +7,8 @@ using Tansr.Sdk.Sessions;
 namespace Tansr.Examples;
 
 /// <summary>
-/// 原生业务函数的 SDK1 clientTools 示例。仅处理本进程新建的会话；恢复会话没有耐久业务回执，故拒绝副作用。
+/// 原生业务函数的 SDK1 clientTools 示例。恢复时固定权威会话水位，只接手其后新签发的请求。
+/// 水位之前的未知副作用不重做；恢复历史不等于恢复了业务回执。
 /// 不冒充 SDK2 的持久 execution host。内存回执仅在当前宿主进程内去重。
 /// </summary>
 internal sealed class NativeToolHost : IDisposable
@@ -18,6 +20,9 @@ internal sealed class NativeToolHost : IDisposable
     private readonly object _gate = new();
     private readonly Dictionary<string, Call> _calls = new(StringComparer.Ordinal);
     private readonly Dictionary<string, NativeToolBinding> _bindings;
+    private readonly CancellationTokenSource _lifetime = new();
+    private long? _resumeBoundary;
+    private long _retiredThrough = -1;
     private bool _stopping;
 
     internal NativeToolHost(AgentSession session, string application,
@@ -25,6 +30,22 @@ internal sealed class NativeToolHost : IDisposable
     {
         _session = session; _application = application; _setTitle = setTitle; _report = report;
         _bindings = ValidateBindings(bindings).ToDictionary(x => x.Name, StringComparer.Ordinal);
+        Ready = session.Resumed ? InitializeResumeAsync(session.LastSequence) : Task.CompletedTask;
+        _ = Ready.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+    }
+
+    /// <summary>恢复宿主必须先完成这一次权威水位读取，再允许用户发送新一轮；不会自动重试或重建会话。</summary>
+    internal Task Ready { get; }
+    private async Task InitializeResumeAsync(long creationSequence)
+    {
+        var metadata = await _session.ReadMetadataAsync(_lifetime.Token).ConfigureAwait(false);
+        if (!metadata.IsLive) throw new InvalidOperationException("native_tool_resume_not_live");
+        lock (_gate)
+        {
+            _lifetime.Token.ThrowIfCancellationRequested();
+            _resumeBoundary = Math.Max(creationSequence, metadata.LastSequence);
+        }
     }
 
     internal static JsonElement Declarations
@@ -72,22 +93,36 @@ internal sealed class NativeToolHost : IDisposable
                 if (Text(data, "name") != Text(previous.Data, "name") || ArgumentText(data) != ArgumentText(previous.Data))
                 { Report("tool_request_conflict"); return; }
                 // 同一观察连接会丢弃重复 seq；重放仅重送已记录的原回执，不再调用委托。
-                if (previous.Receipt.HasValue && previous.Task.IsCompleted) previous.Task = SubmitAsync(id, previous.Receipt.Value, CancellationToken.None);
+                if (previous.Receipt.HasValue && previous.Task.IsCompleted) previous.Task = SubmitAsync(previous, previous.Receipt.Value, CancellationToken.None);
                 return;
             }
-            if (_calls.Count >= 256) { Report("native_tool_host_capacity: start a new session"); return; }
-            var call = new Call(id, data.Clone()); _calls[id] = call;
+            if (_calls.Count >= 256 && !RetireCompleted()) { Report("native_tool_host_capacity: pending_or_unconfirmed"); return; }
+            var sequence = TrySequence(item.Id, out var parsed) ? (long?)parsed : null;
+            var call = new Call(id, data.Clone(), sequence, sequence.HasValue && sequence.Value <= _retiredThrough); _calls[id] = call;
             call.Task = ExecuteAsync(call, Integer(item.Data, "ts"));
         }
+    }
+
+    private bool RetireCompleted()
+    {
+        var prior = _calls.Values.Where(x => x.Task.IsCompleted && x.ReceiptConfirmed && x.Sequence.HasValue).OrderBy(x => x.Sequence).FirstOrDefault();
+        if (prior == null) return false;
+        _calls.Remove(prior.Id); _retiredThrough = Math.Max(_retiredThrough, prior.Sequence!.Value); prior.Stop.Dispose(); return true;
     }
 
     private async Task ExecuteAsync(Call call, long? eventTime)
     {
         await Task.Yield();
         JsonElement receipt;
+        var rejectedPrior = false;
         try
         {
-            if (_session.Resumed) throw new InvalidOperationException("native_tool_host_requires_new_session");
+            await Ready.ConfigureAwait(false);
+            if (!call.Sequence.HasValue || call.Retired || _resumeBoundary.HasValue && call.Sequence.Value <= _resumeBoundary.Value)
+            {
+                rejectedPrior = true;
+                throw new InvalidOperationException("native_tool_prior_outcome_unknown");
+            }
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var deadline = Integer(call.Data, "deadlineAt"); var ttl = Integer(call.Data, "ttlMs");
             // 示例没有可信时钟校准：超过5秒偏差保守拒绝，不把重放TTL重新变成执行许可。
@@ -125,23 +160,30 @@ internal sealed class NativeToolHost : IDisposable
         catch (OperationCanceledException) { receipt = Receipt("native_tool_cancelled", true); }
         catch (Exception error) { receipt = Receipt(error is InvalidOperationException ? error.Message : "native_tool_failed", true); }
         lock (_gate) call.Receipt = receipt;
-        await SubmitAsync(call.Id, receipt, CancellationToken.None).ConfigureAwait(false);
+        await SubmitAsync(call, receipt, CancellationToken.None).ConfigureAwait(false);
+        // Old unknown requests never become executable on replay. Do not permanently consume
+        // the bounded ledger reserved for this host's new executions with historical rejections.
+        if (rejectedPrior) lock (_gate) { _calls.Remove(call.Id); call.Stop.Dispose(); }
     }
 
-    private async Task SubmitAsync(string id, JsonElement receipt, CancellationToken token)
+    private async Task SubmitAsync(Call call, JsonElement receipt, CancellationToken token)
     {
         try
         {
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token); deadline.CancelAfter(TimeSpan.FromSeconds(10));
-            await _session.SubmitToolResultAsync(id, receipt, deadline.Token).ConfigureAwait(false);
+            var result = await _session.SubmitToolResultAsync(call.Id, receipt, deadline.Token).ConfigureAwait(false);
+            if (!result.TryGetProperty("accepted", out var accepted) || accepted.ValueKind != JsonValueKind.True) throw new InvalidOperationException("invalid_tool_receipt_response");
+            lock (_gate) call.ReceiptConfirmed = true;
         }
+        catch (TansrHttpException error) when (error.StatusCode == 409 && error.Code == "call_already_resolved")
+        { lock (_gate) call.ReceiptConfirmed = true; }
         catch (Exception error) { Report("tool_receipt_unconfirmed:" + (error is TansrException sdk ? sdk.Code : error.GetType().Name)); }
     }
 
     internal async Task DrainAsync(CancellationToken token)
     {
         Task[] tasks;
-        lock (_gate) { _stopping = true; foreach (var call in _calls.Values) call.Stop.Cancel(); tasks = _calls.Values.Select(x => x.Task).ToArray(); }
+        lock (_gate) { _stopping = true; _lifetime.Cancel(); foreach (var call in _calls.Values) call.Stop.Cancel(); tasks = _calls.Values.Select(x => x.Task).Append(Ready).ToArray(); }
         var all = Task.WhenAll(tasks);
         var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using (token.Register(() => cancelled.TrySetResult(true)))
@@ -154,10 +196,17 @@ internal sealed class NativeToolHost : IDisposable
         lock (_gate)
         {
             _stopping = true;
+            _lifetime.Cancel();
             foreach (var call in _calls.Values) { call.Stop.Cancel(); if (call.Task.IsCompleted) call.Stop.Dispose(); }
         }
     }
     private void Report(string code) { try { _report(code); } catch { /* 宿主日志故障不得重跑工具。 */ } }
+    private static bool TrySequence(string? value, out long sequence)
+    {
+        sequence = 0;
+        return value != null && value.Length > 0 && (value.Length == 1 || value[0] != '0') &&
+            value.All(ch => ch >= '0' && ch <= '9') && long.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out sequence) && sequence <= 9007199254740991L;
+    }
     private static string ArgumentText(JsonElement data) => data.TryGetProperty("args", out var args) ? args.GetRawText() : "null";
     private static string? Text(JsonElement data, string key) => data.ValueKind == JsonValueKind.Object && data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
     private static long? Integer(JsonElement data, string key) => data.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out var number) ? number : null;
@@ -173,8 +222,11 @@ internal sealed class NativeToolHost : IDisposable
         }
         using var document = JsonDocument.Parse(buffer.ToArray()); return document.RootElement.Clone();
     }
-    private sealed class Call(string id, JsonElement data)
-    { internal readonly string Id = id; internal readonly JsonElement Data = data; internal readonly CancellationTokenSource Stop = new(); internal Task Task = System.Threading.Tasks.Task.CompletedTask; internal JsonElement? Receipt; }
+    private sealed class Call(string id, JsonElement data, long? sequence, bool retired)
+    {
+        internal readonly string Id = id; internal readonly JsonElement Data = data; internal readonly long? Sequence = sequence; internal readonly bool Retired = retired;
+        internal readonly CancellationTokenSource Stop = new(); internal Task Task = System.Threading.Tasks.Task.CompletedTask; internal JsonElement? Receipt; internal bool ReceiptConfirmed;
+    }
 }
 
 /// <summary>只由应用装配创建；声明不是从MCP发现结果生成的授权。</summary>

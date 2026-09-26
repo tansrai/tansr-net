@@ -6,7 +6,7 @@ WPF、WinForms 和 Console 共用公开 SDK。`inputs` 仍是原会话的同轮�
 
 三个示例默认把草稿和呈现保存到当前用户 `LocalApplicationData/Tansr/Examples/{wpf|winforms|console}.json`，可用 `TANSR_EXAMPLE_STATE_FILE` 改为应用管理的绝对路径。文件是明文本机应用数据，不含登录票据；应放在受限用户目录，不用于多用户共享。编辑与流呈现节流保存，成功发送、历史读取与正常关闭也保存；断电仍可能丢最后 750ms 的尚未保存编辑。单文件 32MiB 上限，超过时明确报错并保留内存文本，不裁剪后伪装完整。原插入在 POST 前同步写入并 flush。替换为同目录原子替换；文件指纹变化拒绝另一个实例的陈旧覆盖。保存失败会显示错误，窗口仍允许断开和退出。
 
-桌面有“本机离线回看”及“恢复本机草稿”；Console `--offline` 不联网就能读取，交互可用 `/offline`、`/draft`、`/draft <全文>`、`/draft-file <UTF8文件>` 和 `/send-draft`。`/asr` 的文本也进入同一草稿。保存的会话 ID 不自动授权恢复；Console 仍需显式 `TANSR_RESUME_SESSION`。这些文件是当时的应用呈现与历史响应副本，可能已经过期或撤权，从不作为模型历史、材料源或 SQLite archive 当前授权。公开 `SqliteArchiveHistory` 需要宿主另装当前可信 authority；该共享档案离线能力仍是缺口。
+桌面有“本机离线回看”及“恢复本机草稿”；Console `--offline` 不联网就能读取，交互可用 `/offline`、`/draft`、`/draft <全文>`、`/draft-file <UTF8文件>` 和 `/send-draft`。`/asr` 的文本也进入同一草稿。保存的会话 ID 不自动授权恢复；Console 仍需显式 `TANSR_RESUME_SESSION`。这些文件是当时的应用呈现与历史响应副本，可能已经过期或撤权，从不作为模型历史、材料源或 SQLite archive 当前授权。公开 `SqliteArchiveHistory` 保留可信 authority 边界；三个示例现另提供 `NativeOfflineStorageReader` 冷启动只读入口，使用仍有效的本地离线授权、原档案保留期权威或已知记忆出版摘要。不建立 Serve 连接、不同步或 ACK，不把旧备份当最新授权；见 [存储接入](../../doc/storage.md)。
 
 ## 提示词来源（只读）
 

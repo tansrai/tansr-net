@@ -1,0 +1,263 @@
+{
+  "format": "tansr-net-session-behavior-v1",
+  "sourceRevision": "e63c4e709d2086f9e7343cb764814ecce130e3df",
+  "purpose": "Same controlled HTTP replies consumed by the original Node session client and public C# client. Requests/no fallback are equal; the existing language-specific error codes are deliberately explicit.",
+  "vectors": [
+    {
+      "id": "sdk1-old-server",
+      "contract": "sdk1",
+      "discovery": {
+        "status": 404,
+        "body": "{}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": null,
+      "nodeError": null,
+      "requests": [
+        "POST /v2/sessions"
+      ]
+    },
+    {
+      "id": "sdk1-new-server",
+      "contract": "sdk1",
+      "discovery": {
+        "status": 404,
+        "body": "{}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": null,
+      "nodeError": null,
+      "requests": [
+        "POST /v2/sessions"
+      ]
+    },
+    {
+      "id": "sdk2-new-server",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": null,
+      "nodeError": null,
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1",
+        "POST /v3/sdk2/sessions"
+      ]
+    },
+    {
+      "id": "sdk2-old-server",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 404,
+        "body": "{\"error\":{\"code\":\"not_found\"}}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "not_found",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-unavailable",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "unsupported_capability",
+      "nodeError": "unsupported_capability",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-unauthorized",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 401,
+        "body": "{\"error\":{\"code\":\"unauthorized\",\"message\":\"synthetic-private-detail\"}}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "unauthorized",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-source-unavailable",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 503,
+        "body": "{\"error\":{\"code\":\"source_unavailable\"}}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "source_unavailable",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-corrupt-json",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{broken"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-unknown-contract",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"source-required\",\"contract\":\"sdk3\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-duplicate-contract",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-wrong-availability",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-extra-critical-field",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\",\"storage\":\"switch-to-server\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-network-failure",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "networkFailure": true
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "network_error",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    },
+    {
+      "id": "sdk2-wrong-create-family",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 200,
+        "body": "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "invalid_response",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1",
+        "POST /v3/sdk2/sessions"
+      ]
+    },
+    {
+      "id": "sdk2-discovery-wrong-success-status",
+      "contract": "sdk2-offload-v1",
+      "discovery": {
+        "status": 201,
+        "body": "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}"
+      },
+      "created": {
+        "status": 201,
+        "body": "{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"lastSeq\":0,\"resumed\":false,\"sessionId\":\"s\"}"
+      },
+      "netError": "invalid_response",
+      "nodeError": "capability_unconfirmed",
+      "requests": [
+        "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ]
+    }
+  ]
+}

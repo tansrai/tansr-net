@@ -36,11 +36,14 @@ public sealed class WindowsBusinessTool
 
 public sealed class WindowsBusinessToolContext
 {
-    internal WindowsBusinessToolContext(JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard)
-    { Operation = operation.Clone(); Workspace = workspace; GuardAsync = guard; }
+    internal WindowsBusinessToolContext(JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard,
+        Func<WindowsProcessRequest, CancellationToken, Task<WindowsProcessResult>> executeProcess, bool hasExecutionOutput)
+    { Operation = operation.Clone(); Workspace = workspace; GuardAsync = guard; ExecuteProcessAsync = executeProcess; HasExecutionOutput = hasExecutionOutput; }
     public JsonElement Operation { get; }
     public WindowsWorkspace Workspace { get; }
     public Func<CancellationToken, Task> GuardAsync { get; }
+    internal Func<WindowsProcessRequest, CancellationToken, Task<WindowsProcessResult>> ExecuteProcessAsync { get; }
+    internal bool HasExecutionOutput { get; }
 }
 
 public sealed class WindowsExecutionOutputFailure
@@ -178,7 +181,8 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 if (toolArgs.ValueKind != JsonValueKind.Object) throw new ExecutionRejectedException("EACCES");
                 var toolResult = tool.ContextualInvoke == null
                     ? await tool.Invoke(toolArgs, cancellationToken).ConfigureAwait(false)
-                    : await tool.ContextualInvoke(toolArgs, new WindowsBusinessToolContext(operation, workspace, guard), cancellationToken).ConfigureAwait(false);
+                    : await tool.ContextualInvoke(toolArgs, new WindowsBusinessToolContext(operation, workspace, guard,
+                        (process, token) => ExecuteProcessAsync(operation, process, guard, token), _executionOutput != null), cancellationToken).ConfigureAwait(false);
                 var text = toolResult.GetRawText();
                 if (System.Text.Encoding.UTF8.GetByteCount(text) > 32768) throw new InvalidDataException("业务工具结果超过合同限额。");
                 return Result(name, writer => writer.WriteString("resultJson", text));
@@ -190,6 +194,8 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 var processRequest = new WindowsProcessRequest(selected.TrustedExecutablePath, selected.Arguments,
                     () => workspace.AcquireProcessDirectory(Text(args, "cwd")))
                 {
+                    ExpectedExecutableSha256 = selected.ExpectedExecutableSha256,
+                    ValidateBeforeStart = selected.ValidateBeforeStart,
                     Timeout = TimeSpan.FromMilliseconds(args.GetProperty("timeoutMs").GetInt32()),
                     MaxOutputBytes = args.GetProperty("maxOutputBytes").GetInt32(),
                     ChunkBytes = selected.ChunkBytes,

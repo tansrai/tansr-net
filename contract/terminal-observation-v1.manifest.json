@@ -1,0 +1,21 @@
+{
+  "format": "tansr-net-observation-contract-lock-v1",
+  "protocol": "terminal-observation-v1",
+  "sourceRepository": "tansr-cli",
+  "sourceRevision": "e63c4e709d2086f9e7343cb764814ecce130e3df",
+  "sourceState": "Serve-authorized-additive-candidate-2026-09-27",
+  "files": [
+    {
+      "source": "doc/rfc/terminal-observation-v1.schema.json",
+      "snapshot": "contract/terminal-observation-v1.schema.json",
+      "bytes": 6484,
+      "sha256": "b6668463458e78b2cfe23baa72d9d9ac6263a248467dd8aeb60387fc2f67c28a"
+    },
+    {
+      "source": "doc/rfc/terminal-observation-v1.golden.json",
+      "snapshot": "contract/terminal-observation-v1.golden.json",
+      "bytes": 23320,
+      "sha256": "2148eb11fb4538736cd244b17e5ba135bc26919081105fd1018ff884ab364e1a"
+    }
+  ]
+}

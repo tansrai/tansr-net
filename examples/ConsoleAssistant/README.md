@@ -52,3 +52,6 @@ dotnet restore Tansr.Sdk.slnx --locked-mode
 `TANSR_MCP_EXE` 填批准后的绝对路径，工作目录须已存在且由宿主管理。SDK 在固定最终可执行文件句柄后核验摘要，不接受模型替换路径或参数。普通 apphost 的 EXE 哈希不认证旁边的 DLL；此智能体桥不接受 `TANSR_MCP_DLL` 参数，应使用经批准的单文件发布候选及受信安装目录。以上命令是复现入口，文档不表示已发布或已验证候选。
 
 同一原工具宿主负责调用去重、取消与原回执保存；SSE 不因 MCP 调用阻塞。断线或未知执行结果不自动重做。关闭/断开先等待 MCP Job 清理；失败保留明确清理未确认，仍允许用户显式断开退出。此入口只完成固定原生 MCP 工具闭环，不能代表任意MCP服务器管理、SDK2耐久设备/档案默认装配已完成。
+# 统一能力工作台
+
+`/workspace` 提供能力、任务、用量、分页历史及完整快照/cwd 操作；`/device-start`、`/device-allow`、`/device-deny` 接入与原生 UI 相同的受信终端设备；`/revoke-extensions` 撤销 Skills/MCP。完整配置见 [统一工作台说明](../Shared/native-workspace.md)。`--worker` 继续提供无 UI 的有界作业和显式授权政策。

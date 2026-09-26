@@ -1,15 +1,65 @@
 using System;
 using System.Collections.Generic;
+using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Client;
 
 public sealed partial class TansrClient
 {
+    internal async Task<JsonElement> ReadTerminalObservationAsync(string path, string definition, JsonElement originalScope, CancellationToken cancellationToken)
+    {
+        if (!path.StartsWith("/v3/terminal-observation/sessions/", StringComparison.Ordinal) || path.IndexOf('#') >= 0 ||
+            path.IndexOf('\\') >= 0 || System.Text.Encoding.UTF8.GetByteCount(path) > 8192 || definition != "ResourcesResponse" && definition != "CorrelationsResponse")
+            throw new TansrProtocolException("invalid_request");
+        using var cancellation = RequestCancellation(cancellationToken);
+        var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
+        void Check()
+        {
+            cancellation.Token.ThrowIfCancellationRequested(); transport.AssertCurrent(access);
+            if (!TerminalJson.Equal(originalScope, ReadExecutionScope())) throw new TansrProtocolException("context_changed");
+        }
+        Check();
+        using var response = await transport.SendAsync(HttpMethod.Get, path, access, null, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        Check(); SessionTransport.ExpectContent(response, "application/json");
+        var bytes = await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellation.Token).ConfigureAwait(false); Check();
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = TerminalObservationContract.Decode("ErrorResponse", bytes);
+            if (error.GetProperty("status").GetInt32() != (int)response.StatusCode) throw new TansrProtocolException("invalid_response");
+            throw new TansrHttpException((int)response.StatusCode, error.GetProperty("code").GetString()!, retryAction: error.GetProperty("retryAction").GetString());
+        }
+        if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
+        return TerminalObservationContract.Decode(definition, bytes);
+    }
+
+    // Checkpoint deletion is the original route's only 204 success. Do not parse an absent
+    // JSON body, accept a different successful status, or retry this mutation after loss.
+    internal async Task<JsonElement> DeleteCheckpointAsync(string path, CancellationToken cancellationToken)
+    {
+        using var cancellation = RequestCancellation(cancellationToken);
+        var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
+        await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
+        using var response = await transport.SendAsync(HttpMethod.Delete, Route(path), access, null,
+            "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+            await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);
+        if ((int)response.StatusCode != 204 ||
+            (await SessionTransport.ReadBodyAsync(response, 1, cancellation.Token).ConfigureAwait(false)).Length != 0)
+            throw new TansrProtocolException("invalid_response");
+        transport.AssertCurrent(access);
+        // Preserve the published Task<JsonElement> signature. JSON null denotes an empty
+        // response; no synthetic server receipt, request key or cleanup fact is invented.
+        using var empty = JsonDocument.Parse("null");
+        return empty.RootElement.Clone();
+    }
+
     private readonly object runGate = new object();
     private readonly HashSet<string> runningSessions = new HashSet<string>(StringComparer.Ordinal);
 

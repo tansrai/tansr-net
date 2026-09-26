@@ -79,14 +79,15 @@ internal static class NativeWorkspace
     internal static SafeFileHandle OpenDirectory(SafeFileHandle parent, string name, bool create = false, bool denyWrite = false)
         => Open(parent, name, true, create ? 2u : 1u, false, false, denyWrite);
 
-    internal static SafeFileHandle OpenFile(SafeFileHandle parent, string name, bool write = false, bool create = false, bool allowRename = false)
-        => Open(parent, name, false, create ? 2u : 1u, write, allowRename);
+    internal static SafeFileHandle OpenFile(SafeFileHandle parent, string name, bool write = false, bool create = false, bool allowRename = false, bool deleteOnClose = false)
+        => Open(parent, name, false, create ? 2u : 1u, write, allowRename, deleteOnClose: deleteOnClose);
 
     internal static SafeFileHandle OpenMetadata(SafeFileHandle parent, string name)
         => Open(parent, name, false, 1, false, false, false, true);
 
-    private static SafeFileHandle Open(SafeFileHandle parent, string name, bool directory, uint disposition, bool write, bool allowRename, bool denyDirectoryWrite = false, bool metadataOnly = false)
+    private static SafeFileHandle Open(SafeFileHandle parent, string name, bool directory, uint disposition, bool write, bool allowRename, bool denyDirectoryWrite = false, bool metadataOnly = false, bool deleteOnClose = false)
     {
+        if (deleteOnClose && (!write || directory || disposition != 2)) throw new ArgumentException("Temporary files must be newly created with delete access.");
         var nameBuffer = Marshal.StringToHGlobalUni(name);
         var unicode = new UnicodeString { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)(name.Length * 2)), Buffer = nameBuffer };
         var unicodeBuffer = Marshal.AllocHGlobal(Marshal.SizeOf<UnicodeString>());
@@ -98,7 +99,7 @@ internal static class NativeWorkspace
             uint access = (metadataOnly ? 0u : 1u) | ReadAttributes | Synchronize | 0x20000 | (write ? 2u | Delete : 0u);
             uint share = metadataOnly ? 7u : directory ? (denyDirectoryWrite ? 1u : 3u) : 1u | (allowRename ? 4u : 0u);
             int status = NtCreateFile(out var handle, access, ref attributes, out _, IntPtr.Zero, directory ? DirectoryAttribute : 0x80,
-                share, disposition, Synchronous | OpenReparsePoint | (metadataOnly ? 0u : directory ? 1u : 0x40u), IntPtr.Zero, 0);
+                share, disposition, Synchronous | OpenReparsePoint | (metadataOnly ? 0u : directory ? 1u : 0x40u) | (deleteOnClose ? 0x1000u : 0u), IntPtr.Zero, 0);
             if (status < 0) { handle?.Dispose(); ThrowStatus(status); }
             try { if (!metadataOnly) Validate(handle!, directory); return handle!; }
             catch { handle!.Dispose(); throw; }

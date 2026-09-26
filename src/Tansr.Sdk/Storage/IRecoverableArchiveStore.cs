@@ -2,6 +2,12 @@ using System.Text.Json;
 
 namespace Tansr.Sdk.Storage;
 
+/// <summary>多文件族后端可选的当前实例能力；不改变既有 IRecoverableArchiveStore 实现契约。</summary>
+public interface IArchiveRecoveryAvailability
+{
+    bool AcknowledgementRecoveryAvailable { get; }
+}
+
 /// <summary>原恢复接收器的加法能力。旧 IArchiveStore 无需实现；恢复需显式新版介质。</summary>
 public interface IRecoverableArchiveStore : IArchiveStore
 {

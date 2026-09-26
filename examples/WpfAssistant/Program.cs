@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Threading;
 using Microsoft.Win32;
@@ -51,9 +52,14 @@ internal sealed class AssistantWindow : Window
     private readonly DispatcherTimer _saveTimer = new() { Interval = TimeSpan.FromMilliseconds(750) };
     private TurnInputEditor? _inputEditor;
     private ExampleSessionControls? _controls;
+    private ExampleSessionWorkspace? _workspace;
+    private readonly List<Window> _sessionWindows = new();
     private string? _localSaveFailure;
     private int _draftRevision;
     private NativeMemoryDeviceHost? _memoryDevice;
+    private NativeTerminalDeviceHost? _terminalDevice;
+    private ExampleLocalStorage? _storage;
+    private readonly TextBox _terminalOutput = new() { IsReadOnly = true, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.Wrap };
     private string? _closeFailure;
     private bool _busy, _closing, _closed;
 
@@ -73,15 +79,18 @@ internal sealed class AssistantWindow : Window
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
         top.Children.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync), Button("提示词来源", ShowApplicationPromptAsync)));
+        top.Children.Add(Row(Button("会话工作台 / 能力 / Task", OpenWorkspaceAsync), Button("撤销本机 Skills / MCP", RevokeExtensionsAsync)));
         top.Children.Add(Row(Button("启动设备记忆宿主", StartMemoryDeviceAsync, false), Button("设备记忆状态", MemoryDeviceStatusAsync, false), Button("停止设备（不保证远端排空）", StopMemoryDeviceAsync, false)));
+        top.Children.Add(Row(Button("连接本机设备工具", StartTerminalDeviceAsync), Button("本机工具实时输出", ShowTerminalOutputAsync), Button("停止本机设备工具", StopTerminalDeviceAsync, false)));
         top.Children.Add(new TextBlock
         {
-            Text = "已接通：会话流、图片输入、取消、审批/提问、历史与快照。动态切模/思考、完整记忆管理、设备工具绑定与完整记忆管理仍需宿主可信配置。",
+            Text = "会话、同轮输入、审批/提问、上下文、快照及媒体使用同一公开 SDK。配置/记忆采用显式 preview；设备工具、Skills、MCP 和子代理由可信宿主装配授权。",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 7),
         });
         top.Children.Add(Row(Button("本机离线回看", ShowLocalAsync, false), Button("恢复本机草稿", RestoreLocalDraftAsync, false),
             Button("保存本机草稿", () => { SaveLocal(); _status.Text = "草稿和呈现已保存在本机用户目录（明文，不含票据）。"; return Task.CompletedTask; }, false)));
+        top.Children.Add(Row(Button("离线授权档案", () => ReadOfflineStorageAsync(false), false), Button("离线授权记忆", () => ReadOfflineStorageAsync(true), false)));
         var bottom = new StackPanel(); DockPanel.SetDock(bottom, Dock.Bottom); layout.Children.Add(bottom);
         bottom.Children.Add(_draft);
         bottom.Children.Add(Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
@@ -108,6 +117,14 @@ internal sealed class AssistantWindow : Window
             _status.Text = "离线草稿已载入；本机展示不代表当前服务端授权。票据仍需重新输入。";
         }
         catch (Exception error) { _status.Text = "本机草稿未载入：" + ErrorText(error); }
+        if (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") is { Length: > 0 } endpoint) _endpoint.Text = endpoint;
+        if (Environment.GetEnvironmentVariable("TANSR_SESSION_TOKEN") is { Length: > 0 } token) _token.Password = token;
+        _loopback.IsChecked = Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1";
+        foreach (var entry in new (DependencyObject Control, string Id)[] { (_endpoint, "ServeEndpoint"), (_token, "SessionToken"), (_resume, "ResumeSession"), (_model, "SessionModel"), (_loopback, "AllowLoopback"), (_draft, "MessageDraft"), (_conversation, "Conversation"), (_status, "ConnectionStatus"), (_requests, "PendingRequests") })
+            AutomationProperties.SetAutomationId(entry.Control, entry.Id);
+        AutomationProperties.SetAutomationId(this, "TansrAssistant");
+        AutomationProperties.SetAutomationId(_textMode, "TextDeliveryMode");
+        AutomationProperties.SetAutomationId(_thinkingMode, "ThinkingDeliveryMode");
         Closing += OnClosing;
         SetEnabled();
     }
@@ -119,6 +136,7 @@ internal sealed class AssistantWindow : Window
     private Button Button(string text, Func<Task> action, bool needsSession = true)
     {
         var button = new Button { Content = text, Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(3) };
+        AutomationProperties.SetAutomationId(button, text);
         if (needsSession) _sessionButtons.Add(button);
         button.Click += async (_, _) => await RunAsync(action);
         return button;
@@ -149,23 +167,27 @@ internal sealed class AssistantWindow : Window
         var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.IsChecked == true);
         var client = connection.Client;
         AgentSession session;
-        try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.GetDeclarations(connection.NativeTools) : null }); }
+        try { session = await client.CreateSessionAsync(ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools))); }
         catch { await connection.CloseAsync(); throw; }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         var savedInput = _local.Snapshot.Endpoint == _endpoint.Text ? _local.Snapshot.Input : null;
         _inputEditor = new TurnInputEditor(session, savedInput, _local.SaveInput);
-        _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, _endpoint.Text, session.Id, _local.PathName);
+        _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, _endpoint.Text, session.Id, _local.PathName, connection.Profile, connection.Contract);
         _lifetime = new CancellationTokenSource();
         _nativeTools = new NativeToolHost(session, "Tansr.WPF", async (title, ct) =>
         {
             await Dispatcher.InvokeAsync(() => { ct.ThrowIfCancellationRequested(); Title = title; }, DispatcherPriority.Normal, ct);
         }, code => Dispatcher.BeginInvoke(new Action(() => _status.Text = code)), connection.NativeTools);
+        try { await _nativeTools.Ready; }
+        catch { await DetachAsync(); throw; }
         _view = new SessionView(new SessionViewOptions
         {
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
             ThinkingDelivery = (ThinkingDeliveryMode)_thinkingMode.SelectedIndex,
         });
         _subscription = _view.Subscribe(Render, new DispatcherSynchronizationContext(Dispatcher));
+        _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
+        _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
         _observation = ObserveAsync(session, _view, _lifetime.Token);
         _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。";
         TrySaveForExit();
@@ -173,7 +195,17 @@ internal sealed class AssistantWindow : Window
 
     private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
     {
-        try { await session.ObserveAsync((item, _) => { view.Apply(item); _nativeTools?.HandleEvent(item); return Task.CompletedTask; }, token); }
+        var storage = _storage;
+        try
+        {
+            await session.ObserveAsync(async (item, ct) =>
+        {
+            view.Apply(item); _nativeTools?.HandleEvent(item);
+            try { if (storage != null) await storage.ObserveAsync(item, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch (Exception error) { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); }); }
+        }, token);
+        }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error) { view.MarkSourceFailure("event_source", ErrorText(error)); }
     }
@@ -242,6 +274,16 @@ internal sealed class AssistantWindow : Window
         return Task.CompletedTask;
     }
     private Task RestoreLocalDraftAsync() { _draft.Text = _local.Snapshot.Draft; _status.Text = "已恢复本机草稿；尚未发送。"; return Task.CompletedTask; }
+    private async Task ReadOfflineStorageAsync(bool memory)
+    {
+        var picker = new OpenFileDialog { Title = "选择离线存储受信配置（只读、不连接 Serve）", Filter = "受信配置|*.json" };
+        if (picker.ShowDialog(this) != true) return;
+        var value = memory ? await NativeOfflineStorageReader.ReadMemoryAsync(picker.FileName) : await NativeOfflineStorageReader.ReadArchiveAsync(picker.FileName);
+        var output = new TextBox { Text = value, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+        AutomationProperties.SetAutomationId(output, "OfflineStorageResult");
+        var window = new Window { Owner = this, Title = "离线授权存储（已知本地授权，不代表实时服务端状态）", Width = 850, Height = 600, Content = output };
+        AutomationProperties.SetAutomationId(window, "OfflineStorage"); window.Show();
+    }
     private async Task InsertAsync()
     {
         var text = _draft.Text; var revision = _draftRevision; SaveLocal();
@@ -251,12 +293,19 @@ internal sealed class AssistantWindow : Window
     }
     private async Task QueryInputAsync() => _status.Text = await _inputEditor!.QueryAsync();
     private async Task RetryInputAsync() => _status.Text = await _inputEditor!.RetryOriginalAsync();
-    private Task OpenControlsAsync() { new SessionControlsWindow(_controls) { Owner = this }.Show(); return Task.CompletedTask; }
+    private Task OpenControlsAsync() { ShowSessionWindow(new SessionControlsWindow(_controls, _lifetime!.Token)); return Task.CompletedTask; }
+    private Task OpenWorkspaceAsync() { ShowSessionWindow(new WorkspaceWindow(_workspace!, _lifetime!.Token)); return Task.CompletedTask; }
+    private async Task RevokeExtensionsAsync() { await _connection!.RevokeExtensionsAsync(); _status.Text = "本机 Skills/MCP 已撤销；已声明工具后续调用将拒绝。重新装配需要新连接。"; }
+    private void ShowSessionWindow(Window window)
+    { window.Owner = this; _sessionWindows.Add(window); window.Closed += (_, _) => _sessionWindows.Remove(window); window.Show(); }
+    private void CloseSessionWindows() { foreach (var window in _sessionWindows.ToArray()) window.Close(); _workspace = null; }
     private async Task StartMemoryDeviceAsync()
     {
         if (_memoryDevice != null) throw new InvalidOperationException("memory_device_already_started");
         var picker = new OpenFileDialog { Title = "选择宿主受信设备记忆配置", Filter = "受信配置|*.json" };
         if (picker.ShowDialog(this) != true) return;
+        if (_terminalDevice != null && (await NativeMemoryDeviceConfiguration.LoadAsync(picker.FileName)).SessionId == _session?.Id)
+            throw new InvalidOperationException("同一会话请在本机设备配置中加入 publication；文件、Shell 和自动记忆共用同一绑定。请先停止旧设备，再重新装配统一配置。");
         _memoryDevice = await NativeMemoryDeviceHost.StartAsync(picker.FileName);
         _ = ObserveMemoryDeviceAsync(_memoryDevice);
         _status.Text = await _memoryDevice.ReadStatusAsync();
@@ -273,6 +322,55 @@ internal sealed class AssistantWindow : Window
         try { await host.StopAsync(); _status.Text = "本机设备与存储已收尾；没有关闭远端会话，也不证明远端记忆已排空。"; }
         finally { _memoryDevice = null; }
     }
+
+    private async Task StartTerminalDeviceAsync()
+    {
+        if (_terminalDevice != null) throw new InvalidOperationException("terminal_device_already_started");
+        if (_memoryDevice?.SessionId == _session?.Id) throw new InvalidOperationException("请先停止独立记忆设备，再使用含 publication 的统一设备配置，避免替换原会话绑定。");
+        var picker = new OpenFileDialog { Title = "选择本机会话受信设备配置", Filter = "受信配置|*.json" };
+        if (picker.ShowDialog(this) != true) return;
+        var session = _session!;
+        _terminalDevice = await NativeTerminalDeviceHost.StartAsync(picker.FileName, session.Id, _connection!.Endpoint,
+            ApproveDeviceAsync, text => Dispatcher.BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) AppendTerminalOutput(text); })), _lifetime!.Token, _connection.Client, _connection.Contract);
+        _status.Text = _terminalDevice.Status; _ = WatchTerminalDeviceAsync(_terminalDevice);
+    }
+    private Task<bool> ApproveDeviceAsync(string description, CancellationToken ct)
+    {
+        var response = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (ct.IsCancellationRequested) { response.TrySetCanceled(); return; }
+            var dialog = new Window { Title = "本机设备操作批准", Width = 680, Height = 430 };
+            AutomationProperties.SetAutomationId(dialog, "DeviceApproval");
+            var panel = new DockPanel { Margin = new Thickness(12) }; dialog.Content = panel;
+            var row = new WrapPanel(); DockPanel.SetDock(row, Dock.Bottom); panel.Children.Add(row);
+            panel.Children.Add(new TextBox { Text = description, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
+            foreach (var allowed in new[] { true, false })
+            {
+                var button = new Button { Content = allowed ? "批准本机操作" : "拒绝本机操作", Margin = new Thickness(5), Padding = new Thickness(8) };
+                AutomationProperties.SetAutomationId(button, allowed ? "DeviceAllow" : "DeviceDeny");
+                button.Click += (_, _) => { response.TrySetResult(allowed && !ct.IsCancellationRequested); dialog.Close(); }; row.Children.Add(button);
+            }
+            CancellationTokenRegistration registration = default;
+            dialog.Closed += (_, _) => { registration.Dispose(); response.TrySetResult(false); };
+            ShowSessionWindow(dialog);
+            registration = ct.Register(() => Dispatcher.BeginInvoke(new Action(() => { response.TrySetCanceled(); dialog.Close(); })));
+        }));
+        return response.Task;
+    }
+    private async Task WatchTerminalDeviceAsync(NativeTerminalDeviceHost device)
+    { try { await device.Completion; } catch (Exception error) { if (ReferenceEquals(_terminalDevice, device)) _status.Text = "设备运行失败：" + ErrorText(error); } }
+    private void AppendTerminalOutput(string text)
+    { if (_terminalOutput.Text.Length > 65536) _terminalOutput.Text = "[较早呈现已截断，请按原操作查账]\n" + _terminalOutput.Text.Substring(_terminalOutput.Text.Length - 32768); _terminalOutput.AppendText(text + "\n"); _terminalOutput.ScrollToEnd(); }
+    private Task ShowTerminalOutputAsync()
+    {
+        if (_terminalOutput.Parent != null) return Task.CompletedTask;
+        var window = new Window { Title = "本机工具实时输出（Serve 权威流）", Width = 850, Height = 560, Content = _terminalOutput };
+        AutomationProperties.SetAutomationId(_terminalOutput, "TerminalOutput");
+        window.Closed += (_, _) => window.Content = null; ShowSessionWindow(window); return Task.CompletedTask;
+    }
+    private async Task StopTerminalDeviceAsync()
+    { var device = _terminalDevice; if (device == null) return; await device.StopAsync(); _terminalDevice = null; _status.Text = "本机设备已停止；远端会话未删除。"; }
 
     private void RenderRequest()
     {
@@ -346,27 +444,38 @@ internal sealed class AssistantWindow : Window
         TrySaveForExit();
         if (_session == null) return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        if (_storage != null) await _storage.FlushAsync(timeout.Token);
         try { await _session.CloseAsync(timeout.Token); }
         catch (Exception error) { _closeFailure = ErrorText(error); throw; }
+        var settled = _connection?.Observation == null ? null : await _connection.Observation.WaitForResourcesAsync(_session.Id, TimeSpan.FromSeconds(10), sessionContract: _connection.Contract, cancellationToken: timeout.Token);
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
+        await StopTerminalDeviceAsync();
         _lifetime!.Cancel();
+        CloseSessionWindows();
         if (_observation != null) await _observation;
+        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); } _storage = null;
         _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
         _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
         if (_connection != null) await _connection.CloseAsync(); _connection = null;
         _lifetime?.Dispose(); _lifetime = null;
-        _session = null; _client = null; _view = null; _controls = null; _status.Text = "会话关闭请求已确认；未删除历史。" + _localSaveFailure;
+        _session = null; _client = null; _view = null; _controls = null; _status.Text = (settled?.Completed == true ? "核心资源已确认排空；未删除历史。" : "会话关闭请求已受理；旧合同未提供远端排空证明，未删除历史。") + _localSaveFailure;
     }
 
     private async Task DetachAsync()
     {
         TrySaveForExit();
         var ownedLocalServe = _connection?.OwnsLocalServe == true;
+        using var storageTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try { if (_storage != null) await _storage.FlushAsync(storageTimeout.Token); }
+        catch (Exception error) { _localSaveFailure = " 本地上下文镜像未确认：" + ErrorText(error); }
         // 不调用 interrupt/close/delete：明确释放本机观察和宿主资源，远端状态仍须以后查询。
         _lifetime?.Cancel();
+        CloseSessionWindows();
         if (_observation != null) await _observation;
+        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); } _storage = null;
         string? cleanupFailure = null;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        try { await StopTerminalDeviceAsync(); } catch (Exception error) { cleanupFailure = ErrorText(error); }
         try { if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token); }
         catch (Exception error) { cleanupFailure = ErrorText(error); }
         _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
@@ -408,6 +517,7 @@ internal sealed class AssistantWindow : Window
         internal QuestionEditor(JsonElement question)
         {
             _id = Get(question, "id"); _multiple = question.TryGetProperty("allowMultiple", out var multiple) && multiple.ValueKind == JsonValueKind.True;
+            AutomationProperties.SetAutomationId(_free, "QuestionAnswer_" + _id);
             Panel.Children.Add(new TextBlock { Text = Get(question, "prompt"), TextWrapping = TextWrapping.Wrap });
             foreach (var option in question.GetProperty("options").EnumerateArray())
             {

@@ -63,7 +63,8 @@ public sealed class WindowsProcessExecutor
         using var directory = request.AcquireWorkingDirectory() ?? throw new InvalidOperationException("The working directory lease is missing.");
         directory.ValidateForExecution();
         ValidateLocalAbsolutePath(directory.DirectoryPath, false);
-        using var process = NativeProcessLaunch.Start(options.Executable, options.Arguments, directory.DirectoryPath, options.Environment);
+        using var process = NativeProcessLaunch.Start(options.Executable, options.Arguments, directory.DirectoryPath, options.Environment,
+            options.ExpectedExecutableSha256, cancellationToken, options.ValidateBeforeStart);
         if (!process.Started)
         {
             return new WindowsProcessResult(process.CleanupConfirmed ? WindowsProcessTermination.StartFailed : WindowsProcessTermination.Unknown,
@@ -293,6 +294,10 @@ public sealed class WindowsProcessExecutor
             }
 
             Executable = request.TrustedExecutablePath;
+            if (request.ExpectedExecutableSha256 != null && (request.ExpectedExecutableSha256.Length != 64 ||
+                request.ExpectedExecutableSha256.Any(value => !(value >= '0' && value <= '9' || value >= 'a' && value <= 'f'))))
+                throw new ArgumentException("An expected executable SHA256 must be 64 lowercase hexadecimal characters.", nameof(request));
+            ExpectedExecutableSha256 = request.ExpectedExecutableSha256;
             var arguments = new string[request.Arguments.Count];
             for (var index = 0; index < arguments.Length; index++)
             {
@@ -310,9 +315,11 @@ public sealed class WindowsProcessExecutor
             Started = request.Started;
             DrainAfterOutputLimit = request.DrainAfterOutputLimit;
             OutputTruncated = request.OutputTruncated;
+            ValidateBeforeStart = request.ValidateBeforeStart;
         }
 
         internal string Executable { get; }
+        internal string? ExpectedExecutableSha256 { get; }
         internal IReadOnlyList<string> Arguments { get; }
         internal IDictionary<string, string> Environment { get; }
         internal TimeSpan Timeout { get; }
@@ -324,6 +331,7 @@ public sealed class WindowsProcessExecutor
         internal Action<int>? Started { get; }
         internal bool DrainAfterOutputLimit { get; }
         internal Action? OutputTruncated { get; }
+        internal Action? ValidateBeforeStart { get; }
     }
 
     private sealed class OutputCapture : IDisposable
@@ -499,10 +507,11 @@ public sealed class WindowsProcessExecutor
         {
             lock (gate)
             {
+                var stdoutBytes = stdout.ToArray(); var stderrBytes = stderr.ToArray();
                 return new WindowsProcessResult(termination, requested, processId, exitCode, true, cleanupConfirmed,
                     pumpsComplete && !stopped.HasValue && !deliveryFailed && !outputTruncated,
-                    Utf8.GetString(stdout.ToArray()), Utf8.GetString(stderr.ToArray()), observed, error,
-                    consumerComplete && lastCallback.IsCompleted);
+                    Utf8.GetString(stdoutBytes), Utf8.GetString(stderrBytes), observed, error,
+                    consumerComplete && lastCallback.IsCompleted, stdoutBytes, stderrBytes);
             }
         }
 

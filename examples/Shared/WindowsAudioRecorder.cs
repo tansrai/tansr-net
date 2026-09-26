@@ -47,6 +47,12 @@ internal sealed class WindowsAudioRecorder : IDisposable
                 Drain(true);
                 await Task.Delay(20, _stop.Token).ConfigureAwait(false);
             }
+            if (LimitReached)
+            {
+                // 到帽不仅停止复制：实际停掉麦克风设备。外部 StopDevice 等待本任务后再排空/释放。
+                Check(waveInStop(_device), "recording_stop_failed");
+                Check(waveInReset(_device), "recording_reset_failed");
+            }
         }
         catch (OperationCanceledException) when (_stop.IsCancellationRequested) { }
         catch { _failure = "recording_capture_failed"; }

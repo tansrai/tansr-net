@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
@@ -26,9 +27,11 @@ internal sealed class SessionTransport : IDisposable
     private readonly bool ownsClient;
     private readonly Func<CancellationToken, Task<string>> tokens;
     private readonly Func<string>? principalProvider;
+    private readonly IReadOnlyDictionary<string, string> additionalHeaders;
     private readonly object principalGate = new object();
     private string? principal;
     private bool principalBound;
+    internal Uri Origin => origin;
 
     internal SessionTransport(TansrClientOptions options, HttpClient? injected, bool ownsInjected = false)
     {
@@ -43,6 +46,7 @@ internal sealed class SessionTransport : IDisposable
         origin = new Uri(uri.AbsoluteUri);
         tokens = options.TokenProvider ?? throw new ArgumentException("TokenProvider is required.", nameof(options));
         principalProvider = options.PrincipalProvider;
+        additionalHeaders = RequestHeaderSnapshot.Copy(options.AdditionalRequestHeaders);
         if ((options.SessionContract == SessionContract.Sdk2OffloadV1 || options.ExecutionScopeProvider is not null) && principalProvider is null)
             throw new ArgumentException("SDK2 requires a trusted PrincipalProvider.", nameof(options));
         ownsClient = injected is null || ownsInjected;
@@ -102,6 +106,7 @@ internal sealed class SessionTransport : IDisposable
         if (!SameOrigin(target)) throw new TansrProtocolException("invalid_request");
         using var request = new HttpRequestMessage(method, target);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access.Token);
+        foreach (var header in additionalHeaders) request.Headers.Add(header.Key, header.Value);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(accept));
         request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
         if (lastEventId is not null) request.Headers.Add("Last-Event-ID", lastEventId);

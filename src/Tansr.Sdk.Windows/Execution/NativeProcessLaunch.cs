@@ -4,7 +4,9 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using Microsoft.Win32.SafeHandles;
 
 namespace Tansr.Sdk.Windows.Execution;
@@ -34,13 +36,16 @@ internal sealed class NativeProcessLaunch : IDisposable
 
     internal bool CleanupConfirmed { get; private set; } = true;
 
-    internal static NativeProcessLaunch Start(string executable, IReadOnlyList<string> arguments, string directory, IDictionary<string, string> environment)
+    internal static NativeProcessLaunch Start(string executable, IReadOnlyList<string> arguments, string directory, IDictionary<string, string> environment,
+        string? expectedExecutableSha256 = null, CancellationToken cancellation = default, Action? validateBeforeStart = null)
     {
         var launch = new NativeProcessLaunch();
         try
         {
             launch.PinExecutable(executable);
-            launch.StartCore(executable, arguments, directory, environment);
+            if (expectedExecutableSha256 != null) VerifyExecutableDigest(launch.executablePins[launch.executablePins.Count - 1], expectedExecutableSha256, cancellation);
+            cancellation.ThrowIfCancellationRequested();
+            launch.StartCore(executable, arguments, directory, environment, () => { cancellation.ThrowIfCancellationRequested(); validateBeforeStart?.Invoke(); });
             return launch;
         }
         catch (Win32Exception error)
@@ -61,7 +66,7 @@ internal sealed class NativeProcessLaunch : IDisposable
         }
     }
 
-    private void StartCore(string executable, IReadOnlyList<string> arguments, string directory, IDictionary<string, string> environment)
+    private void StartCore(string executable, IReadOnlyList<string> arguments, string directory, IDictionary<string, string> environment, Action validateBeforeStart)
     {
         Job = new NativeProcessHandle(NativeProcessMethods.CreateJobObjectW(IntPtr.Zero, null));
         if (Job.IsInvalid)
@@ -142,6 +147,7 @@ internal sealed class NativeProcessLaunch : IDisposable
             environmentBlock = Marshal.StringToHGlobalUni(environmentText);
             var flags = NativeProcessMethods.Suspended | NativeProcessMethods.NoWindow |
                 NativeProcessMethods.UnicodeEnvironment | NativeProcessMethods.ExtendedStartupInfo;
+            validateBeforeStart();
             if (!NativeProcessMethods.CreateProcessW(executable, BuildCommandLine(executable, arguments), IntPtr.Zero, IntPtr.Zero,
                 true, flags, environmentBlock, directory, ref startup, out var information))
             {
@@ -227,6 +233,27 @@ internal sealed class NativeProcessLaunch : IDisposable
             current = Path.Combine(current, parts[index]);
             PinPath(current, index != parts.Length - 1);
         }
+    }
+
+    private static void VerifyExecutableDigest(SafeFileHandle file, string expected, CancellationToken cancellation)
+    {
+        // 包装同一固定句柄且不拥有它；当前 launch 持有原句柄直到验证、启动及运行全部结束。
+        using var borrowed = new SafeFileHandle(file.DangerousGetHandle(), ownsHandle: false);
+        using var stream = new FileStream(borrowed, FileAccess.Read, 65536, false);
+        using var hash = SHA256.Create(); var buffer = new byte[65536];
+        try
+        {
+            while (true)
+            {
+                cancellation.ThrowIfCancellationRequested();
+                var count = stream.Read(buffer, 0, buffer.Length); if (count == 0) break;
+                hash.TransformBlock(buffer, 0, count, buffer, 0);
+            }
+            hash.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+            if (!string.Equals(BitConverter.ToString(hash.Hash!).Replace("-", "").ToLowerInvariant(), expected, StringComparison.Ordinal))
+                throw new WindowsWorkspaceException("executable_digest_mismatch");
+        }
+        finally { Array.Clear(buffer, 0, buffer.Length); GC.KeepAlive(file); }
     }
 
     private void PinPath(string path, bool directory)

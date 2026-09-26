@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -13,6 +14,8 @@ public sealed class TansrClientOptions
 {
     public Uri BaseUri { get; set; } = null!;
     public Func<CancellationToken, Task<string>> TokenProvider { get; set; } = null!;
+    /// <summary>开发者显式配置的附加 x- 认证头；构造客户端时复制，不替代 Bearer，不从模型或聊天输入读取。</summary>
+    public IReadOnlyDictionary<string, string>? AdditionalRequestHeaders { get; set; }
     /// <summary>可信宿主提供稳定应用/用户身份；不以票据文本或未经核验的 JWT 推断身份。</summary>
     public Func<string>? PrincipalProvider { get; set; }
     /// <summary>执行扩展使用可信宿主完整 scope，不从终端自报或票据文本推导。</summary>

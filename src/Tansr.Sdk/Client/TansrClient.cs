@@ -63,7 +63,18 @@ public sealed partial class TansrClient : IDisposable
     {
         using var cancellation = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
-        return await DiscoverAsync(access, cancellation.Token).ConfigureAwait(false);
+        // Explicit refresh is authoritative for later SDK2 requests. Serialize it with automatic
+        // discovery and revoke the cached decision before observing a possibly failed response.
+        await discoveryGate.WaitAsync(cancellation.Token).ConfigureAwait(false);
+        try
+        {
+            discoveredToken = null;
+            var value = await DiscoverAsync(access, cancellation.Token).ConfigureAwait(false);
+            transport.AssertCurrent(access);
+            discoveredToken = access.Token;
+            return value;
+        }
+        finally { discoveryGate.Release(); }
     }
 
     private async Task<JsonElement> DiscoverAsync(SessionAccess access, CancellationToken cancellationToken)
@@ -71,6 +82,7 @@ public sealed partial class TansrClient : IDisposable
         using var response = await transport.SendAsync(HttpMethod.Get, "/v3/sdk2/session-capabilities?protocol=sdk2-ext-v1", access,
             null, "application/json", null, null, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellationToken).ConfigureAwait(false);
+        if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
         var value = SessionJson.Control(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellationToken).ConfigureAwait(false), WireJson.MaximumControlBytes);
         if (value.ValueKind != JsonValueKind.Object || SessionJson.String(value, "protocol") != "sdk2-ext-v1" ||

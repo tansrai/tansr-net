@@ -56,8 +56,9 @@ public static class MediaArtifactParser
         else if (!data.TryGetProperty("images", out _) && data.TryGetProperty("videos", out var videos) && !HasMaterial(videos)) return null;
         else if (!data.TryGetProperty("images", out _) && !data.TryGetProperty("videos", out _) && data.TryGetProperty("audio", out var audioCheck) &&
             string.IsNullOrEmpty(Text(audioCheck, "url")) && string.IsNullOrEmpty(Text(audioCheck, "b64"))) return null;
-        if (HasStringUrl(data, "images", out var imageList)) return UrlArtifact(data, model, MediaKind.Image, imageList);
-        if (HasStringUrl(data, "videos", out var videoList)) return UrlArtifact(data, model, MediaKind.Video, videoList);
+        // 已生成但只有服务端路径的产物仍有可见状态；不能映射成本机文件，也不能掉入后面的媒体族。
+        if (data.TryGetProperty("images", out var imageList)) return UrlArtifact(data, model, MediaKind.Image, imageList);
+        if (data.TryGetProperty("videos", out var videoList)) return UrlArtifact(data, model, MediaKind.Video, videoList);
         if (data.TryGetProperty("audio", out var audio) && audio.ValueKind == JsonValueKind.Object && Text(audio, "mime") is { } mime)
         {
             var b64 = Text(audio, "b64"); var url = Text(audio, "url");
@@ -135,7 +136,6 @@ public static class MediaArtifactParser
     }
     private static bool HasError(JsonElement data) => data.TryGetProperty("errorCode", out var error) && error.ValueKind != JsonValueKind.Null && !(error.ValueKind == JsonValueKind.String && error.GetString() == "");
     private static bool HasMaterial(JsonElement list) => list.ValueKind == JsonValueKind.Array && list.EnumerateArray().Any(x => !string.IsNullOrEmpty(Text(x, "url")) || !string.IsNullOrEmpty(Text(x, "path")));
-    private static bool HasStringUrl(JsonElement data, string key, out JsonElement list) => data.TryGetProperty(key, out list) && list.ValueKind == JsonValueKind.Array && list.EnumerateArray().Any(x => Text(x, "url") != null);
     private static MediaArtifact UrlArtifact(JsonElement data, string model, MediaKind kind, JsonElement list)
     {
         var resources = new List<MediaResource>(); var index = 0;

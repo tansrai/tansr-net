@@ -17,6 +17,7 @@ public sealed class TerminalConnection : IDisposable
     private readonly object gate = new();
     private readonly HashSet<TerminalOutputSink> sinks = new();
     private readonly HashSet<string> observations = new(StringComparer.Ordinal);
+    private CancellationTokenRegistration ownerLifetime;
     private bool disposed;
 
     public TerminalConnection(TansrClientOptions options, bool enablePreview = false, HttpClient? httpClient = null)
@@ -27,6 +28,22 @@ public sealed class TerminalConnection : IDisposable
         transport = new TerminalCandidateHttpTransport(options, httpClient);
         baseUri = options.BaseUri;
         client = new TerminalCandidateClient(transport, scope);
+    }
+
+    private TerminalConnection(TansrClient owner)
+    {
+        transport = owner.BorrowTerminalTransport(); baseUri = owner.TerminalOrigin;
+        client = new TerminalCandidateClient(transport, owner.ReadTerminalScope);
+        ownerLifetime = owner.TerminalLifetime.Register(Dispose);
+    }
+
+    /// <summary>Borrow an existing client's authenticated transport and lifetime, including
+    /// owned local Serve process checks. Disposing this connection never disposes that client.</summary>
+    public static TerminalConnection ForClient(TansrClient client, bool enablePreview = false)
+    {
+        if (!enablePreview) throw new TansrProtocolException("unsupported_capability");
+        if (client is null) throw new ArgumentNullException(nameof(client));
+        return new TerminalConnection(client);
     }
 
     public Task<JsonElement> DiscoverAsync(CancellationToken cancellationToken = default)
@@ -156,7 +173,11 @@ public sealed class TerminalConnection : IDisposable
         // A callback that ignores cancellation retains its observation slot until it actually exits.
         // Disposal never permits another connection on this instance or claims that callback stopped.
         try { transport.Dispose(); }
-        finally { foreach (var sink in owned) sink.Dispose(); }
+        finally
+        {
+            foreach (var sink in owned) sink.Dispose();
+            ownerLifetime.Dispose();
+        }
     }
 }
 

@@ -1,0 +1,21 @@
+{
+  "format": "tansr-net-profile-contract-lock-v1",
+  "protocol": "terminal-profile-v1",
+  "sourceRepository": "tansr-cli",
+  "sourceRevision": "e63c4e709d2086f9e7343cb764814ecce130e3df",
+  "sourceState": "Serve-authorized-additive-candidate-2026-09-27",
+  "files": [
+    {
+      "source": "doc/rfc/terminal-profile-v1.schema.json",
+      "snapshot": "contract/terminal-profile-v1.schema.json",
+      "bytes": 10306,
+      "sha256": "560ad136f0619a2a0592151d56e10871c3799ca438163c4e2872381bf5f5159a"
+    },
+    {
+      "source": "doc/rfc/terminal-profile-v1.golden.json",
+      "snapshot": "contract/terminal-profile-v1.golden.json",
+      "bytes": 53758,
+      "sha256": "6ecfea5872a8cb2052d35cb908839c7ab07c11d77f65dc7e9a230494a2cf8ea4"
+    }
+  ]
+}

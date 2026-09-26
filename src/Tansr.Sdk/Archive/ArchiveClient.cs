@@ -8,7 +8,7 @@ using J = Tansr.Sdk.Archive.ArchiveJson;
 namespace Tansr.Sdk.Archive;
 
 /// <summary>复用 TansrClient 认证和取消的原档案 HTTP 客户端，不自动重试写入。</summary>
-public sealed class ArchiveClient : IArchiveRecoveryClient
+public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSource
 {
     private readonly TansrClient _client;
     private readonly object _gate = new object();
@@ -33,6 +33,10 @@ public sealed class ArchiveClient : IArchiveRecoveryClient
     /// <summary>消费一次原绑定事件连接。回调必须先耐久处理 frame.cursor；只有回调成功才推进返回游标，不自动重连或制造恢复票。</summary>
     public Task<string?> ConsumeEventsAsync(string bindingId, JsonElement generations, Func<JsonElement, CancellationToken, Task> onFrame,
         string? lastEventId = null, CancellationToken cancellationToken = default)
+        => ConsumeConnectedEventsAsync(bindingId, generations, onFrame, _ => Task.CompletedTask, lastEventId, cancellationToken);
+
+    public Task<string?> ConsumeConnectedEventsAsync(string bindingId, JsonElement generations, Func<JsonElement, CancellationToken, Task> onFrame,
+        Func<CancellationToken, Task> onConnected, string? lastEventId = null, CancellationToken cancellationToken = default)
     {
         if (onFrame == null) throw new ArgumentNullException(nameof(onFrame)); var limits = GetEffectiveLimits(bindingId); var fixedGenerations = J.Copy(generations, "Generations");
         return _client.ConsumeArchiveEventsAsync(bindingId, fixedGenerations, async (frame, ct) =>
@@ -44,7 +48,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient
             else if (eventType == "binding.status") { ValidateResponse(payload, input, "BindingView", scope, limits); J.Need(WireJson.EncodeControl(payload).Length <= payload.GetProperty("limits").GetProperty("controlBytes").GetInt32(), "frame_too_large"); }
             else if (eventType == "material.request") ValidateMaterialRequest(payload);
             await onFrame(frame, ct).ConfigureAwait(false); J.Need(J.Equal(scope, ReadScope()), "context_changed");
-        }, lastEventId, cancellationToken, limits.GetProperty("controlBytes").GetInt32());
+        }, lastEventId, cancellationToken, limits.GetProperty("controlBytes").GetInt32(), onConnected);
     }
     internal static void ValidateMaterialRequest(JsonElement value)
     {

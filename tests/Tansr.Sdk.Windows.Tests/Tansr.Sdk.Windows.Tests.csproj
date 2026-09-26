@@ -4,12 +4,20 @@
     <None Update="Storage/node-memory-publication-interop.mjs" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Storage/Fixtures/memory-publication-source-manifest.json" CopyToOutputDirectory="PreserveNewest" />
     <Compile Include="../../examples/Shared/NativeToolHost.cs" Link="Shared/NativeToolHost.cs" />
+    <Compile Include="../../examples/Shared/NativeTerminalDeviceHost.cs" Link="Shared/NativeTerminalDeviceHost.cs" />
     <Compile Include="../../examples/Shared/NativeMcpToolConnection.cs" Link="Shared/NativeMcpToolConnection.cs" />
+    <Compile Include="../../examples/Shared/NativeSkillConnection.cs" Link="Shared/NativeSkillConnection.cs" />
+    <Compile Include="../../examples/Shared/NativeCacheContinuityHost.cs" Link="Shared/NativeCacheContinuityHost.cs" />
+    <Compile Include="../../examples/Shared/NativeOfflineStorageReader.cs" Link="Shared/NativeOfflineStorageReader.cs" />
     <Compile Include="../../examples/Shared/ExampleConnection.cs" Link="Shared/ExampleConnection.cs" />
     <Compile Include="../../examples/Shared/BoundedFiles.cs" Link="Shared/BoundedFiles.cs" />
+    <Compile Include="../../examples/Shared/MediaWorkspace.cs" Link="Shared/MediaWorkspace.cs" />
+    <Compile Include="../../examples/Shared/WindowsAudioRecorder.cs" Link="Shared/WindowsAudioRecorder.cs" />
+    <Compile Include="../../examples/Shared/ConsoleMediaCommands.cs" Link="Shared/ConsoleMediaCommands.cs" />
     <Compile Include="../../examples/Shared/TrustedExampleScope.cs" Link="Shared/TrustedExampleScope.cs" />
     <Compile Include="../../examples/Shared/NativeMemoryDeviceConfiguration.cs" Link="Shared/NativeMemoryDeviceConfiguration.cs" />
     <Compile Include="../../examples/Shared/ExampleSessionControls.cs" Link="Shared/ExampleSessionControls.cs" />
+    <Compile Include="../../examples/Shared/ExampleSessionOptions.cs" Link="Shared/ExampleSessionOptions.cs" />
     <Compile Include="../../examples/ConsoleAssistant/ConsoleWorker.cs" Link="Examples/ConsoleWorker.cs" />
     <ProjectReference Include="../../src/Tansr.Sdk.Windows/Tansr.Sdk.Windows.csproj" />
     <ProjectReference Include="../../examples/ConsoleAssistant/ConsoleAssistant.csproj" />

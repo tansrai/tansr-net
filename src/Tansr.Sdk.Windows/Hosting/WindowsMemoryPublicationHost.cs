@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Storage;
 using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Windows.Storage;
 
@@ -9,19 +10,35 @@ namespace Tansr.Sdk.Windows.Hosting;
 
 /// <summary>
 /// 设备记忆发布的专用受信宿主。仅通过原 ExecutionHost、耐久执行账本和 MemoryPublication 权限调用。
-/// 不读取模型配置、不借用 Shell 权限、不自动声明服务端能力。SQLite 存储由调用方持有并在执行停止后关闭。
+/// 不读取模型配置、不借用 Shell 权限、不自动声明服务端能力。存储由调用方持有并在执行停止后关闭。
 /// </summary>
 public sealed class WindowsMemoryPublicationHost
 {
-    private readonly SqliteMemoryPublicationStore store;
+    private readonly IMemoryPublicationStore store;
     private readonly JsonElement identity;
 
     public WindowsMemoryPublicationHost(SqliteMemoryPublicationStore store, bool enablePreview = false)
+        : this((IMemoryPublicationStore)store, enablePreview) { }
+
+    public WindowsMemoryPublicationHost(IMemoryPublicationStore store, bool enablePreview = false)
     {
         if (store == null) throw new ArgumentNullException(nameof(store));
         if (!enablePreview || !store.AtomicDurablePublication) throw new ExecutionRejectedException("ENOTSUP");
         this.store = store;
-        identity = store.Identity.Clone();
+        identity = WireJson.DecodeControl(WireJson.EncodeControl(store.Identity, 32768), 32768);
+        if (identity.ValueKind != JsonValueKind.Object || identity.EnumerateObject().Count() != 4 ||
+            !identity.TryGetProperty("scope", out var scope) || scope.ValueKind != JsonValueKind.Object || scope.EnumerateObject().Count() != 2)
+            throw new ArgumentException("A fixed memory publication identity is required.", nameof(store));
+        WireJson.ValidateNamed("Scope", Object(writer =>
+        {
+            writer.WriteString("applicationScopeId", Text(scope, "applicationScopeId"));
+            writer.WriteString("endUserId", Text(scope, "endUserId")); writer.WriteString("authorizationRevision", "0");
+        }));
+        TerminalCandidateContract.Validate("MemoryPublicationRequest", Object(writer =>
+        {
+            writer.WriteString("contract", "terminal-services-v1"); writer.WriteString("action", "head");
+            foreach (string field in new[] { "sourceId", "sourceGeneration", "domainKey" }) writer.WriteString(field, Text(identity, field));
+        }));
     }
 
     public JsonElement Identity => identity.Clone();
@@ -48,8 +65,11 @@ public sealed class WindowsMemoryPublicationHost
         {
             response = await store.ExecuteAsync(input.Clone(), owner, ct).ConfigureAwait(false);
         }
-        catch (SqliteMemoryPublicationException error)
+        catch (MemoryPublicationRejectedException error)
         {
+            if (error.Code != "invalid_request" && error.Code != "integrity_mismatch" && error.Code != "request_conflict" &&
+                error.Code != "stale_generation" && error.Code != "revision_conflict" && error.Code != "capacity_exceeded")
+                throw new IOException("memory_publication_outcome_unconfirmed", error);
             // 此类型只表示存储已确认的事务前拒绝/回滚；不能将普通介质异常也归为业务失败。
             try
             {
@@ -66,6 +86,7 @@ public sealed class WindowsMemoryPublicationHost
             await context.GuardAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             TerminalCandidateContract.Validate("MemoryPublicationResponse", response);
+            ValidateResponse(input, response);
         }
         catch (Exception error) { throw new IOException("memory_publication_outcome_unconfirmed", error); }
         return Object(writer =>
@@ -74,6 +95,25 @@ public sealed class WindowsMemoryPublicationHost
             writer.WriteStartObject(); writer.WriteString("t", "text"); writer.WriteString("text", response.GetRawText());
             writer.WriteEndObject(); writer.WriteEndArray();
         });
+    }
+
+    private static void ValidateResponse(JsonElement request, JsonElement response)
+    {
+        foreach (string field in new[] { "contract", "sourceId", "sourceGeneration", "domainKey", "action" })
+            if (Text(request, field) != Text(response, field)) throw new IOException("memory_publication_response_mismatch");
+        if (request.TryGetProperty("transferId", out var transfer) &&
+            transfer.GetString() != Text(response.GetProperty("transfer"), "transferId"))
+            throw new IOException("memory_publication_response_mismatch");
+        if (Text(request, "action") == "read")
+        {
+            byte[] body = Convert.FromBase64String(Text(response, "base64"));
+            int offset = request.GetProperty("offset").GetInt32();
+            if (Text(request, "etag") != Text(response, "etag") || offset != response.GetProperty("offset").GetInt32() ||
+                body.Length != response.GetProperty("byteLength").GetInt32() || body.Length > request.GetProperty("length").GetInt32() ||
+                offset + body.Length != response.GetProperty("nextOffset").GetInt32() ||
+                Convert.ToBase64String(body) != Text(response, "base64") || WireJson.Sha256(body) != Text(response, "payloadDigest"))
+                throw new IOException("memory_publication_response_mismatch");
+        }
     }
 
     private void ValidateInvocation(JsonElement input, JsonElement operation)

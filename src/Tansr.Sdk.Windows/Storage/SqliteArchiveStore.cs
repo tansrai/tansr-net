@@ -11,8 +11,9 @@ using S = Tansr.Sdk.Archive.Replication.ArchiveSyncValidation;
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>原 SDK2 source/cache 同步文件族的本地档案介质。只有 source 耐久接收才生成 ACK；密钥、权限和删除修订不从旧库自证。</summary>
-public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverableArchiveStore, IDisposable
+public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverableArchiveStore, IArchiveRecoveryAvailability, IDisposable
 {
+    public bool AcknowledgementRecoveryAvailable => _recovery && _syncRole == "source";
     public const string Format = "sdk2-archive-sync-sqlite-v1";
     public const string RecoveryFormat = "sdk2-archive-sync-recovery-sqlite-v1";
     private const int Reserve = 4096;

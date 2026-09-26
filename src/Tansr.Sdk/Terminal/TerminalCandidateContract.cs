@@ -37,6 +37,12 @@ internal static class TerminalCandidateContract
         var args = request.GetProperty("args");
         var name = TerminalJson.Text(args, "name");
         var tool = TerminalJson.Text(operation, "toolName");
+        if (name == TerminalShellSandboxContract.ToolName)
+        {
+            if (tool != "Shell" || TerminalJson.Text(args, "definitionDigest") != TerminalShellSandboxContract.DefinitionDigest) return false;
+            try { TerminalShellSandboxContract.ValidateRequest(WireJson.Parse(System.Text.Encoding.UTF8.GetBytes(TerminalJson.Text(args, "argsJson")), 32768)); return true; }
+            catch (WireProtocolException) { return false; }
+        }
         string expectedTool, digest, definition;
         if (name == BackgroundToolName)
         { expectedTool = "Shell"; digest = BackgroundToolDefinitionSha256; definition = "BackgroundRequest"; }

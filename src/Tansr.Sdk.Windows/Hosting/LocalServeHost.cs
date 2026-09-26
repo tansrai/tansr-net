@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Transport;
 using Tansr.Sdk.Windows.Execution;
 
 namespace Tansr.Sdk.Windows.Hosting;
@@ -27,6 +28,8 @@ public sealed class LocalServeHostOptions
     public IDictionary<string, string> Environment { get; } = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
     public TimeSpan StartupTimeout { get; set; } = TimeSpan.FromSeconds(30);
     public TimeSpan CleanupTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    /// <summary>开发者可信 host-module 的可选第二层认证头，启动时复制；不会成为 CreateClient 默认身份，不能覆盖 Bearer。</summary>
+    public IReadOnlyDictionary<string, string>? ReadinessHeaders { get; set; }
 }
 
 /// <summary>
@@ -42,9 +45,11 @@ public sealed class LocalServeHost : IDisposable
     private bool _exited;
     private string? _token;
     private int _ready, _disposed;
-    private LocalServeHost(WindowsDuplexProcess process, CancellationTokenSource lifetime, string token, int port)
+    private readonly IReadOnlyDictionary<string, string> _readinessHeaders;
+    private LocalServeHost(WindowsDuplexProcess process, CancellationTokenSource lifetime, string token, int port, IReadOnlyDictionary<string, string> readinessHeaders)
     {
         _process = process; _lifetime = lifetime; _token = token;
+        _readinessHeaders = readinessHeaders;
         BaseUri = new Uri("http://127.0.0.1:" + port.ToString(CultureInfo.InvariantCulture));
         Completion = ObserveExitAsync();
     }
@@ -58,6 +63,7 @@ public sealed class LocalServeHost : IDisposable
     public static async Task<LocalServeHost> StartAsync(LocalServeHostOptions options, CancellationToken cancellationToken = default)
     {
         if (options == null) throw new ArgumentNullException(nameof(options));
+        var readinessHeaders = RequestHeaderSnapshot.Copy(options.ReadinessHeaders);
         if (options.WorkingDirectory == null || options.Port < 1 || options.Port > 65535 ||
             options.StartupTimeout <= TimeSpan.Zero || options.StartupTimeout > TimeSpan.FromMinutes(10) ||
             options.CleanupTimeout <= TimeSpan.Zero || options.CleanupTimeout > TimeSpan.FromMinutes(1))
@@ -101,7 +107,7 @@ public sealed class LocalServeHost : IDisposable
             catch (WindowsDuplexProcessException error) when (error.Code == "executable_digest_mismatch")
             { throw new TansrProtocolException("serve_binary_mismatch"); }
             // 原生层先固定完整路径与最终文件句柄，再从同一文件对象核摘要并启动，无二次路径解析窗口。
-            host = new LocalServeHost(process, lifetime, token, options.Port);
+            host = new LocalServeHost(process, lifetime, token, options.Port, readinessHeaders);
             startup.CancelAfter(options.StartupTimeout);
             try { await host.WaitReadyAsync(startup.Token).ConfigureAwait(false); }
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && process.Completion.IsCompleted)
@@ -121,6 +127,12 @@ public sealed class LocalServeHost : IDisposable
     /// <summary>每个调用返回独立客户端。客户端不会越过本次子进程寿命向下一进程继续发送认证。</summary>
     public TansrClient CreateClient(SessionContract contract = SessionContract.Sdk1, Func<string>? principalProvider = null,
         Func<JsonElement>? executionScopeProvider = null, int maximumResponseBytes = 2 * 1024 * 1024, int maximumEventBytes = 2 * 1024 * 1024)
+        => CreateClient(contract, principalProvider, executionScopeProvider, maximumResponseBytes, maximumEventBytes, null);
+
+    /// <summary>为同一自有进程显式附加开发者认证头；与就绪票分别传入，不从 PrincipalProvider 推导远端权限。</summary>
+    public TansrClient CreateClient(SessionContract contract, Func<string>? principalProvider,
+        Func<JsonElement>? executionScopeProvider, int maximumResponseBytes, int maximumEventBytes,
+        IReadOnlyDictionary<string, string>? additionalRequestHeaders)
     {
         RequireReady();
         var http = new HttpClient(new OwnedServeHttpHandler(BaseUri, _process)) { Timeout = Timeout.InfiniteTimeSpan };
@@ -135,6 +147,7 @@ public sealed class LocalServeHost : IDisposable
                 MaxEventBytes = maximumEventBytes,
                 PrincipalProvider = principalProvider,
                 ExecutionScopeProvider = executionScopeProvider,
+                AdditionalRequestHeaders = additionalRequestHeaders,
                 TokenProvider = ct => { ct.ThrowIfCancellationRequested(); RequireReady(); return Task.FromResult(_token!); },
             }, http, disposeInjectedClient: true);
         }
@@ -200,6 +213,7 @@ public sealed class LocalServeHost : IDisposable
     {
         var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUri, "/v2/sessions?limit=1&offset=0"));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        foreach (var header in _readinessHeaders) request.Headers.Add(header.Key, header.Value);
         return SendProbeAsync(client, request, ct);
     }
     private static async Task<HttpResponseMessage> SendProbeAsync(HttpClient client, HttpRequestMessage request, CancellationToken ct)

@@ -5,6 +5,10 @@ namespace Tansr.Sdk.Windows.Skills;
 /// <summary>可信宿主明确列出的技能；描述和正文仅作为资源，不授予执行权限。</summary>
 public sealed class WindowsSkillDescriptor
 {
+    /// <summary>注册已由宿主提供的不可变正文，不创建临时文件，也不把正文当作可执行代码。</summary>
+    public static WindowsSkillDescriptor FromInline(string name, string description, string content, string? whenToUse = null)
+        => new(name, description, "", whenToUse) { InlineContent = content ?? throw new ArgumentNullException(nameof(content)) };
+
     public WindowsSkillDescriptor(string name, string description, string relativePath,
         string? whenToUse = null, IEnumerable<string>? resources = null)
     {
@@ -17,12 +21,16 @@ public sealed class WindowsSkillDescriptor
     public string Description { get; }
     public string RelativePath { get; }
     public string? WhenToUse { get; }
+    public bool IsInline => InlineContent != null;
+    internal string? InlineContent { get; private set; }
     /// <summary>工作区内的完整相对路径；每项必须位于该技能目录下，不自动读取正文中的链接。</summary>
     public IReadOnlyList<string> Resources { get; }
 }
 
 public sealed class WindowsSkillCatalogOptions
 {
+    /// <summary>读取前后复核宿主当前信任；回调只能收紧已有白名单，抛错即拒绝。</summary>
+    public Action<string, CancellationToken>? Authorize { get; set; }
     public int MaximumSkills { get; set; } = 128;
     public int MaximumResourcesPerSkill { get; set; } = 64;
     public int MaximumSkillBytes { get; set; } = 256 * 1024;
@@ -46,12 +54,13 @@ public sealed class WindowsSkillIndexEntry
     {
         Name = descriptor.Name; Description = descriptor.Description; RelativePath = descriptor.RelativePath;
         WhenToUse = descriptor.WhenToUse; ContentDigest = contentDigest; DefinitionDigest = definitionDigest;
-        SizeBytes = size; Resources = resources;
+        SizeBytes = size; Resources = resources; IsInline = descriptor.IsInline;
     }
     public string Name { get; }
     public string Description { get; }
     public string? WhenToUse { get; }
     public string RelativePath { get; }
+    public bool IsInline { get; }
     public string ContentDigest { get; }
     /// <summary>本地目录装配摘要，绑定元数据、正文摘要及资源白名单；不是 Serve 工具定义摘要。</summary>
     public string DefinitionDigest { get; }

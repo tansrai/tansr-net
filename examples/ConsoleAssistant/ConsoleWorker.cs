@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
+using System.Security.Cryptography;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Terminal;
 
 namespace ConsoleAssistant;
 
@@ -33,7 +35,7 @@ internal static class ConsoleWorker
                 connection = await ExampleConnection.ConnectAsync(Environment.GetEnvironmentVariable("TANSR_SERVE_URL"),
                     _ => Task.FromResult(RequiredToken()), Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", connectionLifetime.Token).ConfigureAwait(false);
             queueStarted = true;
-            exitCode = await RunJobsAsync(jobs, concurrency, connection.Client, connection.NativeTools, stop, output.Write).ConfigureAwait(false);
+            exitCode = await RunJobsAsync(jobs, concurrency, connection.Client, connection.NativeTools, stop, output.Write, connection.Observation, connection.Contract).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested)
         { output.Emit(new { phase = "worker", state = "stopped_before_queue", code = "cancelled" }); exitCode = 130; }
@@ -63,7 +65,7 @@ internal static class ConsoleWorker
 
     // 使用公开 SDK 的同一执行路径；独立受控 HTTP/SSE 验证可以借入 client，不改变其所有权。
     internal static async Task<int> RunJobsAsync(IReadOnlyList<Job> jobs, int concurrency, TansrClient client,
-        IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Action<string> write)
+        IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Action<string> write, TerminalObservationClient? observation = null, SessionContract sessionContract = SessionContract.Sdk1)
     {
         ValidateConcurrency(concurrency);
         ArgumentNullException.ThrowIfNull(jobs); ArgumentNullException.ThrowIfNull(client); ArgumentNullException.ThrowIfNull(write);
@@ -81,7 +83,7 @@ internal static class ConsoleWorker
                 var index = Interlocked.Increment(ref next);
                 if (index >= fixedJobs.Length) return;
                 if (stop.IsCancellationRequested) return;
-                completed[index] = await RunJobAsync(fixedJobs[index], defaultModel, client, bindings, stop, output).ConfigureAwait(false) ? 1 : 2;
+                completed[index] = await RunJobAsync(fixedJobs[index], defaultModel, client, bindings, stop, output, observation, sessionContract).ConfigureAwait(false) ? 1 : 2;
             }
         }).ToArray();
         await Task.WhenAll(lanes).ConfigureAwait(false);
@@ -105,7 +107,7 @@ internal static class ConsoleWorker
     }
 
     private static async Task<bool> RunJobAsync(Job job, string? defaultModel, TansrClient client,
-        IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Output output)
+        IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Output output, TerminalObservationClient? observation, SessionContract sessionContract)
     {
         AgentSession? session = null; NativeToolHost? tools = null; SessionRun? run = null;
         var creationStarted = false; var acceptanceWritten = false; var terminalKnown = false; var success = false; var cleanupConfirmed = true;
@@ -113,17 +115,21 @@ internal static class ConsoleWorker
         {
             stop.ThrowIfCancellationRequested();
             creationStarted = true;
-            session = await client.CreateSessionAsync(new CreateSessionOptions
+            var options = ExampleSessionOptions.Create(job.Model ?? defaultModel, null, NativeToolHost.GetDeclarations(bindings));
+            if (sessionContract == SessionContract.Sdk2OffloadV1)
             {
-                Model = job.Model ?? defaultModel,
-                Labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["worker.job"] = job.Id },
-                ClientTools = NativeToolHost.GetDeclarations(bindings)
-            }, stop).ConfigureAwait(false);
+                if (string.IsNullOrEmpty(options.RequestId)) throw new InvalidOperationException("sdk2_worker_original_request_id_required");
+                using var hash = SHA256.Create();
+                options.RequestId = "worker-" + BitConverter.ToString(hash.ComputeHash(JsonSerializer.SerializeToUtf8Bytes(new[] { options.RequestId, job.Id }))).Replace("-", "").ToLowerInvariant();
+            }
+            options.Labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["worker.job"] = job.Id };
+            session = await client.CreateSessionAsync(options, stop).ConfigureAwait(false);
             output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "session", state = "created" });
             // 无 UI 服务不能竞争共享控制台标题；原生业务工具明确返回不可用，仍提交一次原回执。
             tools = new NativeToolHost(session, "Tansr.Console.Worker",
                 (_, ct) => { ct.ThrowIfCancellationRequested(); throw new InvalidOperationException("window_title_unavailable_in_worker"); },
                 code => output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "native_tool", code }), bindings);
+            await tools.Ready.ConfigureAwait(false);
             var activeSession = session; var activeTools = tools;
             run = session.StartRun(job.Prompt, observer: (item, ct) => ObserveAsync(job.Id, activeSession, activeTools, item, ct, output), cancellationToken: stop);
             try
@@ -167,8 +173,16 @@ internal static class ConsoleWorker
                 if (tools is not null)
                     cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "native_tools", () => WithBudgetAsync(tools.DrainAsync, TimeSpan.FromSeconds(12)), output).ConfigureAwait(false);
                 cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "close", () => WithBudgetAsync(session.CloseAsync, TimeSpan.FromSeconds(10)), output).ConfigureAwait(false);
+                var remoteCleanup = "unknown";
+                if (observation != null)
+                    cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "resources", async () =>
+                    {
+                        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                        var settled = await observation.WaitForResourcesAsync(session.Id, TimeSpan.FromSeconds(10), sessionContract: sessionContract, cancellationToken: budget.Token).ConfigureAwait(false);
+                        remoteCleanup = settled.State.ToString().ToLowerInvariant();
+                    }, output).ConfigureAwait(false);
                 tools?.Dispose();
-                output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "cleanup", state = cleanupConfirmed ? "completed" : "unconfirmed" });
+                output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "cleanup", state = cleanupConfirmed ? "completed" : "unconfirmed", scope = observation == null ? "local_and_close_request" : "local_and_remote_resources", remoteCleanup });
             }
             else output.Emit(new { jobId = job.Id, phase = "cleanup", state = creationStarted ? "unavailable_session_id" : "not_needed" });
         }
@@ -187,8 +201,11 @@ internal static class ConsoleWorker
         else if (item.Name == "server.permission.request")
         {
             var id = body.GetProperty("requestId").GetString()!;
-            await session.PermissionAsync(id, body.GetProperty("digest").GetString()!, false, ct).ConfigureAwait(false);
-            output.Emit(new { jobId, sessionId = session.Id, phase = "permission", requestId = id, state = "denied_unattended" });
+            var name = body.TryGetProperty("name", out var tool) && tool.ValueKind == JsonValueKind.String ? tool.GetString() : null;
+            var allow = name != null && (Environment.GetEnvironmentVariable("TANSR_WORKER_ALLOWED_PERMISSION_TOOLS") ?? "")
+                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(x => x.Trim()).Contains(name, StringComparer.Ordinal);
+            await session.PermissionAsync(id, body.GetProperty("digest").GetString()!, allow, ct).ConfigureAwait(false);
+            output.Emit(new { jobId, sessionId = session.Id, phase = "permission", requestId = id, state = allow ? "allowed_by_explicit_worker_policy" : "denied_unattended" });
         }
         else if (item.Name == "server.question.request")
         {

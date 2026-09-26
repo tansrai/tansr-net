@@ -18,7 +18,8 @@ public sealed partial class TansrClient
 
     /// <summary>原档案事件单次连接；不自动重连、不发 ACK，回调负责业务验证和游标耐久提交。</summary>
     internal async Task<string?> ConsumeArchiveEventsAsync(string bindingId, JsonElement generations,
-        Func<JsonElement, CancellationToken, Task> onFrame, string? lastEventId, CancellationToken cancellationToken, int controlBytes = 262144)
+        Func<JsonElement, CancellationToken, Task> onFrame, string? lastEventId, CancellationToken cancellationToken, int controlBytes = 262144,
+        Func<CancellationToken, Task>? onConnected = null)
     {
         if (bindingId is null) throw new ArgumentNullException(nameof(bindingId));
         ArchiveConsumerSlot slot;
@@ -28,7 +29,7 @@ public sealed partial class TansrClient
             if (archiveConsumers.Count >= MaximumArchiveConsumers) throw new TansrProtocolException("consumer_capacity_exceeded");
             slot = new ArchiveConsumerSlot(); archiveConsumers.Add(bindingId, slot);
         }
-        try { return await ConsumeArchiveConnectionAsync(bindingId, generations, onFrame, lastEventId, cancellationToken, controlBytes, slot).ConfigureAwait(false); }
+        try { return await ConsumeArchiveConnectionAsync(bindingId, generations, onFrame, lastEventId, cancellationToken, controlBytes, slot, onConnected).ConfigureAwait(false); }
         finally
         {
             var pending = slot.Consumer;
@@ -49,7 +50,8 @@ public sealed partial class TansrClient
     }
 
     private async Task<string?> ConsumeArchiveConnectionAsync(string bindingId, JsonElement generations,
-        Func<JsonElement, CancellationToken, Task> onFrame, string? lastEventId, CancellationToken cancellationToken, int controlBytes, ArchiveConsumerSlot slot)
+        Func<JsonElement, CancellationToken, Task> onFrame, string? lastEventId, CancellationToken cancellationToken, int controlBytes, ArchiveConsumerSlot slot,
+        Func<CancellationToken, Task>? onConnected)
     {
         if (onFrame is null) throw new ArgumentNullException(nameof(onFrame));
         if (controlBytes < 1024 || controlBytes > WireJson.MaximumControlBytes) throw new ArgumentOutOfRangeException(nameof(controlBytes));
@@ -79,6 +81,7 @@ public sealed partial class TansrClient
         connection.CancelAfter(Timeout.InfiniteTimeSpan);
         using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         using var closeOnCancel = observation.Token.Register(stream.Dispose);
+        Check(); if (onConnected != null) { await onConnected(observation.Token).ConfigureAwait(false); Check(); }
         var bytes = new byte[8192]; var cursor = lastEventId;
         for (; ; )
         {

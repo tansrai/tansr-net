@@ -31,6 +31,9 @@ public sealed class WindowsProcessRequest
 
     public string TrustedExecutablePath { get; }
 
+    /// <summary>可信宿主配置的可选 SHA256 小写摘要；在同一已固定文件句柄上验证，失败时不创建进程。</summary>
+    public string? ExpectedExecutableSha256 { get; set; }
+
     public IReadOnlyList<string> Arguments { get; }
 
     public Func<IWindowsProcessWorkingDirectoryLease> AcquireWorkingDirectory { get; }
@@ -55,6 +58,7 @@ public sealed class WindowsProcessRequest
     internal Action<int>? Started { get; set; }
     internal bool DrainAfterOutputLimit { get; set; }
     internal Action? OutputTruncated { get; set; }
+    internal Action? ValidateBeforeStart { get; set; }
 }
 
 public enum WindowsProcessOutputStream
@@ -112,7 +116,8 @@ public sealed class WindowsProcessResult
     internal WindowsProcessResult(
         WindowsProcessTermination termination, WindowsProcessTermination requestedTermination,
         int? processId, int? exitCode, bool started, bool cleanupConfirmed, bool outputComplete,
-        string standardOutput, string standardError, long outputBytesObserved, int? nativeErrorCode, bool outputDeliverySettled = true)
+        string standardOutput, string standardError, long outputBytesObserved, int? nativeErrorCode, bool outputDeliverySettled = true,
+        byte[]? standardOutputBytes = null, byte[]? standardErrorBytes = null)
     {
         Termination = termination;
         RequestedTermination = requestedTermination;
@@ -126,6 +131,8 @@ public sealed class WindowsProcessResult
         OutputBytesObserved = outputBytesObserved;
         NativeErrorCode = nativeErrorCode;
         OutputDeliverySettled = outputDeliverySettled;
+        StandardOutputBytes = standardOutputBytes ?? Array.Empty<byte>();
+        StandardErrorBytes = standardErrorBytes ?? Array.Empty<byte>();
     }
 
     public WindowsProcessTermination Termination { get; }
@@ -149,6 +156,10 @@ public sealed class WindowsProcessResult
     public string StandardOutput { get; }
 
     public string StandardError { get; }
+
+    // 保留同一次捕获的原始字节供严格 profile 使用；旧公开文本 API 继续原 replacement 解码约定。
+    internal byte[] StandardOutputBytes { get; }
+    internal byte[] StandardErrorBytes { get; }
 
     public long OutputBytesObserved { get; }
 

@@ -13,10 +13,14 @@ internal sealed class ExampleSessionControls
     private readonly TerminalSessionControl control;
     private readonly string sessionId;
     private readonly string journalPrefix;
+    private readonly TerminalProfileClient? profile;
+    private readonly SessionContract sessionContract;
     private readonly SemaphoreSlim gate = new(1, 1);
-    internal ExampleSessionControls(TerminalSessionControl control, string endpoint, string sessionId, string statePath)
+    internal ExampleSessionControls(TerminalSessionControl control, string endpoint, string sessionId, string statePath,
+        TerminalProfileClient? profile = null, SessionContract sessionContract = SessionContract.Sdk1)
     {
         this.control = control; this.sessionId = sessionId;
+        this.profile = profile; this.sessionContract = sessionContract;
         using var sha = SHA256.Create();
         var key = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(endpoint + "\n" + sessionId))).Replace("-", "").ToLowerInvariant();
         journalPrefix = statePath + "." + key;
@@ -24,7 +28,9 @@ internal sealed class ExampleSessionControls
 
     internal Task<JsonElement> ReadConfigurationAsync(CancellationToken ct = default) => control.ReadConfigurationAsync(sessionId, ct);
     internal Task<JsonElement> ReadMemoryAsync(CancellationToken ct = default) => control.ReadMemoryAsync(sessionId, ct);
-    internal static readonly string[] Actions = { "读取配置", "修改模型", "修改思考预算", "重放原配置", "读取记忆来源", "记住本轮", "置顶文字", "遗忘主题", "查询原记忆操作", "重放原记忆操作" };
+    internal Task<TerminalProfileCatalog> ReadCatalogAsync(CancellationToken ct = default) => (profile ?? throw new InvalidOperationException("terminal_profile_preview_not_enabled")).ReadCatalogAsync(sessionId, sessionContract, ct);
+    internal Task<TerminalProfileUsage> ReadUsageAsync(CancellationToken ct = default) => (profile ?? throw new InvalidOperationException("terminal_profile_preview_not_enabled")).ReadUsageAsync(sessionId, sessionContract, ct);
+    internal static readonly string[] Actions = { "读取配置", "修改模型", "修改思考预算", "重放原配置", "读取记忆来源", "记住本轮", "置顶文字", "遗忘主题", "查询原记忆操作", "重放原记忆操作", "授权模型目录", "本人最近1天用量" };
     internal Task<JsonElement> ExecuteAsync(int action, string value, CancellationToken ct = default)
     {
         if (action == 0) return ReadConfigurationAsync(ct);
@@ -35,6 +41,8 @@ internal sealed class ExampleSessionControls
         if (action == 7) return CommandAsync("forget", value, ct);
         if (action == 8) return QueryMemoryAsync(ct);
         if (action == 9) return ReplayMemoryAsync(ct);
+        if (action == 10) return ReadCatalogJsonAsync(ct);
+        if (action == 11) return ReadUsageJsonAsync(ct);
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
@@ -51,6 +59,8 @@ internal sealed class ExampleSessionControls
         }
         using var document = JsonDocument.Parse(stream.ToArray()); return ChangeConfigurationAsync(document.RootElement.Clone(), ct);
     }
+    private async Task<JsonElement> ReadCatalogJsonAsync(CancellationToken ct) => (await ReadCatalogAsync(ct).ConfigureAwait(false)).Raw;
+    private async Task<JsonElement> ReadUsageJsonAsync(CancellationToken ct) => (await ReadUsageAsync(ct).ConfigureAwait(false)).Raw;
 
     internal async Task<JsonElement> ChangeConfigurationAsync(JsonElement changes, CancellationToken ct = default)
     {

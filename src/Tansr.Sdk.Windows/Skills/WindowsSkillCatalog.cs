@@ -14,17 +14,28 @@ public sealed class WindowsSkillCatalog
 {
     private static readonly UTF8Encoding Utf8 = new(false, true);
     private readonly object _gate = new();
-    private readonly WindowsWorkspace _workspace;
+    private readonly WindowsWorkspace? _workspace;
+    private readonly Action<string, CancellationToken>? _authorize;
+    private int _revoked;
     private readonly WindowsSkillDescriptor[] _descriptors;
     private readonly int _skillLimit, _resourceLimit, _assemblyLimit;
     private IReadOnlyList<WindowsSkillIndexEntry>? _index;
 
     public WindowsSkillCatalog(WindowsWorkspace workspace, IEnumerable<WindowsSkillDescriptor> descriptors,
         WindowsSkillCatalogOptions? options = null)
+        : this(descriptors, options, workspace ?? throw new ArgumentNullException(nameof(workspace))) { }
+
+    /// <summary>仅装配内联技能；目录技能仍要求显式 WindowsWorkspace。</summary>
+    public static WindowsSkillCatalog FromInline(IEnumerable<WindowsSkillDescriptor> descriptors, WindowsSkillCatalogOptions? options = null)
+        => new(descriptors, options, null);
+
+    private WindowsSkillCatalog(IEnumerable<WindowsSkillDescriptor> descriptors, WindowsSkillCatalogOptions? options,
+        WindowsWorkspace? workspace)
     {
-        _workspace = workspace ?? throw new ArgumentNullException(nameof(workspace));
+        _workspace = workspace;
         if (descriptors == null) throw new ArgumentNullException(nameof(descriptors));
         options ??= new WindowsSkillCatalogOptions();
+        _authorize = options.Authorize;
         if (options.MaximumSkills < 1 || options.MaximumSkills > 1024 || options.MaximumResourcesPerSkill < 0 ||
             options.MaximumResourcesPerSkill > 256 || options.MaximumSkillBytes < 1 || options.MaximumSkillBytes > 4 * 1024 * 1024 ||
             options.MaximumResourceBytes < 1 || options.MaximumResourceBytes > 4 * 1024 * 1024 ||
@@ -41,8 +52,13 @@ public sealed class WindowsSkillCatalog
             if (item == null || item.Name == null || !Regex.IsMatch(item.Name, "\\A[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}\\z", RegexOptions.CultureInvariant) ||
                 string.IsNullOrWhiteSpace(item.Description) || Utf8.GetByteCount(item.Description) > 8192 ||
                 (item.WhenToUse != null && Utf8.GetByteCount(item.WhenToUse) > 8192)) throw new WindowsSkillException("invalid_skill");
-            ValidatePath(item.RelativePath);
-            if (!names.Add(item.Name) || !files.Add(item.RelativePath)) throw new WindowsSkillException("duplicate_skill");
+            if (!item.IsInline)
+            {
+                if (_workspace == null) throw new WindowsSkillException("workspace_required");
+                ValidatePath(item.RelativePath);
+                if (!files.Add(item.RelativePath)) throw new WindowsSkillException("duplicate_skill");
+            }
+            if (!names.Add(item.Name)) throw new WindowsSkillException("duplicate_skill");
             if (item.Resources.Count > options.MaximumResourcesPerSkill) throw new WindowsSkillException("size_limit");
             var resources = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             string parent = Parent(item.RelativePath);
@@ -60,11 +76,12 @@ public sealed class WindowsSkillCatalog
     {
         lock (_gate)
         {
+            AssertTrusted(null, cancellationToken);
             var entries = new List<WindowsSkillIndexEntry>();
             foreach (var descriptor in _descriptors.OrderBy(value => value.Name, StringComparer.Ordinal))
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                byte[] bytes = ReadBounded(descriptor.RelativePath, _skillLimit, cancellationToken);
+                AssertTrusted(descriptor.Name, cancellationToken);
+                byte[] bytes = ReadBody(descriptor, cancellationToken);
                 _ = Text(bytes); // Invalid UTF-8 is not silently rewritten before hashing or delivery.
                 var resources = new List<WindowsSkillResourceIndexEntry>(); long total = bytes.Length;
                 foreach (string path in descriptor.Resources.OrderBy(value => value, StringComparer.Ordinal))
@@ -78,6 +95,7 @@ public sealed class WindowsSkillCatalog
                 string contentDigest = Hash(bytes);
                 var immutable = new ReadOnlyCollection<WindowsSkillResourceIndexEntry>(resources);
                 entries.Add(new WindowsSkillIndexEntry(descriptor, contentDigest, DefinitionDigest(descriptor, contentDigest, immutable), bytes.Length, immutable));
+                AssertTrusted(descriptor.Name, cancellationToken);
             }
             _index = new ReadOnlyCollection<WindowsSkillIndexEntry>(entries);
             return _index;
@@ -88,9 +106,12 @@ public sealed class WindowsSkillCatalog
     {
         lock (_gate)
         {
+            AssertTrusted(name, cancellationToken);
             var entry = Find(name, definitionDigest);
-            var bytes = ReadBounded(entry.RelativePath, _skillLimit, cancellationToken);
+            var descriptor = _descriptors.First(value => value.Name == entry.Name);
+            var bytes = ReadBody(descriptor, cancellationToken);
             Match(bytes, entry.ContentDigest);
+            AssertTrusted(name, cancellationToken);
             return new WindowsSkillDocument(entry, Text(bytes));
         }
     }
@@ -101,12 +122,14 @@ public sealed class WindowsSkillCatalog
     {
         lock (_gate)
         {
+            AssertTrusted(name, cancellationToken);
             var skill = Find(name, definitionDigest);
             var entry = skill.Resources.FirstOrDefault(value => value.RelativePath == relativePath);
             if (entry == null) throw new WindowsSkillException("resource_not_allowed");
             if (entry.ContentDigest != expectedContentDigest) throw new WindowsSkillException("digest_mismatch");
             var bytes = ReadBounded(entry.RelativePath, _resourceLimit, cancellationToken);
             Match(bytes, entry.ContentDigest);
+            AssertTrusted(name, cancellationToken);
             return new WindowsSkillResource(entry, bytes);
         }
     }
@@ -117,6 +140,7 @@ public sealed class WindowsSkillCatalog
     {
         lock (_gate)
         {
+            AssertTrusted(name, cancellationToken);
             var entry = Find(name, definitionDigest);
             var requested = (resources ?? Array.Empty<string>()).Take(entry.Resources.Count + 1).ToArray();
             if (requested.Length > entry.Resources.Count || requested.Distinct(StringComparer.Ordinal).Count() != requested.Length)
@@ -135,6 +159,28 @@ public sealed class WindowsSkillCatalog
         }
     }
 
+    /// <summary>立即永久撤回该目录实例；新授权应创建新实例及新索引，不复活旧摘要。</summary>
+    public void Revoke() => Interlocked.Exchange(ref _revoked, 1);
+
+    private void AssertTrusted(string? name, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _revoked) != 0) throw new WindowsSkillException("trust_revoked");
+        if (name != null) _authorize?.Invoke(name, cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (Volatile.Read(ref _revoked) != 0) throw new WindowsSkillException("trust_revoked");
+    }
+
+    private byte[] ReadBody(WindowsSkillDescriptor descriptor, CancellationToken cancellationToken)
+    {
+        if (!descriptor.IsInline) return ReadBounded(descriptor.RelativePath, _skillLimit, cancellationToken);
+        byte[] bytes;
+        try { bytes = Utf8.GetBytes(descriptor.InlineContent!); }
+        catch (EncoderFallbackException) { throw new WindowsSkillException("invalid_text_encoding"); }
+        if (bytes.Length > _skillLimit) throw new WindowsSkillException("size_limit");
+        return bytes;
+    }
+
     private WindowsSkillIndexEntry Find(string name, string digest)
     {
         if (_index == null) throw new WindowsSkillException("not_indexed");
@@ -147,6 +193,7 @@ public sealed class WindowsSkillCatalog
     private byte[] ReadBounded(string path, int maximum, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (_workspace == null) throw new WindowsSkillException("workspace_required");
         var before = _workspace.Inspect(path);
         if (before.Kind != WindowsWorkspaceEntryKind.File) throw new WindowsSkillException("invalid_resource_kind");
         if (before.Length > maximum) throw new WindowsSkillException("size_limit");

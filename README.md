@@ -6,6 +6,8 @@
 
 开发方案、六张工程卡和24项验收的事实源位于 `J:/tansr/tansr-cli/doc/report/NETSDK-*2026-09-26.md`。本仓实施与验证记录见 [开发记录](doc/development.md)。Serve 新协议独立由 Serve 会话维护，不能将候选协议当成生产能力。
 
+验收中的 `CliRoot` 必须检出 `WireContract.SourceRevision` 对应的原协议基线（当前为 `027de7e2d9b647374b7fe94cb0e4a7429a9195e2`），不能以持续前进的 CLI 主线代替。`RecoveryCliRoot` 则指当前会签的恢复及设备记忆候选；两个来源分别记录。
+
 ## 包与运行边界
 
 | 包 | 框架 | 职责 |
@@ -29,18 +31,16 @@ using var client = new TansrClient(new TansrClientOptions
     TokenProvider = ct => YourLoginService.GetShortLivedTokenAsync(ct),
 });
 var session = await client.CreateSessionAsync(new CreateSessionOptions(), cancellationToken);
-using var observationStop = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-var observation = session.ObserveAsync((item, ct) =>
+using var run = session.StartRun("处理这项任务", observer: (item, ct) =>
 {
     // 将 item 投影到 SessionView，或交给应用自己的呈现层。
     return Task.CompletedTask;
-}, observationStop.Token);
-await session.SendAsync("处理这项任务", cancellationToken);
-// Send 返回代表受理；任务终局、存储提交和资源清理各有自己的事实。
-// 退出观察不会自动中断远端任务。
-observationStop.Cancel();
-try { await observation; }
-catch (OperationCanceledException) when (observationStop.IsCancellationRequested) { }
+}, cancellationToken: cancellationToken);
+await run.Acceptance; // 接纳与任务完成分开。
+var completed = await run.Completion;
+Console.WriteLine(completed.Reason); // 同时检查 WasAborted，不能把任何终态都算成功。
+// 取消/Dispose run 只停止本地等待；显式 session.CancelAsync 才中断远端任务。
+// 会话关闭接纳与远端持久化/资源排空同样分开。
 ```
 
 默认 SDK1 会话；SDK2 为显式 `SessionContract.Sdk2OffloadV1` 并要求稳定主体、可信 scope 及服务端能力发现。客户端 SDK 中不放长期 appkey。开发时明文 HTTP 仅在显式 `AllowInsecureLoopback=true` 且回环地址时允许；默认 handler 禁重定向和共享 Cookie。注入 `HttpClient` 的宿主须保持这些约束。
@@ -60,13 +60,15 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 - [WPF](examples/WpfAssistant/README.md)：现代 Windows UI。
 - [WinForms](examples/WinFormsAssistant/README.md)：.NET Framework 4.8。
 - [控制台](examples/ConsoleAssistant/README.md)：原生 .NET 宿主。
+- [中文快速接入](doc/quickstart.md) / [English quickstart](doc/quickstart.en.md)：包安装、会话、运行与错误处理。
+- [安装与发行](doc/installation.md)：运行时、原生资产、本地 Serve、升级回滚及可执行消费门。
 - [公共能力映射](doc/compatibility/public-api-map.json)：固定16组能力，完整枚举原 SDK 与 Electron 入口，缺口保留。
 
 ```powershell
 dotnet restore Tansr.Sdk.slnx --locked-mode
 dotnet build Tansr.Sdk.slnx -c Release --no-restore
 dotnet test tests/Tansr.Sdk.Tests -c Release --no-build
-./scripts/test-windows.ps1 -OutputDirectory J:/tansr/archive/NET-05-windows-unique-run -CliRoot J:/tansr/tansr-cli -RecoveryCliRoot J:/tansr/worktrees/cli-SRV-01-terminal-services
+./scripts/test-windows.ps1 -OutputDirectory J:/tansr/archive/NET-05-windows-unique-run -CliRoot J:/tansr/worktrees/cli-NET-legacy-contract -RecoveryCliRoot J:/tansr/worktrees/cli-SRV-01-terminal-services
 dotnet format Tansr.Sdk.slnx --verify-no-changes --no-restore
 ```
 
@@ -74,7 +76,7 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 
 已经由集中构建准备候选时，可显式设置 `TANSR_TEST_MCP_EXE` 为已批准的自包含单文件 `ConsoleAssistant.exe` 绝对路径、`TANSR_TEST_CLI_ROOT` 为原 CLI 源码路径，再运行原 Windows `dotnet test` 命令，避免重复发布。缺少 MCP 候选会失败，不默认记为通过；普通 apphost 的 EXE 哈希不能证明旁边的 DLL 也已获批准。此消费门通过真实 HTTP/SSE 夹具驱动共享 C# 工具宿主及原生 MCP 进程，不等于真实 Serve 模型循环或媒体内容验收已完成。
 
-真实 Serve 路由联验另由 `scripts/serve-integration.mjs` 驱动，要求明确指定 Serve 源码路径；使用受控会话夹具而非付费模型。`scripts/check-contract.ps1` 与 `scripts/check-parity.mjs` 检查上游合同和入口变化，`scripts/test-packages.ps1` 从独立本地源消费包。未完成固定24项完整验收前，不标记正式功能齐套。
+真实 Serve 路由联验另由 `scripts/serve-integration.mjs` 驱动，要求明确指定 Serve 源码路径；使用受控会话夹具而非付费模型。`scripts/check-contract.ps1` 与 `scripts/check-parity.mjs` 检查上游合同和入口变化。`scripts/test-packages.ps1` 从独立本地源安装两个包，实际运行 net48 WinForms、现代控制台、WPF self-contained 和可选 Native AOT；`-PreviousPackageDirectory` 增加独立旧包消费与用户目录升级/回滚/卸载演练。它们不替代固定24项完整验收，详见[消费与安装入口](doc/installation.md)。
 
 `RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。本批完整 Windows 门要求 0 跳过。
 
@@ -87,3 +89,5 @@ The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `Wind
 Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 
 This is an unpublished development candidate. It uses the existing REST/SSE and SDK2 contracts. New terminal streaming, memory management and dynamic control contracts are not exposed as stable APIs before Serve and .NET agree on the same schema and fixtures. The examples document their actual capabilities and remaining gaps; successful compilation is not a claim of full Electron parity. See the development record for commands, evidence and release status.
+
+Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). The independent package gate runs .NET Framework WinForms, a modern console, self-contained WPF and optional core Native AOT consumers with Node absent from their PATH. This is evidence about these processes; it does not pretend that Node was uninstalled from the host or that a clean standard-user operating system was tested.

@@ -65,6 +65,8 @@ public sealed partial class AgentSession
     }
 
     public Task<JsonElement> CancelAsync(CancellationToken cancellationToken = default) => Post("/interrupt", null, cancellationToken);
+    /// <summary>请求关闭远端会话；202 accepted 仅表示已受理，不能证明工具、存储或宿主资源已排空。</summary>
+    /// <remarks>观察连接的结束也不等于资源清理完成；宿主须使用 Serve 的实际清理回执。</remarks>
     public Task<JsonElement> CloseAsync(CancellationToken cancellationToken = default)
         => client.SendSessionAsync(HttpMethod.Delete, Path, null, cancellationToken);
 
@@ -187,8 +189,9 @@ public sealed partial class AgentSession
         => client.SendSessionAsync(HttpMethod.Get, Path + "/checkpoints", null, cancellationToken);
     public Task<JsonElement> RestoreCheckpointAsync(string id, bool? checkpoint = null, CancellationToken cancellationToken = default)
         => Post("/checkpoints/" + SessionJson.Segment(id) + "/restore", SessionJson.Object(w => { if (checkpoint.HasValue) w.WriteBoolean("checkpoint", checkpoint.Value); }), cancellationToken);
+    /// <summary>删除指定快照；原 204 无响应体映射为 JSON null。未知结果不自动重试。</summary>
     public Task<JsonElement> DeleteCheckpointAsync(string id, CancellationToken cancellationToken = default)
-        => client.SendSessionAsync(HttpMethod.Delete, Path + "/checkpoints/" + SessionJson.Segment(id), null, cancellationToken);
+        => client.DeleteCheckpointAsync(Path + "/checkpoints/" + SessionJson.Segment(id), cancellationToken);
     public Task<byte[]> ExportCheckpointAsync(string id, CancellationToken cancellationToken = default)
         => client.SendBinaryAsync(HttpMethod.Get, Path + "/checkpoints/" + SessionJson.Segment(id) + "/export", null, cancellationToken);
     public async Task<JsonElement> ImportCheckpointAsync(byte[] bytes, string? label = null, CancellationToken cancellationToken = default)

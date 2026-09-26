@@ -16,7 +16,8 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
     private readonly SessionTransport transport;
     private readonly Func<JsonElement> scopeProvider;
     private readonly TimeSpan requestTimeout, idleTimeout;
-    private readonly CancellationTokenSource stop = new();
+    private readonly CancellationTokenSource stop;
+    private readonly bool ownsTransport;
 
     internal TerminalCandidateHttpTransport(TansrClientOptions options, HttpClient? httpClient = null)
     {
@@ -26,6 +27,15 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
         if (requestTimeout <= TimeSpan.Zero || requestTimeout.TotalMilliseconds > int.MaxValue ||
             idleTimeout <= TimeSpan.Zero || idleTimeout.TotalMilliseconds > int.MaxValue) throw new ArgumentOutOfRangeException(nameof(options));
         transport = new SessionTransport(options, httpClient);
+        ownsTransport = true; stop = new CancellationTokenSource();
+    }
+
+    internal TerminalCandidateHttpTransport(SessionTransport transport, Func<JsonElement> scopeProvider,
+        TimeSpan requestTimeout, TimeSpan idleTimeout, CancellationToken clientLifetime)
+    {
+        this.transport = transport; this.scopeProvider = scopeProvider;
+        this.requestTimeout = requestTimeout; this.idleTimeout = idleTimeout;
+        stop = CancellationTokenSource.CreateLinkedTokenSource(clientLifetime);
     }
 
     private JsonElement Scope()
@@ -171,5 +181,5 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
             }
         }
     }
-    public void Dispose() { stop.Cancel(); transport.Dispose(); }
+    public void Dispose() { stop.Cancel(); if (ownsTransport) transport.Dispose(); }
 }

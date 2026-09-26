@@ -77,8 +77,17 @@ public sealed class WindowsBackgroundHost : IDisposable
         TerminalCandidateContract.BackgroundToolDefinitionSha256, InvokeAsync);
 
     private async Task<JsonElement> InvokeAsync(JsonElement request, WindowsBusinessToolContext context, CancellationToken ct)
+        => await InvokeCoreAsync(request, context, true, ct).ConfigureAwait(false);
+
+    internal Task<JsonElement> InvokeSandboxAsync(JsonElement request, WindowsBusinessToolContext context, CancellationToken ct)
+        => InvokeCoreAsync(request, context, false, ct);
+
+    private async Task<JsonElement> InvokeCoreAsync(JsonElement request, WindowsBusinessToolContext context, bool ownProfile, CancellationToken ct)
     {
-        Check(); ValidateProfile(context.Operation, request); await context.GuardAsync(ct).ConfigureAwait(false); ct.ThrowIfCancellationRequested();
+        Check();
+        if (ownProfile) ValidateProfile(context.Operation, request);
+        else TerminalCandidateContract.Validate("BackgroundRequest", request);
+        await context.GuardAsync(ct).ConfigureAwait(false); ct.ThrowIfCancellationRequested();
         await ExpireAsync().ConfigureAwait(false);
         string action = Text(request, "action"); JsonElement response;
         if (action == "launch")
@@ -148,6 +157,8 @@ public sealed class WindowsBackgroundHost : IDisposable
         var process = new WindowsProcessRequest(selected.TrustedExecutablePath, selected.Arguments,
             () => context.Workspace.AcquireProcessDirectory(Text(request, "cwd")))
         {
+            ExpectedExecutableSha256 = selected.ExpectedExecutableSha256,
+            ValidateBeforeStart = selected.ValidateBeforeStart,
             Timeout = TimeSpan.FromMilliseconds(timeout),
             MaxOutputBytes = maximumBytes,
             MaxPendingChunks = selected.MaxPendingChunks,

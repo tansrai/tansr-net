@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Windows.Storage;
 
@@ -45,8 +46,7 @@ public sealed class SqliteMemoryPublicationCapacity
 }
 
 /// <summary>确定的 publication 业务拒绝；不代表 COMMIT 未知或执行回执已经耐久。</summary>
-public sealed class SqliteMemoryPublicationException : Exception
+public sealed class SqliteMemoryPublicationException : MemoryPublicationRejectedException
 {
-    public SqliteMemoryPublicationException(string code) : base("Tansr memory publication: " + code) { Code = code; }
-    public string Code { get; }
+    public SqliteMemoryPublicationException(string code) : base(code, false) { }
 }

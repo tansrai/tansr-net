@@ -25,7 +25,9 @@ internal sealed class WindowsBackgroundArtifact
     internal WindowsBackgroundArtifact(SafeFileHandle parent, string name, int maximumBytes)
     {
         limit = maximumBytes;
-        handle = NativeWorkspace.OpenFile(parent, name, write: true, create: true);
+        // 工件只属于当前 runtime，不是耐久执行见证。操作系统在宿主骤停时也关闭
+        // 此原句柄并删除同一对象；无按名字扫描、无重启时误删另一宿主工件的窗口。
+        handle = NativeWorkspace.OpenFile(parent, name, write: true, create: true, deleteOnClose: true);
         try { stream = new FileStream(handle, FileAccess.ReadWrite, 16384, false); }
         catch { try { NativeWorkspace.DeleteOpenedFile(handle); } finally { handle.Dispose(); } throw; }
     }

@@ -9,7 +9,7 @@ using Tansr.Sdk.Terminal;
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>原 Node 设备记忆 publication SQLite 格式。只搬运不透明 UTF-8 正文；记忆决策与删除语义由 Serve 负责。</summary>
-public sealed class SqliteMemoryPublicationStore : IDisposable
+public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDisposable
 {
     public const string Format = "terminal-memory-publication-sqlite-v1";
     public const int MaximumBodyBytes = 4194304;
@@ -241,6 +241,11 @@ public sealed class SqliteMemoryPublicationStore : IDisposable
     }
 
     public Task<SqliteMemoryPublicationCapacity> GetCapacityAsync(CancellationToken cancellationToken = default) => Task.FromResult(Run(_ => Capacity(), cancellationToken));
+
+    /// <summary>读取本机已提交的不透明出版快照；仍核对当前主体及文件身份。不生成执行 owner，不运行记忆治理，也不证明远端授权仍有效。</summary>
+    public Task<byte[]?> ReadPublicationAsync(CancellationToken cancellationToken = default)
+        => Task.FromResult(Run(_ => Publication()?.Body.ToArray(), cancellationToken));
+
     public Task CloseAsync(CancellationToken cancellationToken = default) { cancellationToken.ThrowIfCancellationRequested(); Dispose(); return Task.CompletedTask; }
 
     public void Dispose()

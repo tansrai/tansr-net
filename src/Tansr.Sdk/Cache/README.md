@@ -1,6 +1,19 @@
-# 私有逻辑缓存候选消费者
+# 逻辑缓存连续性候选消费者
 
-此目录只实现 `tansr-cli@027de7e2` 已有的 Serve HTTP 消费面，所有类型均为 `internal`，还不是稳定 NuGet API。原 RFC 标明 `private ... candidate v0.2`、`Unreleased independent SDK2 contract`；调用方必须显式 `new CacheClient(client, enableCandidate: true)`，并提供可信 `PrincipalProvider` 和 `ExecutionScopeProvider`。Serve 会签前不得把这个实现描述为已冻结公开合同。它不会改 SDK1 默认会话合同，也不会自动打开缓存或调用付费模型。
+此目录实现 `tansr-cli@027de7e2` 已有的 Serve HTTP 消费面。原 RFC 标明 `private ... candidate v0.2`、`Unreleased independent SDK2 contract`；还不是稳定 NuGet API。低阶 `CacheClient`、wire DTO 和编码器继续 `internal`，开发者经显式 `new CacheContinuityClient(client, enablePreview: true)` 门面消费，并提供可信 `PrincipalProvider` 和 `ExecutionScopeProvider`。Serve 会签前不得把这个实现描述为已冻结公开合同。它不会改 SDK1 默认会话合同，也不会自动打开缓存或调用付费模型。
+
+```csharp
+var cache = new CacheContinuityClient(client, enablePreview: true);
+var operation = await cache.PrepareOpenAsync(session.Id, CacheContinuityOpenKind.New,
+    requestId: Guid.NewGuid().ToString("D"), cancellationToken: cancellationToken);
+// 使用宿主受保护的耐久存储：完整保存 Action、OriginalPrincipal、ExportOriginalRequest()。
+// 存储成功之后才 SubmitAsync。提交未知时保留同一 operation，调用 QueryAsync，不换键重做。
+var receipt = await cache.SubmitAsync(operation, cancellationToken);
+// 同样保存 ExportOriginalReceipt()；如需保存 Ticket，仅使用 ExportProtectedValue() 并加密。
+// 进程恢复：cache.RestoreOperation(savedAction, savedRequest, savedPrincipal, savedReceipt)，然后 QueryAsync。
+```
+
+门面公开 `PrepareOpen/Renew/Rotate/Rebind/Close`、`Submit/Query/ReplayOriginal`、`RestoreOperation`、当前绑定及原空诊断页。HTTP 拒绝通过 `CacheContinuityException` 保留固定状态码、code、retryAction 和 fallback，不暴露服务器自由文本。创建请求只表示意图，不能把返回的历史 `active` 回执解释为当前授权，也不能把合法接续当作供应商缓存命中或节费证据。
 
 `Contract/sources.json` 记录完整来源修订、原文件路径、字节数与 SHA256。原 `027de7e2` 的七份源码保留，旧schema另存 `sdk2-cache-v1.baseline.schema.json`；当前嵌入schema来自 Serve 独占树 `cli-SRV-01-terminal-services`，基点 `b2cd6641e1886d9e74439e3b7623be57bc3247ba` 加未提交的错误状态修正，SHA256 `88e7941861fab1a6380b9226e3a42adb8c872efdf720dc36e92ffa42da43d818`。它仍是未发布候选，不能冒作原 `027de7e2` 的冻结schema。路由、两跳账本、provider DTO 与控制编码器原字节未改，既有 `contract/sdk2-ext-v1` 快照保持不变。局部 `CacheSchema` 沿用本仓现有有界 schema 词表实现，加载独立资源，避免拿根 `anyOf` 接受不属于终端的 gateway/host DTO。
 

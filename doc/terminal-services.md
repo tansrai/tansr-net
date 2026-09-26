@@ -28,6 +28,40 @@ HTTP 失回时保留原请求。配置目前没有按请求键只读查询的接
 
 ## 分块输出与身份分离
 
+普通原生应用可直接使用 `Tansr.Sdk.Hosting.TerminalDeviceHost`。它复用原设备宿主，把初始化、执行绑定、终端输出绑定、输出 sink 和执行通知装配成一次启动；原 `DeviceSessionHost` 和低阶接口仍保留。应用不必实现自己的领取、心跳、分块发送或 SSE 游标循环。
+
+```csharp
+using var host = new TerminalDeviceHost(
+    new ExecutionClient(controller), new ExecutionClient(device),
+    controllerTerminal, deviceTerminal,
+    output => new WindowsExecutorBackend(
+        executorId, workspaces, interpreter: trustedInterpreter,
+        processFactory: trustedProcessFactory, executionOutput: output),
+    durableJournal,
+    new TerminalDeviceOptions {
+        SessionId = session.Id,
+        WorkspaceId = workspaceId,
+        BindingRequestId = retainedBindingRequestId,
+        RequestedTools = new[] { "Shell" }
+    }, authorizeOnDevice);
+await host.StartAsync(cancellationToken);
+// Ready 后才能发送需要该设备的会话任务。
+// 退出时先等待真实设备收尾，再释放应用所有的连接、工作区和账本。
+await host.StopAsync();
+```
+
+`BindingRequestId` 必须由宿主保存到原绑定意图；失回不会自动注册新设备或重新提交绑定。两份 `TerminalConnection` 仍须显式启用预览，并持各自控制／设备凭据。设备批准回调不替代 Serve 的权限判断，工具进程仍受本机工作区、解释器与执行日志约束。
+
+已有 `TansrClient` 时，使用 `TerminalConnection.ForClient(client, enablePreview: true)` 复用它的认证传输。受控本地 Serve 的进程归属校验、私有凭据和取消寿命一起保留，不另取票据或连接任意 localhost 端口。关闭借用的连接不关闭原客户端；原客户端关闭则终止借用连接的请求。控制端和窄权限执行端仍分别借用各自的客户端，不能因此扩大设备权限。
+
+对于从真实输出关联接口得到的 `operation`，调用 `host.ObserveOutputAsync(operation, observer)` 即可。SDK 保留同一个 UTF-8 解码器、摘要和游标，在有界范围内只重连读取；用户回调异常、授权错误和非法协议不会重试。回调收到 `TerminalOutputUpdate`，分别给出片段、序号、缺口和封口状态；完成的输出不代表工具执行成功。`StopAsync` 等待真实在途观察退出，`Dispose` 仅请求取消，不能当作排空完成。
+
+`TerminalDeviceHost` assembles the existing device and terminal protocols without changing
+their authority boundaries. The controller and device retain separate credentials. Preserve
+the original binding request identity; uncertain writes are not repeated. Output observation
+keeps its decoder and cursor across bounded read-only reconnects. Await `StopAsync` before
+disposing caller-owned connections, workspaces and durable storage.
+
 控制端用 `TerminalConnection(controllerOptions, enablePreview: true)` 发现并绑定固定合同，在设备绑定完成后、首次发送前执行 `BindAsync`。绑定请求字段沿 Serve schema；能力发现不等于执行授权。
 
 设备用自己的窄凭据创建另一 `TerminalConnection`，调用 `AttachBinding(controllerBinding)` 接收已验证的类型化绑定。SDK 要求相同服务地址和当前完整 scope，不向设备复制控制端票据。每一次输出写入仍由 Serve 验证原 executor、connection、operation 和 digest。

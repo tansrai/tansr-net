@@ -1,0 +1,9 @@
+{
+  "contract": "terminal-shell-sandbox-v1",
+  "sourceRepository": "tansr-cli",
+  "sourcePath": "doc/rfc/terminal-shell-sandbox-v1.schema.json",
+  "schemaSha256": "be3ebcf6dc650844319a18a15f6abbefb9316f704410b591f9ba6dcab7620fe1",
+  "toolName": "TansrTerminalShellSandbox",
+  "toolDefinitionSha256": "058f31335cbb45a6ffe1b5ede8466013462c544c8108d687f41fa18447d51b96",
+  "status": "explicit opt-in; independent of SDK1 and terminal candidate-7"
+}
