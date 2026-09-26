@@ -296,3 +296,56 @@ r5已完成所有业务链，最后因夹具把 `AgentHandle.settleResources(): 
 最终两包从 `661612ad6c5f9128f2496c31fbdb4c5423e7cf26` 重建；程序集信息版本也指向该提交，包含暖态轮询修正。`build-pack-closure.log` 为0警告0错误，两个pack exit0。`packages-closure` 经全新 `consumers-closure` 隔离本地源实际消费，net48/CLR4与.NET10 Windows的新记忆IO、旧文件/进程入口，以及win-x64核心NativeAOT均通过，见 `package-consumption-closure.log`。SDK核心包466692字节、SHA256 `9d15c35c8b9a20bfda35b3848a34d866bf6c4cde80c41bb03c553c0ac3b8b02b`；Windows包295632字节、SHA256 `97f05efa4fde62ae7d83fa90d21772bbabbae353f09544d1f342f35b1058c839`，完整索引为 `candidate-artifacts-closure.json`。前述799ebc4的第三轮包保留为中间证据，不再是本批最终候选。
 
 本批收编本地NET main的准确提交、运行目录归属和归档清单位于本批 `closure-manifest.json`。后续仅回填文档，不改变已验产品源和候选包。没有配置remote、没有GitHub推送/CI、没有签名或NuGet上传；活动开发树保留在 `worktrees/`，不删除其他会话材料。
+
+## 20260926-NET-06-session-execution：执行通知与真实会话控制
+
+起点 `8b072a23a1dd1fba3e28adbdc5c0b477e34161b7`；原隔离树 `J:/tansr/worktrees/net-NET-01-sdk`，分支 `lane/net/NET-03-execution-notifications`。本批证据集中在 `J:/tansr/archive/20260926-NET-06-session-execution`。沿原六张工程卡及24项断言实施，不新增统计卡。Serve/kernel 仍由 SDK2.0 会话单写，C# 只消费原候选协议。
+
+- **NET-03：** `ExecutionHostOptions` 和 `DeviceSessionOptions.ExecutionNotifications` 显式装配已协商的 executor SSE；`TerminalExecutionNotifications` 使用设备自己的窄凭据。通知只唤醒原领取循环或查询完整原操作，不代替耐久 claim/receipt，不执行通知正文。原构造函数与轮询路径保留，失联只重连原连接，权限/代际/绑定错误失败，不自动重注册。停止时等待真实观察退出；忽略取消的来源报明确超时。
+- **NET-02/05：** 三种示例通过公开 `ReadMetadataAsync` 分开展示 selected、active、核心预算和 lastUsage；缺席保持未知，累计用量不冒充上下文占用。共享配置按钮对已确定的首次拒绝保留原不可变证据，允许用户明确发起下一次操作；未知提交仍只恢复原键。Console `--once` 改用已有 `StartRun` 的接受/本轮终局关联，避免旧终局重放误判本轮完成，交互式多轮入口保留。
+- **NET-06：** 新增8项真实 Serve 会话控制/提示词场景及3项 Windows 原生执行场景，覆盖原操作回执丢失、同轮插入、配置回滚、实际分块双流、输出重连与进程树取消。真实 kernel、执行账本和输出 spool 均运行，仅上游模型为合成响应；未付费调用，未宣称 Electron 同机场景性能对照。
+
+### 实际红例与修正归属
+
+1. SSE 的合法初始重试帧无 name/id 且 data 为空，候选 JSON 解析原先将其误判。只跳过此精确空帧；命名帧、有 id 的空帧和非空坏 JSON 仍拒绝。executor 的 `reconcile-required` 沿原 Node 合同允许较低/相同通知游标重开，不改变工具输出序号和原回执。
+2. 执行通知停止时，关闭 HTTP 流可能返回 `network_error` 而非取消异常，旧外层 catch 会误报宿主失败。新增确定性红例复现原栈；仅停止后的流收尾按取消处理，停止前已记录的致命错误仍抛出。原红/绿日志分别保留。
+3. Windows 全池的4项旧 Node 互通在进入行为前被固定源码 SHA 校验拒绝。建立只读 detached 参考树 `J:/tansr/worktrees/cli-NET-legacy-contract`，准确锁定原 `027de7e2d9b647374b7fe94cb0e4a7429a9195e2` 后4项通过；没有修改产品、原合同或SHA门，参考环境归属见 `legacy-contract-reference.json`。
+4. 新会话真实控制链发现 Serve metadata 使用已签发但尚未进入可重放日志的游标，立即订阅产生 `event_replay_gap`。交 Serve 单写者修正事件发布屏障；C# 不关闭 gap 校验、不改客户端起始游标或增加等待时间。最终来源与实跑结果须以下方回执为准。
+
+5. 原生 STREAM 联验曾被停止后的通知错误打断；修正停止竞态后正常流、真实中断、输出失回三例通过。LOSS 的原输出捕获已明确失败，`CloseAsync` 仍保留同一异常对象；测试精确核对此事实，不能把它当成正常输出成功，也不吞掉任意清理异常。所有失败路径保留主异常与时间记录。
+6. 新控制夹具初跑误将 `recoverable:true` 的 `context.output_budget` 告警当致命终局；同时设置合成输出帽128，导致核心依法关闭低于最小1024的思考预算。夹具按原终局合同区分告警/致命失败，并将合成输出帽设8192、思考预算1024，实际验证 TWP `reasoning=low` 及关闭后缺席；产品默认和付费预算未改。
+7. 原记忆联验暴露 `forget` 已耐久提交但回包 `stale_generation` 的回归；原管理观察与实际 SQLite 互证 `committed/durable:true`、revision3→4、删除代际0→1，主题和索引已删除。Serve新增已观测删除代际防回退后，既有路由提交后仍用旧代际生命周期复验，遮蔽了成功回执。初审把两份未变化文件误概括为三份不变；根复核确认 `memory-management.ts` 有实际差异，按新增防回退与既有回执语义的兼容回归登记。原输入/操作键保留，未重投或跳过；由 Serve 原记忆写区修正，最终复验另见下方回执。
+
+### 本批本地回执与固定卡结算
+
+产品源码为 `c7be8aaab523885909f0f62ad0611e1ca9ce2a21`，后续夹具/文档修正不改变产品或包。以下证据相对本批 archive；重叠批次不相加。
+
+| 验证 | 结果 | 证据 |
+|---|---|---|
+| 锁定恢复、全解决方案 Release 构建 | exit0，核心两目标、Windows两目标及三示例0警告0错误；项目引用锁更新不改变依赖版本 | `restore-locked.log`、`build-r3.log` |
+| 格式 | 全仓 verify-no-changes exit0；最后控制夹具另复验 | `format-final.log`、`format-controls.log` |
+| 核心完整池 | 703/703，0失败/跳过 | `core-final.log`、`results/core-final.trx` |
+| Windows 完整池与环境复验 | 原343项通过339、4项固定源门拒绝；正确原SHA复验4/4，无未解决行为失败 | `windows/manifest.json`、`windows/results/windows.trx`、`legacy-reference.log`、`results/legacy-reference.trx` |
+| 原生执行3场景 | 3/3，真实进程/Serve spool/SSE，原操作各执行一次；177块为后续同源all组事实，不能当性能基准 | `serve-execution-r2.log`；后续`serve-integration-r3.log` |
+| 会话控制与提示词8场景 | 8/8，0失败/跳过，4.9262秒；25次合成请求，无付费模型 | `serve-controls-r4.log`，工作树`artifacts/serve-integration/run-2v3my1/result.json` |
+| 上游同源 | candidate-7；base `07b32658` 加已冻结未提交源，3020个文件/35条workspace解析前后相同 | `serve-source-snapshot-final.json`，SHA256 `c13968658df8f23700c5cb56b7a0cea66c606b0443def75b66dd14dc0bb73058` |
+| 两包与独立消费 | `0.1.0-preview.1`；net48实际CLR4、现代Windows及win-x64 NativeAOT均exit0 | `pack-core.log`、`pack-windows.log`、`package-consumption.log`、`candidate-artifacts.json` |
+
+SDK 核心包477255字节，SHA256 `79680cf7c41bf9af306a623ae9e85dd0f2054a068a46104f35ccaa7052ec9efd`；Windows包295628字节，SHA256 `ca1e85889b845c1d679296e21327fbdad489aed3a80ef970c1943bcc8c35bfa2`。两包程序集信息版本均指向 `c7be8aa`。原红保留：首次all16为6通过/10失败；修正发布屏障后all16为13通过/3失败，其中两项控制夹具已有8/8补验，记忆删除仍待本轮最终补验；不能把旧分组结果直接称为一次16/16全绿。
+
+| 原断言 | 本轮完整证据 | 结算 |
+|---|---|---|
+| NET-A05 | 真实图文/同轮插入、accepted失回原键恢复、冲突/旧target/终态拒绝、观察断开不interrupt、取消后原会话继续；另以703池中的 TurnInputEditorTests/SessionRunTests 验证拒绝保留原草稿、未知不换键以及受理/终局/取消观察边界 | 通过 |
+| NET-A07 | 真实同会话配置CAS、失回原请求重放、切大/切小拒绝及回滚、忙态保持模型快照、思考启用/关闭；六种fallback/prepend与宿主缺席/显式/空段组合及下一轮刷新；703池中的6项 SessionContextTextTests 和三示例展示接线保持模型/预算/用量分别来自核心 | 通过 |
+
+**原工程卡0/6，剩余6，本批新增完整关闭0，进度0%；原对抗验收4/24，剩余20，本批新增关闭2（A05、A07），进度16.7%。** 原A03/A06保持通过；完整Electron对照0/16。此比例是完整DoD闭环比例，不是已实现代码比例，不给部分卡另折算权重。A08全公开API、A09同机场景性能、A10四向取消、A12扩展装配、A14完整记忆恢复、A17/18实际UI与原发行条件继续保留，未转为额外阻塞A05/A07的条件。
+
+### 最终记忆回归与收编
+
+Serve 单写者将提交后核验改为读取当前 source、重新核当前 authority 与可读权限，保留写前旧代际拒绝；上游局部证据覆盖 POST forget/原回执 GET/原 POST 重放不重做、旧 writer 失效，以及提交后撤权不泄漏回执。C# 原记忆断言、请求键和超时均未改。
+
+原真实记忆单场景最终 **1/1通过、exit0、59.5252秒**，主模型5次/自动提取6次均为合成响应。自动提取→终端耐久出版→下一轮检索采用、pin失回查询原回执、forget正文/索引与下一轮缺席、撤权零派工、同owner重开原回执及全部收尾均通过。证据 `serve-memory-r5.log`，原运行目录 `artifacts/serve-integration/run-ZJHnjF/result.json`；source快照 `serve-source-snapshot-memory.json` SHA256 `75b2f25d659ac3d0077b67972df4be27de4f206f90210d43f1c7f0e5231c00cd`，3020文件/35解析前后相同，base07b的未提交候选事实保留。
+
+16项真实联验已按受影响分组全部覆盖通过：r3原13通过中含6项提示词、3项执行及4项旧公开会话/档案；r4控制8/8覆盖两项夹具失败并与其中6项重叠；r5记忆1/1覆盖剩余失败。不同源与重叠批次不得相加或写成一次16/16。最后两次只跑受影响分组，未反复启动完整记忆池；本批无未解决的新增NET或本链Serve正确性失败。A14其余矩阵仍未因此自动通过。
+
+NET产品提交 `c7be8aa`、最终夹具提交 `d70a4b4` 及本节文档收编本地main，准确最终SHA与归档文件校验见 `closure-manifest.json`。三单回填输入为本批 `net-doc-handoff.md`，CLI中的正式三单由Serve会话同步。NET仍无remote，未推GitHub、未做远端CI、未上传NuGet、未签名或部署；原固定仓保持main，活动NET树与只读旧合同参考树均保留并登记。
