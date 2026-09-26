@@ -57,6 +57,10 @@ public sealed class WindowsProcessExecutorTests : IDisposable, IClassFixture<Win
             // 子进程输出后必须等待此测试确认双流已经可见，不能靠延长 sleep 维持“仍在运行”。
             await streaming.Task.WaitAsync(TimeSpan.FromSeconds(15));
             Assert.False(run.IsCompleted);
+            var pending = Path.Combine(directory, "presentation.tmp"); var target = Path.Combine(directory, "presentation.json");
+            File.WriteAllText(pending, "first"); File.Move(pending, target);
+            File.WriteAllText(pending, "second"); File.Replace(pending, target, null);
+            Assert.Equal("second", File.ReadAllText(target));
         }
         finally
         {

@@ -65,10 +65,13 @@ export async function startExecutionPipelineFixture({ source, directory, authent
         }
         return response(request, 'NET_PIPELINE_SHELLSANDBOX_DONE');
       }
-      const planned = /NET_BACKGROUND:([^\n]+)$/.exec(prompts);
+      // The real context manager may append another user block after the original prompt.
+      // Select the latest explicitly marked synthetic action, not the tail of assembled context.
+      const planned = [...prompts.matchAll(/NET_BACKGROUND:(\{[^\r\n]+\})/g)].at(-1);
       if (planned) {
         const action = JSON.parse(planned[1]);
         assert.ok(['Shell', 'ShellTask', 'ShellOutput'].includes(action.name));
+        assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Shell', 'ShellOutput', 'ShellTask']);
         const count = (modelCalls.get(action.id) ?? 0) + 1; modelCalls.set(action.id, count);
         assert.ok(count <= 2, 'Each background business action has one proposal and one original result.');
         if (count === 1) { backgroundActions.push(action); return response(request, null, action); }

@@ -41,6 +41,34 @@ public sealed class WindowsDuplexProcessTests : IDisposable, IClassFixture<Windo
     }
 
     [Fact]
+    public async Task LiveOwnedProcessPermitsApplicationAtomicSavesAndKeepsExecutableAndDirectoryIdentity()
+    {
+        var childDirectory = Path.Combine(directory, "child"); var siblingDirectory = Path.Combine(directory, "sibling");
+        Directory.CreateDirectory(childDirectory); Directory.CreateDirectory(siblingDirectory);
+        var options = new WindowsDuplexProcessOptions(fixture.Executable, ["echo"], () => workspace.AcquireProcessDirectory("child"));
+        options.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        using var process = await WindowsDuplexProcess.StartAsync(options);
+        try
+        {
+            await process.WriteLineAsync("started"); Assert.Equal("started", await process.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(process.Completion.IsCompleted);
+            foreach (var location in new[] { directory, siblingDirectory, childDirectory })
+            {
+                var target = Path.Combine(location, "state.json"); var pending = Path.Combine(location, "state.tmp");
+                File.WriteAllText(pending, "first"); File.Move(pending, target);
+                File.WriteAllText(pending, "second"); File.Replace(pending, target, null);
+                Assert.Equal("second", File.ReadAllText(target));
+            }
+            Assert.Throws<IOException>(() => Directory.Move(childDirectory, childDirectory + "-substituted"));
+            Assert.Throws<IOException>(() => File.Open(fixture.Executable, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete));
+            Assert.Throws<IOException>(() => File.Move(fixture.Executable, fixture.Executable + ".substituted"));
+            await process.WriteLineAsync("still-original"); Assert.Equal("still-original", await process.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        finally { Assert.True((await process.CloseAsync()).CleanupConfirmed); }
+        Assert.Empty(Directory.GetFiles(childDirectory, ".tansr-sdk-process-*.lock"));
+    }
+
+    [Fact]
     public async Task CancelingPendingReadDoesNotDestroyTheConnectionOrLoseNextFrame()
     {
         using var process = await WindowsDuplexProcess.StartAsync(Options("echo"));

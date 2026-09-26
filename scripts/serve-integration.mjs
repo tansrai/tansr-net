@@ -244,7 +244,9 @@ async function run() {
   child.stdout.pipe(process.stdout); child.stderr.pipe(process.stderr);
   let exitCode = 1;
   try {
-    const ready = await waitMessage(child, 'ready');
+    // The complete source suite imports eleven isolated fixtures; allow bounded cold
+    // initialization without changing test execution or resource-cleanup deadlines.
+    const ready = await waitMessage(child, 'ready', 90000);
     const url = new URL(ready.url);
     assert.equal(url.hostname, '127.0.0.1');
     console.log(JSON.stringify({ acceptance: 'real-Serve-source-HTTP-SSE', kernel: 'controlled-FakeAgentFactory',

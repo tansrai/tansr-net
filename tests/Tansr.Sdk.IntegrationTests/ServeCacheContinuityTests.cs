@@ -97,6 +97,41 @@ public sealed class ServeCacheContinuityTests
         await Assert.ThrowsAsync<TansrHttpException>(() => movedClient.ResumeSessionAsync(toDelete.Id, cancellationToken: ct));
         var complete = await Command(new { id = "completed-cache-facts", action = "inspect" }, ct);
         Assert.Equal(2, complete.GetProperty("restarts").GetInt32()); Assert.Equal(2, complete.GetProperty("modelExchanges").GetInt32());
+
+        // Natural ticket TTL is separate from operationEpoch or mapping lifetime. The real
+        // Serve forwards one original operation to the authoritative synthetic peer, which
+        // rejects its expired ticket without a C2 request, fallback or replacement identity.
+        await Command(new { id = "arm-natural-ticket-expiry", action = "arm-ticket-expiry" }, ct);
+        var expirySession = await movedClient.CreateSessionAsync(new CreateSessionOptions(), ct);
+        var expiryOpen = await movedCache.PrepareOpenAsync(expirySession.Id, CacheContinuityOpenKind.New,
+            requestId: "net-short-ticket-original", cancellationToken: ct);
+        var expiryReceipt = await movedCache.SubmitAsync(expiryOpen, ct); Assert.NotNull(expiryReceipt.Ticket);
+        var expiryAt = DateTimeOffset.Parse(expiryReceipt.TicketExpiresAt!, System.Globalization.CultureInfo.InvariantCulture);
+        var renew = await movedCache.PrepareRenewAsync(expiryReceipt.Binding, expiryReceipt.Ticket!, "net-expired-ticket-renew", ct);
+        byte[] renewOriginal = renew.ExportOriginalRequest(); string originalOwner = renew.OriginalPrincipal;
+        var beforeExpiry = await Command(new { id = "short-ticket-issued", action = "inspect", sessionId = expirySession.Id }, ct);
+        var issued = Assert.Single(beforeExpiry.GetProperty("shortTickets").EnumerateArray());
+        Assert.Equal(expiryAt, DateTimeOffset.Parse(issued.GetProperty("expiresAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture));
+        Assert.Equal(1500, (expiryAt - DateTimeOffset.Parse(issued.GetProperty("issuedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture)).TotalMilliseconds);
+        var wait = expiryAt - DateTimeOffset.UtcNow + TimeSpan.FromMilliseconds(100); if (wait > TimeSpan.Zero) await Task.Delay(wait, ct);
+        var stillActive = await movedCache.ReadBindingAsync(expiryReceipt.Binding.Id, ct);
+        Assert.Equal("active", stillActive.State); Assert.Equal(expiryReceipt.Binding.LogicalReference, stillActive.LogicalReference);
+        Assert.Equal(renew.OperationEpoch, (await movedCache.DiscoverAsync(ct)).OperationEpoch);
+        var expired = await Assert.ThrowsAsync<CacheContinuityException>(() => movedCache.SubmitAsync(renew, ct));
+        Assert.Equal(410, expired.StatusCode); Assert.Equal("ticket_expired", expired.Code);
+        Assert.Equal("none", expired.RetryAction); Assert.Equal("none", expired.Fallback);
+        Assert.Null(renew.ExportOriginalReceipt()); Assert.Equal(renewOriginal, renew.ExportOriginalRequest()); Assert.Equal(originalOwner, renew.OriginalPrincipal);
+        Assert.Equal("query_status_required", (await Assert.ThrowsAsync<TansrProtocolException>(() => movedCache.SubmitAsync(renew, ct))).Code);
+        var afterExpiry = await Command(new { id = "short-ticket-rejected", action = "inspect", sessionId = expirySession.Id }, ct);
+        Assert.Equal(beforeExpiry.GetProperty("latestSource").GetRawText(), afterExpiry.GetProperty("latestSource").GetRawText());
+        Assert.Equal(beforeExpiry.GetProperty("intents").GetRawText(), afterExpiry.GetProperty("intents").GetRawText());
+        Assert.Equal(2, afterExpiry.GetProperty("modelExchanges").GetInt32());
+        var rejection = Assert.Single(afterExpiry.GetProperty("expiryRejections").EnumerateArray());
+        Assert.Equal("active", rejection.GetProperty("mappingState").GetString());
+        Assert.True(DateTimeOffset.Parse(rejection.GetProperty("observedAt").GetString()!, System.Globalization.CultureInfo.InvariantCulture) >= expiryAt);
+        var unknownDiagnostics = await movedCache.ReadDiagnosticsAsync(expiryReceipt.Binding.Id, cancellationToken: ct);
+        Assert.Empty(unknownDiagnostics.GetProperty("rows").EnumerateArray()); Assert.Equal(JsonValueKind.Null, unknownDiagnostics.GetProperty("next").ValueKind);
+        await expirySession.CloseAsync(ct);
     }
 
     private static async Task SyntheticTurn(AgentSession session, string prompt, CancellationToken ct)

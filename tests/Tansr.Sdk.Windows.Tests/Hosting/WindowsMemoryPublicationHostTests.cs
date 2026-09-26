@@ -304,7 +304,10 @@ public sealed class WindowsMemoryPublicationHostTests
     private static string Owner(JsonElement operation) => WireJson.CanonicalString(Element(new { scope = operation.GetProperty("scope"), sessionId = operation.GetProperty("sessionId"), binding = operation.GetProperty("binding") }));
     private static Task<JsonElement> Direct(WindowsMemoryPublicationHost host, JsonElement input, JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard, CancellationToken ct)
     {
-        var context = Activator.CreateInstance(typeof(WindowsBusinessToolContext), BindingFlags.Instance | BindingFlags.NonPublic, null, [operation, workspace, guard], null)!;
+        // 当前内部上下文也包含受控进程通道；记忆publication不得借用它获得Shell能力。
+        Func<WindowsProcessRequest, CancellationToken, Task<WindowsProcessResult>> noProcess = (_, _) =>
+            throw new InvalidOperationException("Memory publication must not execute a process.");
+        var context = Activator.CreateInstance(typeof(WindowsBusinessToolContext), BindingFlags.Instance | BindingFlags.NonPublic, null, [operation, workspace, guard, noProcess, false], null)!;
         return (Task<JsonElement>)typeof(WindowsMemoryPublicationHost).GetMethod("InvokeAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(host, [input, context, ct])!;
     }
     private sealed class Fixture : IDisposable

@@ -41,7 +41,16 @@ public sealed partial class ServeSessionApiTests
             if (mode == "delayed")
             {
                 await Assert.ThrowsAsync<TimeoutException>(() => observation.WaitForResourcesAsync(session.Id, TimeSpan.FromMilliseconds(100), pollInterval: TimeSpan.FromMilliseconds(10), cancellationToken: ct));
-                var pending = await observation.ReadResourcesAsync(session.Id, cancellationToken: ct); Assert.Equal(TerminalResourceState.Draining, pending.State); Assert.False(pending.Completed); Assert.True(pending.ExecutionEnded);
+                // Close acceptance precedes the registry's real event publication/owner IO.
+                // Wait for that phase boundary, rather than treating a fixed 100ms as evidence.
+                using var phaseDeadline = CancellationTokenSource.CreateLinkedTokenSource(ct); phaseDeadline.CancelAfter(TimeSpan.FromSeconds(5));
+                var pending = await observation.ReadResourcesAsync(session.Id, cancellationToken: phaseDeadline.Token);
+                while (pending.State == TerminalResourceState.Accepted)
+                {
+                    await Task.Delay(10, phaseDeadline.Token);
+                    pending = await observation.ReadResourcesAsync(session.Id, cancellationToken: phaseDeadline.Token);
+                }
+                Assert.Equal(TerminalResourceState.Draining, pending.State); Assert.False(pending.Completed); Assert.True(pending.ExecutionEnded);
                 await CommandAsync(new { action = "release-resource", sessionId = session.Id }, ct);
                 var completed = await observation.WaitForResourcesAsync(session.Id, TimeSpan.FromSeconds(5), cancellationToken: ct);
                 Assert.True(completed.Completed); Assert.Equal(original.EpochStartSequence, completed.EpochStartSequence);
@@ -86,6 +95,9 @@ public sealed partial class ServeSessionApiTests
             var compacted = await session.CompactAsync(new() { Instructions = "Keep NET synthetic decisions and identifiers.", CheckpointLabel = "before compact" }, ct);
             Assert.Equal("compacted", compacted.GetProperty("status").GetString()); Assert.NotEmpty(compacted.GetProperty("compactionId").GetString()!);
             var compactedUsage = await CommandAsync(new { action = "usage", sessionId = session.Id }, ct);
+            Assert.Equal(JsonValueKind.Object, compactedUsage.GetProperty("totals").ValueKind);
+            Assert.True(compactedUsage.GetProperty("totals").GetProperty("totalTokens").GetInt64() >= 620,
+                "Rewriting compacted history must retain the original paid usage ledger.");
             Assert.True((await session.GetHistoryAsync(ct)).GetProperty("messages").GetArrayLength() < beforeMessages.GetArrayLength());
             var restore = await session.RestoreCheckpointAsync(checkpointId, false, ct);
             Assert.Equal("restored", restore.GetProperty("status").GetString()); Assert.Equal(checkpointId, restore.GetProperty("checkpointId").GetString());

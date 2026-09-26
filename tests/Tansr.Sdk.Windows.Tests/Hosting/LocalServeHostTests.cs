@@ -50,17 +50,26 @@ public sealed class LocalServeHostTests : IClassFixture<LocalServeFixture>, IDis
         options.Environment["TANSR_FIXTURE_USER_TOKEN"] = "synthetic-fixed-user-ticket";
         options.Environment["TANSR_FIXTURE_REQUESTS"] = records;
         var starting = LocalServeHost.StartAsync(options); headers["x-tansr-demo-user-token"] = "changed-after-start";
-        using var host = await starting; Assert.True(host.IsReady);
-        var observed = await File.ReadAllLinesAsync(records);
-        Assert.Equal(new[] { "synthetic-fixed-user-ticket|invalid-token", "synthetic-fixed-user-ticket|valid-token" }, observed);
-        using var anonymousClient = host.CreateClient();
-        await Assert.ThrowsAsync<TansrProtocolException>(() => anonymousClient.ListSessionsAsync());
-        Assert.Equal("<missing>|valid-token", (await File.ReadAllLinesAsync(records)).Last());
-        var clientHeaders = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = "synthetic-fixed-user-ticket" };
-        using var authenticatedClient = host.CreateClient(SessionContract.Sdk1, () => "local-binding-not-user-ticket", null, 2097152, 2097152, clientHeaders);
-        clientHeaders["x-tansr-demo-user-token"] = "changed-after-client-construction";
-        Assert.Equal(0, (await authenticatedClient.ListSessionsAsync()).GetProperty("total").GetInt32());
-        Assert.True((await host.StopAsync()).CleanupConfirmed);
+        using var host = await starting;
+        try
+        {
+            Assert.True(host.IsReady);
+            var observed = await File.ReadAllLinesAsync(records);
+            Assert.NotEmpty(observed);
+            Assert.All(observed, request => Assert.Contains(request, new[]
+            { "synthetic-fixed-user-ticket|invalid-token", "synthetic-fixed-user-ticket|valid-token" }));
+            Assert.Equal("synthetic-fixed-user-ticket|invalid-token", observed[0]);
+            Assert.Equal("synthetic-fixed-user-ticket|valid-token", observed[^1]);
+            using var anonymousClient = host.CreateClient();
+            var rejected = await Assert.ThrowsAsync<TansrHttpException>(() => anonymousClient.ListSessionsAsync());
+            Assert.Equal(401, rejected.StatusCode); Assert.Equal("unauthorized", rejected.Code);
+            Assert.Equal("<missing>|valid-token", (await File.ReadAllLinesAsync(records)).Last());
+            var clientHeaders = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = "synthetic-fixed-user-ticket" };
+            using var authenticatedClient = host.CreateClient(SessionContract.Sdk1, () => "local-binding-not-user-ticket", null, 2097152, 2097152, clientHeaders);
+            clientHeaders["x-tansr-demo-user-token"] = "changed-after-client-construction";
+            Assert.Equal(0, (await authenticatedClient.ListSessionsAsync()).GetProperty("total").GetInt32());
+        }
+        finally { Assert.True((await host.StopAsync()).CleanupConfirmed); }
     }
 
     [Fact]
@@ -196,6 +205,8 @@ public sealed class LocalServeFixture : IDisposable
             while(true) using(var peer=listener.AcceptTcpClient()) using(var stream=peer.GetStream()) {
               var reader=new StreamReader(stream,Encoding.ASCII,false,1024,true);
               string line=reader.ReadLine(), auth=null, principal=null; int size=0;
+              // A canceled owner/peer check can close TCP before sending any HTTP request.
+              if(line==null)continue;
               while((line=reader.ReadLine())!=null && line.Length>0) {
                 size+=line.Length;if(size>65536)throw new Exception("header cap");
                 if(line.StartsWith("Authorization:",StringComparison.OrdinalIgnoreCase))auth=line.Substring(14).Trim();

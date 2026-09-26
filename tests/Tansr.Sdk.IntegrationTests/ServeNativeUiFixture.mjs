@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { createServer } from 'node:http';
 import { verifyServeSourceSnapshot } from '../../scripts/serve-source-snapshot.mjs';
 
 const source = process.env.TANSR_SERVE_SOURCE;
@@ -41,6 +42,36 @@ let recordWrite = Promise.resolve();
 const saveRecords = () => { const bytes = JSON.stringify(records); recordWrite = recordWrite.then(async () => {
   await writeFile(join(directory, 'native-ui-records.tmp'), bytes); await rename(join(directory, 'native-ui-records.tmp'), join(directory, 'native-ui-records.json'));
 }); return recordWrite; };
+// Only synthetic echo is exposed; the application still performs the public MCP handshake,
+// approved tools/list lookup, frozen-definition check and tools/call over real HTTP.
+const mcp = createServer(async (request, response) => {
+  try {
+    assert.equal(request.url, '/mcp');
+    assert.equal(request.headers.authorization, `Bearer ${token}`);
+    if (request.method === 'DELETE') { response.writeHead(204).end(); return; }
+    assert.equal(request.method, 'POST');
+    const chunks = []; let length = 0;
+    for await (const chunk of request) { length += chunk.length; assert.ok(length <= 16384); chunks.push(chunk); }
+    const message = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    records.push({ kind: 'mcp', method: message.method, at: Date.now() }); await saveRecords();
+    if (message.method?.startsWith('notifications/')) { response.writeHead(202).end(); return; }
+    let result;
+    if (message.method === 'initialize') result = { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'native-ui-mcp', version: '1' } };
+    else if (message.method === 'tools/list') result = { tools: [{ name: 'echo', description: 'Synthetic bounded echo', inputSchema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false } }] };
+    else {
+      assert.equal(message.method, 'tools/call'); assert.equal(message.params.name, 'echo');
+      assert.equal(message.params.arguments.text, 'native ui mcp echo');
+      result = { content: [{ type: 'text', text: message.params.arguments.text }] };
+    }
+    response.writeHead(200, { 'content-type': 'application/json', 'Mcp-Session-Id': 'native-ui-synthetic' });
+    response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
+  } catch (error) {
+    records.push({ kind: 'mcp-error', error: error.message, at: Date.now() }); void saveRecords();
+    response.writeHead(400).end();
+  }
+});
+await new Promise((accept, reject) => { mcp.once('error', reject); mcp.listen(0, '127.0.0.1', accept); });
+const mcpUrl = `http://127.0.0.1:${mcp.address().port}/mcp`;
 const fetchImpl = async (input, init) => {
   const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
   assert.equal(url.origin, FAKE_API_BASE, 'No paid or external platform is permitted.');
@@ -76,15 +107,15 @@ const fetchImpl = async (input, init) => {
   if (!issued.has(marker)) {
     if (['ALLOW', 'DENY', 'EXPIRE', 'RESUMED'].includes(kind)) tool = { name: 'set_window_title', args: { title: `Approved ${host} ${kind}` } };
     else if (kind === 'QUESTION') tool = { name: 'AskUser', args: { questions: [{ id: 'q-ui', prompt: 'Choose a UI answer', options: [{ id: 'a', label: 'Alpha' }, { id: 'b', label: 'Beta' }] }] } };
-    else if (kind === 'SKILL') tool = { name: 'native_skill', args: { name: 'inline-guide' } };
-    else if (kind === 'MCP') tool = { name: 'mcp_echo', args: { text: 'native ui mcp echo' } };
+    else if (kind === 'SKILL' || kind === 'SKILL_DIRECTORY' || kind === 'SKILL_REVOKED') tool = { name: 'native_skill', args: { name: kind === 'SKILL_DIRECTORY' ? 'device-guide' : 'inline-guide' } };
+    else if (kind === 'MCP' || kind === 'MCP_REVOKED') tool = { name: 'mcp_echo', args: { text: 'native ui mcp echo' } };
     else if (kind === 'TODO') tool = { name: 'TodoWrite', args: { todos: [{ id: 'ui-todo', content: 'Native UI todo', status: 'pending' }], merge: false } };
     else if (kind.startsWith('MEDIA_')) tool = media.toolRequests[`UI_${kind}`];
     if (tool) { assert.ok(request.tools.some(x => x.name === tool.name), `Required UI tool unavailable: ${tool.name}`); issued.set(marker, `ui-tool-${records.length}`); }
   }
   if (!tool && issued.has(marker) && !['DENY', 'EXPIRE'].includes(kind)) {
     const result = request.thread.flatMap(message => message.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === issued.get(marker));
-    assert.ok(result && result.isError !== true, `The real ${kind} tool must succeed before UI_DONE is emitted.`);
+    assert.ok(result && (result.isError === true) === kind.endsWith('_REVOKED'), `The real ${kind} tool must have its expected success/revocation outcome before UI_DONE is emitted.`);
     records.push({ kind: 'tool-result', marker, toolUseId: result.toolUseId, isError: result.isError === true });
   }
   const open = frame('t.open', { exchangeId: `ui-${records.length}`, model: request.model, protocol: 'twp/1' });
@@ -119,13 +150,19 @@ const server = await startServer({ host: '127.0.0.1', port: 0, token: 'unused-v1
   terminal: { contract: 'terminal-services-v1', scopeFor: reference => ({ applicationScopeId: 'native-ui-app', endUserId: reference.endUserId, authorizationRevision: '1' }) },
   v2: { createSession: build.factory, store: build.storeReader, governance: { sweepIntervalMs: 0 },
     authenticate(request) { const url = new URL(request.url, 'http://localhost'); records.push({ kind: 'http', method: request.method, path: url.pathname, at: Date.now() }); void saveRecords(); return request.headers.authorization === `Bearer ${token}` ? { endUserId: 'native-ui-user' } : null; } } });
-await writeFile(join(directory, 'ready.json'), JSON.stringify({ url: server.url, source: sourceBefore, memory: memory.configuration }), { flag: 'wx' });
+const { startNativeStorageFixture } = await import('./ServeNativeStorageFixture.mjs');
+const storage = await startNativeStorageFixture({ source, directory: join(directory, 'storage'),
+  scope: { applicationScopeId: 'native-ui-app', endUserId: 'native-ui-user', authorizationRevision: '1' }, token, fetchImpl, apiBaseUrl: FAKE_API_BASE,
+  authenticate(request) { return request.headers.authorization === `Bearer ${token}` ? { endUserId: 'native-ui-user' } : null; } });
+await writeFile(join(directory, 'ready.json'), JSON.stringify({ url: server.url, mcpUrl, source: sourceBefore, memory: memory.configuration, storage: storage.configuration }), { flag: 'wx' });
 let stopped = false;
 async function close() {
   if (stopped) return; stopped = true;
   try { const report = await server.drain({ timeoutMs: 5000 }); await server.settleResources?.(); await build.flush(); await saveRecords(); await memory.close();
+    const storageReport = await storage.close();
+    await new Promise((accept, reject) => mcp.close(error => error ? reject(error) : accept()));
     const sourceAfter = verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT);
-    await writeFile(join(directory, 'result.json'), JSON.stringify({ records, report, media: media?.mediaRecords ?? [], sourceBefore, sourceAfter }), { flag: 'wx' });
+    await writeFile(join(directory, 'result.json'), JSON.stringify({ records, report, storage: storageReport, media: media?.mediaRecords ?? [], sourceBefore, sourceAfter }), { flag: 'wx' });
   } catch (error) { await writeFile(join(directory, 'failure.txt'), error.stack ?? String(error), { flag: 'wx' }); process.exitCode = 1; }
   finally { process.exit(process.exitCode ?? 0); }
 }

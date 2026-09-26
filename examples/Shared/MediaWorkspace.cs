@@ -117,6 +117,7 @@ internal sealed class MediaWorkspace : IDisposable
         if (!TranscriptionModels.Contains(model, StringComparer.Ordinal)) throw new MediaException("transcription_model_not_in_catalog");
         // 保存不可变载荷；同材料在媒体窗口关闭/重开后仍共享一次请求。未知结果禁止重复收费。
         var audio = "data:" + mime + ";base64," + Convert.ToBase64String(bytes);
+        Task<string> attempt;
         lock (_requestsGate)
         {
             ThrowIfDisposed();
@@ -124,7 +125,9 @@ internal sealed class MediaWorkspace : IDisposable
             {
                 if (_transcriptions.Count >= 128) throw new MediaException("transcription_session_request_limit");
                 existing = new TranscriptionRequest(); _transcriptions.Add(key, existing);
-                existing.Start(async () =>
+                // The creator owns this original attempt even if it fails before the lock exits.
+                // Only subsequent readers are classified as a prohibited repeat of an unknown result.
+                attempt = existing.Start(async () =>
                 {
                     using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _stop.Token);
                     var response = await Session.TranscribeAsync(new SpeechTranscriptionOptions { Audio = audio, Model = model }, linked.Token);
@@ -135,8 +138,9 @@ internal sealed class MediaWorkspace : IDisposable
                     return artifact.Resources[0].Value;
                 });
             }
+            else attempt = existing.ReadAsync();
         }
-        return await existing.ReadAsync();
+        return await attempt;
     }
     internal SpeechBatch PrepareSpeech(string text, SpeechModel model, string? voice, string? format, bool segment, bool replace)
     {
@@ -233,7 +237,7 @@ internal sealed class MediaWorkspace : IDisposable
     {
         private Task<string> _task = null!;
         private int _unknown;
-        internal void Start(Func<Task<string>> send) => _task = SendAsync(send);
+        internal Task<string> Start(Func<Task<string>> send) => _task = SendAsync(send);
         private async Task<string> SendAsync(Func<Task<string>> send)
         {
             await Task.Yield();

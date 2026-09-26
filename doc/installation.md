@@ -82,8 +82,12 @@ if (!stopped.CleanupConfirmed || !stopped.IoSettled)
 | `TANSR_LOCAL_SERVE_PORT` | 可选端口，仍只监听环回 |
 | `TANSR_LOCAL_SERVE_DIRECT=1` | 明确选择专用 Serve 入口 |
 | `TANSR_LOCAL_ENV_NAMES` | 逗号分隔的显式环境透传名单，不整体继承开发机秘密 |
+| `TANSR_LOCAL_SERVE_HOST_MODULE` / `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` | 开发者批准的绝对 `.cjs` 宿主路径和摘要；由原 Serve 装配模型、工具、存储与鉴权，不从模型消息选代码 |
+| `TANSR_SERVE_USER_TOKEN` | 需要额外用户认证的开发者宿主票据；示例显式放入 `x-tansr-demo-user-token`，与本地进程随机 Bearer 分别校验 |
 
 普通 CLI `serve` 不会凭空启用设备记忆/可信引用；需按[设备记忆](device-memory.md)和 Serve 宿主合同配置。关闭/断开本实例拥有的本地模式会停止该进程，远端模式不会关闭远端服务进程。升级/回滚先停止新派工、完成会话与本地持久回执、等待 `StopAsync` 的真实清理，再切换已批准 payload；不得在未知工具副作用时自动换进程重跑。
+
+使用原独立 Serve 的 `--host-module` 和 `--host-module-sha256` 可加载受信 CJS 配置，复用原核心，无需客户端另装 Node。应用开发者负责模块及依赖的可信分发和权限配置；文件摘要验证不将任意 JavaScript 变为安全沙箱。宿主须独立验证最终用户身份，不能把终端自报的 `PrincipalProvider`、平台名或 `endUserId` 当作认证。需要额外票据时，直接调用者分别设置 `LocalServeHostOptions.ReadinessHeaders` 和 `CreateClient` 六参数重载的 `additionalRequestHeaders`；就绪票不会自动授予新客户端。SDK2 仍须显式声明合同与可信作用域，原 SDK1 默认不变。
 
 可将批准的正式格式可执行候选追加给包门：`-LocalServeExecutable <绝对路径> -LocalServeSha256 <SHA256>`。它通过包内公开 `StartAsync → ListSessionsAsync → StopAsync` 验证真实产物与本机归属，失败直接保留；不启动模型，不伪造自动记忆已经装配，也不把未签名候选写成正式发行。
 
@@ -104,5 +108,7 @@ The content/license audit records SDK identities, targets, dependencies, hashes,
 Local Serve uses the existing `LocalServeHost`: approve an executable and digest, provide a controlled workspace, call `StartAsync`, obtain `CreateClient`, and await `StopAsync`. The host generates private credentials, validates authenticated readiness and verifies the actual TCP peer belongs to its original child process before sending credentials or bodies. It does not download code, inherit arbitrary credentials, silently connect to another port owner or add a Node client proxy. Executable hashing alone does not authenticate adjacent apphost DLLs; the complete installation remains a trusted distributor responsibility.
 
 All three examples share `ExampleConnection`. Set `TANSR_LOCAL_SERVE_EXE`, `TANSR_LOCAL_SERVE_SHA256` and `TANSR_LOCAL_WORKSPACE`; optionally select port, dedicated Serve entry or explicit environment names. A local executable does not automatically install the platform memory/profile configuration. Stop and reconcile work before changing a version; never restart an unknown side effect. The optional package-gate parameters `-LocalServeExecutable` and `-LocalServeSha256` exercise the real approved artifact through public SDK startup/list/stop, without model calls.
+
+For the existing Serve trusted-host entry, set `TANSR_LOCAL_SERVE_HOST_MODULE` to an approved absolute `.cjs` path and `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` to its digest. The original Serve assembles the core and deployment extensions; this requires no external client Node runtime. A verified module is developer-trusted code, not a sandbox for arbitrary JavaScript. The deployment must authenticate the end user independently of the local process Bearer and must not trust client-declared identity or platform. The examples explicitly transmit `TANSR_SERVE_USER_TOKEN` as `x-tansr-demo-user-token`. Direct consumers set `ReadinessHeaders` and the six-argument `CreateClient` overload's `additionalRequestHeaders` separately; readiness credentials are not implicitly copied to clients. SDK2 contract and trusted-scope selection remain explicit, with SDK1 the default.
 
 Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. This candidate has no automatic NuGet publication; missing ownership/signing/CI conditions remain visible.

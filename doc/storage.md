@@ -150,3 +150,9 @@ Register `WindowsMemoryPublicationHost.CreateTool()` on the same device backend 
 离线仅能遵循**已经接收并持久保存**的授权与删除状态，不能得知尚未接收的远端撤权。界面明确显示该边界；恢复网络后仍由原 Serve 协议重新确认，离线许可不授予新的远端能力。
 
 The offline entry points reopen the original local stores and enforce an explicit, unexpired host-managed offline permission. They never create a network client, acknowledge an archive, apply retention, or run memory governance. Known revocation/deletion and source/version mismatches fail closed. Remote changes that have not reached the device cannot be discovered offline; the displayed result is not a claim of current global authorization.
+
+原生示例的真实界面验收使用 `ServeNativeStorageFixture.mjs` 装配公开的 `createServeOffloadArchiveHost`、`createServeCacheHost` 和原文件冷层。它与工具、媒体和设备记忆验收使用同一应用/用户范围，单独监听以保留各自明确的存储配置。新会话显式声明 `sdk2-offload-v1`；旧 SDK1 界面继续使用原工厂。
+
+夹具只在真实会话创建且原 binding-target、binding、archive status 核对成功后签发可信本机配置。界面依次启动档案宿主、发送合成任务、同步并读取原记录；材料处理和耐久 ACK 均由公开 SDK 完成。缓存界面保存原请求、回执和受护票据，重开只查询原意图，关闭不伪造跨运行恢复。自然过期、跨运行和供应商费用另按原验收证据归属，不以菜单点击代替。
+
+The native UI fixture composes the original public offload/archive/cache hosts. Configuration comes from the actual session binding and trusted host state, not from UI-generated identities. Archive synchronization uses the SDK's durable ACK path; cache reopening retains the original operation. The upstream model/cache peer is synthetic, so this proves protocol consumption and local persistence, not provider cache savings or production billing.

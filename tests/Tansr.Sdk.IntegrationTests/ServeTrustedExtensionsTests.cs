@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
@@ -29,7 +30,7 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90)); var ct = deadline.Token;
         var events = new ConcurrentQueue<AgentEvent>();
-        await using (var context = await Context.OpenAsync("hooks", ["TrustedOrder"], ct))
+        await InContextAsync(await Context.OpenAsync("hooks", ["TrustedOrder"], ct), async context =>
         {
             await PlanAsync("TrustedOrder", new { id = "synthetic" }, ct: ct);
             await TurnAsync(context.Session, "NET_TRUSTED_ALLOW", events, ct);
@@ -44,8 +45,8 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             await TurnAsync(context.Session, "NET_TRUSTED_PROMPT_DENIED", events, ct);
             Assert.Equal(before.GetProperty("requests").GetArrayLength(), (await InspectAsync(ct)).GetProperty("requests").GetArrayLength());
             Assert.True(before.GetProperty("hookCalls").GetInt32() >= 3);
-        }
-        await using (var context = await Context.OpenAsync("skills", ["Skill"], ct))
+        });
+        await InContextAsync(await Context.OpenAsync("skills", ["Skill"], ct), async context =>
         {
             context.Workspace.WriteAtomic("SKILL.md", Encoding.UTF8.GetBytes("---\nname: device-guide\ndescription: local\n---\nDEVICE_GUIDE_BODY_中文🙂"));
             await PlanAsync("Skill", new { name = "device-guide" }, ct: ct);
@@ -58,7 +59,7 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             Assert.Contains(requests, value => value.Contains("INLINE_GUIDE_BODY", StringComparison.Ordinal));
             Assert.Contains(evidence.GetProperty("events").EnumerateArray(), item => item.TryGetProperty("operation", out var operation) && operation.GetString() == "fs.read");
             Assert.True(context.Executions > 0, "The skill body must be read by the actual C# device backend.");
-        }
+        });
         var mcpDirectory = Path.Combine(Root, "native-mcp-workspace"); Directory.CreateDirectory(mcpDirectory);
         using (var mcpWorkspace = new WindowsWorkspace(mcpDirectory))
         {
@@ -76,8 +77,8 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             var evidence = await InspectAsync(ct); Assert.Single(evidence.GetProperty("mcpCalls").EnumerateArray(), item => item.GetString() == "tools/call");
             Assert.Contains(evidence.GetProperty("requests").EnumerateArray(), item => item.GetProperty("thread").GetRawText().Contains("MCP structuredContent", StringComparison.Ordinal));
         }
-        string governedSessionId;
-        await using (var context = await Context.OpenAsync("governance", ["Task", "Write"], ct, maxTokens: 60))
+        string governedSessionId = string.Empty;
+        await InContextAsync(await Context.OpenAsync("governance", ["Task", "Write"], ct, maxTokens: 60), async context =>
         {
             governedSessionId = context.Session.Id;
             await CommandAsync(new { action = "governance", sessionId = governedSessionId }, ct);
@@ -93,8 +94,8 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             Assert.Equal("deny", denied.GetProperty("decision").GetString());
             Assert.Contains(denied.GetProperty("adjudicationChain").EnumerateArray(), entry => entry.GetProperty("verdict").GetString() == "reject");
             Assert.Contains(events, item => item.Name == "tool.permission.decided");
-        }
-        await using (var context = await Context.OpenAsync("governance-resume", ["Task", "Write"], ct, maxTokens: 60, resumeSessionId: governedSessionId))
+        });
+        await InContextAsync(await Context.OpenAsync("governance-resume", ["Task", "Write"], ct, maxTokens: 60, resumeSessionId: governedSessionId), async context =>
         {
             await CommandAsync(new { action = "governance", sessionId = context.Session.Id }, ct);
             var result = await TurnAsync(context.Session, "The existing persisted budget must not reset.", events, ct, denyWrites: true);
@@ -102,8 +103,8 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             var facts = (await InspectAsync(ct)).GetProperty("governance");
             Assert.Equal(1, facts.GetProperty("mainCalls").GetInt32()); Assert.Equal(1, facts.GetProperty("childCalls").GetInt32()); Assert.Equal(1, facts.GetProperty("adjudicationCalls").GetInt32());
             Assert.Equal(70, facts.GetProperty("spend").GetProperty("totalTokens").GetInt32());
-        }
-        await using (var context = await Context.OpenAsync("children", ["Task", "SpawnAgent", "AgentFollowup", "Read"], ct))
+        });
+        await InContextAsync(await Context.OpenAsync("children", ["Task", "SpawnAgent", "AgentFollowup", "Read"], ct), async context =>
         {
             context.Workspace.WriteAtomic("child-sentinel.txt", Encoding.UTF8.GetBytes("CHILD_DEVICE_SENTINEL"));
             await PlanAsync("Task", new { description = "bounded foreground", prompt = "Synthetic foreground task", tools = new[] { "Read" } }, ct: ct);
@@ -130,7 +131,7 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             Assert.Contains(events, item => item.Name == "agent.progress" && item.Data.GetRawText().Contains("stale_generation", StringComparison.Ordinal));
             Assert.All(revoked.GetProperty("subjects").EnumerateArray(), subject =>
             { Assert.Equal("net-trusted-app", subject.GetProperty("applicationScopeId").GetString()); Assert.Equal("net-integration-user", subject.GetProperty("endUserId").GetString()); });
-        }
+        });
         var final = await InspectAsync(ct); Assert.Equal(7, final.GetProperty("closes").GetInt32());
         Assert.DoesNotContain(events, item => item.Name == "turn.error" && item.Data.GetRawText().Contains("/server/private", StringComparison.Ordinal));
     }
@@ -141,17 +142,33 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
         var declaration = Json(new { name = "NativeMcp", description = "Call the one explicitly approved synthetic native MCP echo", parameters = new { text = new { type = "string" } }, readOnly = false, timeoutMs = 10000 });
         var digest = WireJson.DomainDigest("tansr.sdk2.client-tool.v1", WireJson.EncodeControl(declaration));
         var tools = McpToolAdapter.CreateTools(connection, [new McpToolBinding("NativeMcp", "echo", digest, discovered)]);
-        await using var context = await Context.OpenAsync("mcp-" + name, ["NativeMcp"], ct, tools, Json(new[] { declaration }));
-        await PlanAsync("NativeMcp", new { text }, ct: ct);
-        await TurnAsync(context.Session, "NET_NATIVE_MCP_" + name, events, ct);
-        Assert.Equal(1, context.Executions);
-        var history = await context.Session.GetHistoryAsync(ct);
-        Assert.Contains("NATIVE_" + name.ToUpperInvariant() + "_MCP_", history.GetRawText());
+        await InContextAsync(await Context.OpenAsync("mcp-" + name, ["NativeMcp"], ct, tools, Json(new[] { declaration })), async context =>
+        {
+            await PlanAsync("NativeMcp", new { text }, ct: ct);
+            await TurnAsync(context.Session, "NET_NATIVE_MCP_" + name, events, ct);
+            Assert.Equal(1, context.Executions);
+            var history = await context.Session.GetHistoryAsync(ct);
+            Assert.Contains("NATIVE_" + name.ToUpperInvariant() + "_MCP_", history.GetRawText());
+        });
+    }
+
+    private static async Task InContextAsync(Context context, Func<Context, Task> action)
+    {
+        Exception? primary = null;
+        try { await action(context); } catch (Exception error) { primary = error; }
+        try { await context.DisposeAsync(); }
+        catch (Exception cleanup)
+        {
+            if (primary is null) throw;
+            throw new AggregateException("Trusted extension scenario failed; the first exception is the original failure.", primary, cleanup);
+        }
+        if (primary is not null) ExceptionDispatchInfo.Capture(primary).Throw();
     }
 
     private static async Task<SessionRunResult> TurnAsync(AgentSession session, string prompt, ConcurrentQueue<AgentEvent> events, CancellationToken ct, bool denyWrites = false)
     {
-        var result = await session.SendAndObserveAsync(prompt, observer: async (item, token) =>
+        using var turn = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var running = session.SendAndObserveAsync(prompt, observer: async (item, token) =>
         {
             events.Enqueue(item);
             if (item.Name == "server.permission.request")
@@ -159,7 +176,20 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
                 var permission = item.Data.GetProperty("payload");
                 await session.PermissionAsync(permission.GetProperty("requestId").GetString()!, permission.GetProperty("digest").GetString()!, !denyWrites || permission.GetProperty("name").GetString() != "Write", token);
             }
-        }, cancellationToken: ct);
+        }, cancellationToken: turn.Token);
+        while (!running.IsCompleted)
+        {
+            var failed = Path.Combine(Root, "host-failure.json");
+            if (File.Exists(failed))
+            {
+                var diagnostic = await File.ReadAllTextAsync(failed, ct);
+                turn.Cancel(); try { await running; } catch { }
+                throw new InvalidOperationException(diagnostic);
+            }
+            await Task.WhenAny(running, Task.Delay(20, ct));
+            ct.ThrowIfCancellationRequested();
+        }
+        var result = await running;
         await CommandAsync(new { action = "settle", sessionId = session.Id }, ct);
         return result;
     }
@@ -224,7 +254,9 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
                 new DeviceSessionOptions { SessionId = session.Id, WorkspaceId = "work", RequestedTools = tools },
                 (_, _) => { if (context != null) Interlocked.Increment(ref context.Executions); return Task.CompletedTask; });
             context = new Context(client, session, workspace, journal, host);
-            await host.StartAsync(ct); Assert.Equal(DeviceSessionState.Ready, host.State); return context;
+            await host.StartAsync(ct); Assert.Equal(DeviceSessionState.Ready, host.State);
+            await File.WriteAllTextAsync(Path.Combine(directory, "bound-capabilities.json"), host.Capabilities!.Value.GetRawText(), ct);
+            return context;
         }
         public async ValueTask DisposeAsync()
         {

@@ -92,6 +92,7 @@ function Approve-SyntheticPending($MainWindow, [int]$ProcessId) {
     if ($local) { Click (Find-Id $local 'DeviceAllow') }
 }
 . ([ScriptBlock]::Create([IO.File]::ReadAllText($env:TANSR_NATIVE_UI_MEDIA_SCRIPT, [Text.Encoding]::UTF8)))
+. ([ScriptBlock]::Create([IO.File]::ReadAllText($env:TANSR_NATIVE_UI_STORAGE_SCRIPT, [Text.Encoding]::UTF8)))
 try {
     foreach ($entry in @(@('WPF', $WpfExecutable), @('WINFORMS', $WinFormsExecutable))) {
         $hostName = $entry[0]
@@ -101,6 +102,14 @@ try {
         $env:TANSR_ALLOW_HTTP_LOOPBACK = '1'
         $env:TANSR_EXAMPLE_STATE_FILE = Join-Path $target ($hostName + '.state.json')
         $env:TANSR_SKILL_INLINE = 'Synthetic native UI skill: keep the original request and return readable outcomes.'
+        $skillDirectory = Join-Path $target ($hostName + '-skills')
+        [IO.Directory]::CreateDirectory($skillDirectory) | Out-Null
+        [IO.File]::WriteAllText((Join-Path $skillDirectory 'SKILL.md'), 'Synthetic directory skill: preserve the original request and approved scope.', (New-Object Text.UTF8Encoding($false)))
+        $env:TANSR_SKILL_DIRECTORY = $skillDirectory
+        $fixtureReady = [IO.File]::ReadAllText((Join-Path $env:TANSR_NATIVE_UI_DIRECTORY 'ready.json'), [Text.Encoding]::UTF8) | ConvertFrom-Json
+        $env:TANSR_MCP_HTTP_URL = $fixtureReady.mcpUrl
+        $env:TANSR_MCP_HTTP_ALLOW_LOOPBACK = '1'
+        $env:TANSR_MCP_HTTP_BEARER = $env:TANSR_NATIVE_UI_TOKEN
         $env:TANSR_TERMINAL_PREVIEW = '1'
         $scopeFile = Join-Path $target ($hostName + '.scope.json')
         $snapshotFile = Join-Path $target ($hostName + '.snapshot.json')
@@ -153,6 +162,12 @@ try {
         Send-Prompt $window ('UI_SKILL_' + $hostName)
         Wait-Answer $window ('UI_DONE_SKILL_' + $hostName)
         Record $hostName 'inline-skill' 'host configured native_skill completed through the original remote tool bridge'
+        Send-Prompt $window ('UI_SKILL_DIRECTORY_' + $hostName)
+        Wait-Answer $window ('UI_DONE_SKILL_DIRECTORY_' + $hostName)
+        Record $hostName 'directory-skill' 'same original tool bridge loaded the explicit host directory skill'
+        Send-Prompt $window ('UI_MCP_' + $hostName)
+        Wait-Answer $window ('UI_DONE_MCP_' + $hostName)
+        Record $hostName 'mcp-http' 'public MCP client initialized, checked frozen approved tools/list, and called bounded echo over real HTTP'
         Send-Prompt $window ('UI_ALLOW_' + $hostName)
         $null = Wait-For { (Pending-Count $window) -gt 0 } 'permission rendered'
         Click (Find-Id $window '批准')
@@ -270,6 +285,13 @@ try {
         $null = Wait-For { $window.Current.Name -eq ('Approved ' + $hostName + ' RESUMED') } 'resumed fresh native delegate executed'
         if ((Read-Text (Find-Id $window 'ResumeSession')) -ne $session) { throw 'Resumed native tool used a replacement session.' }
         Record $hostName 'resume-fresh-tool' 'same original session, initialized replay boundary, newly approved native delegate executed'
+        Click (Find-Id $window '撤销本机 Skills / MCP')
+        $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已撤销') } 'extensions revoked'
+        foreach ($extension in @('MCP', 'SKILL')) {
+            Send-Prompt $window ('UI_' + $extension + '_REVOKED_' + $hostName)
+            Wait-Answer $window ('UI_DONE_' + $extension + '_REVOKED_' + $hostName)
+        }
+        Record $hostName 'extension-revocation' 'same session retained tool declarations but both original delegates returned errors after explicit host revocation'
         Click (Find-Id $window '仅断开本机连接')
         $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已断开') } 'final detached'
         foreach ($mode in @('stream', 'final', 'off')) {
@@ -367,11 +389,28 @@ try {
         $window.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
         if (!$process.WaitForExit(10000)) { throw 'Native application failed to close.' }
         Record $hostName 'detach-close' 'no implicit remote session replacement or process left running'
+        Invoke-NativeStorageScenario $entry[1] $hostName $target $ready.storage
     }
     [IO.File]::WriteAllText((Join-Path $target 'result.json'), ($evidence | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
 } catch {
     [IO.File]::WriteAllText((Join-Path $target 'failure.txt'), ($_ | Out-String), (New-Object Text.UTF8Encoding($false)))
     [IO.File]::WriteAllText((Join-Path $target 'partial.json'), ($evidence | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+    try {
+        $states = foreach ($selectedProcess in $owned) {
+            if ($selectedProcess.HasExited) { continue }
+            foreach ($id in @('TansrAssistant', 'SessionControls', 'SessionWorkspace', 'MediaWindow', 'DeviceApproval')) {
+                $selectedWindow = Find-ProcessWindow $selectedProcess.Id $id
+                if (!$selectedWindow) { continue }
+                $values = @{}
+                foreach ($controlId in @('ConnectionStatus', 'Conversation', 'SessionControlResult', 'WorkspaceResult', 'MediaStatus')) {
+                    $element = Find-Id $selectedWindow $controlId
+                    if ($element) { $value = [string](Read-Text $element); $values[$controlId] = $value.Substring([Math]::Max(0, $value.Length - 8192)) }
+                }
+                [pscustomobject]@{ processId = $selectedProcess.Id; window = $id; title = $selectedWindow.Current.Name; values = $values }
+            }
+        }
+        [IO.File]::WriteAllText((Join-Path $target 'failure-state.json'), (@($states) | ConvertTo-Json -Depth 8), (New-Object Text.UTF8Encoding($false)))
+    } catch { } # Diagnostic failure must not replace the original assertion failure.
     throw
 } finally {
     foreach ($process in $owned) {

@@ -198,6 +198,31 @@ public sealed class WindowsWorkspaceTests : IDisposable
         Directory.Move(Path.Combine(_directory, "cwd"), Path.Combine(_directory, "other"));
     }
 
+    [Fact]
+    public void ProcessDirectoryLeaseKeepsItsOwnNonemptyGuardWithoutBlockingAtomicSaves()
+    {
+        var cwd = Path.Combine(_directory, "cwd"); var sibling = Path.Combine(_directory, "sibling");
+        Directory.CreateDirectory(cwd); Directory.CreateDirectory(sibling);
+        using var workspace = new WindowsWorkspace(_directory);
+        string guard;
+        using (var lease = workspace.AcquireProcessDirectory("cwd"))
+        {
+            guard = Assert.Single(Directory.GetFiles(cwd, ".tansr-sdk-process-*.lock"));
+            Assert.Throws<IOException>(() => File.Delete(guard));
+            Assert.Throws<IOException>(() => Directory.Move(cwd, cwd + "-replaced"));
+            foreach (var location in new[] { _directory, sibling, cwd })
+            {
+                var original = Path.Combine(location, "original.txt"); var replacement = Path.Combine(location, "replacement.tmp");
+                File.WriteAllText(replacement, "first"); File.Move(replacement, original);
+                File.WriteAllText(replacement, "second"); File.Replace(replacement, original, null);
+                Assert.Equal("second", File.ReadAllText(original));
+            }
+            lease.ValidateForExecution();
+        }
+        Assert.False(File.Exists(guard));
+        Assert.Empty(Directory.GetFiles(cwd, ".tansr-sdk-process-*.lock"));
+    }
+
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
     private static extern bool CreateHardLinkW(string path, string existing, IntPtr security);
 

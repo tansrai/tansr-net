@@ -85,15 +85,27 @@ public sealed class ServeFileOperationsTests(ITestOutputHelper output)
             var inspected = await CommandAsync(new { action = "inspect" }, ct);
             var original = Assert.Single(inspected.GetProperty("results").EnumerateArray(), item => item.GetProperty("id").GetString() == id).GetProperty("result");
             var error = original.TryGetProperty("isError", out var failed) && failed.GetBoolean();
-            Assert.Equal(!succeeds, error); Assert.True(inspected.GetProperty("hostSentinelUnchanged").GetBoolean());
+            Assert.True(error == !succeeds, $"{name} expected success={succeeds}; actual original result: {original.GetRawText()}");
+            Assert.True(inspected.GetProperty("hostSentinelUnchanged").GetBoolean());
             return original.Clone();
         }
         try
         {
             var good = await OpenAsync("original", digest);
             const string originalText = "NATIVE FILE alpha\nneedle 中文 😀\n";
+            Assert.False(File.Exists(Path.Combine(work, "note.txt")));
             await ToolAsync(good.Session, "Write", new { file_path = "/workspace/work/note.txt", contents = originalText }, true);
             Assert.Equal(originalText, Encoding.UTF8.GetString(workspace.Read("note.txt")));
+            var creationLedger = await good.Journal.OperationsAsync(cancellationToken: ct);
+            var missingTarget = creationLedger.First(op =>
+                op.GetProperty("request").GetProperty("operation").GetString() == "fs.inspect" &&
+                op.GetProperty("request").GetProperty("args").GetProperty("path").GetString() == "note.txt" &&
+                !op.GetProperty("request").GetProperty("args").GetProperty("followLinks").GetBoolean());
+            var observedMissing = await good.Journal.ClaimAsync(missingTarget, ct);
+            Assert.Equal(ExecutorJournalClaimStatus.Completed, observedMissing.Status); Assert.NotNull(observedMissing.Receipt);
+            Assert.Equal("failed", observedMissing.Receipt!.Value.GetProperty("status").GetString());
+            Assert.Equal("ENOENT", observedMissing.Receipt.Value.GetProperty("errorCode").GetString());
+            Assert.Single(creationLedger, op => op.GetProperty("request").GetProperty("operation").GetString() == "fs.write");
             Assert.Contains("needle", (await ToolAsync(good.Session, "Read", new { file_path = "/workspace/work/note.txt" }, true)).GetRawText());
             await ToolAsync(good.Session, "Edit", new { file_path = "/workspace/work/note.txt", old_string = "alpha", new_string = "updated" }, true);
             Assert.Equal(originalText.Replace("alpha", "updated", StringComparison.Ordinal), Encoding.UTF8.GetString(workspace.Read("note.txt")));

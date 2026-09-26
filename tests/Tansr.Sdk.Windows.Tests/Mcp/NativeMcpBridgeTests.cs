@@ -39,6 +39,7 @@ public sealed class NativeMcpBridgeTests
             var session = await client.CreateSessionAsync(new CreateSessionOptions { ClientTools = declarations }, deadline.Token);
             var reports = new ConcurrentQueue<string>();
             using var host = new NativeToolHost(session, "bridge-test", (_, _) => Task.CompletedTask, reports.Enqueue, new[] { instrumented });
+            await host.Ready.WaitAsync(deadline.Token);
             await session.ObserveAsync((item, _) =>
             {
                 host.HandleEvent(item);
@@ -71,12 +72,15 @@ public sealed class NativeMcpBridgeTests
             var original = Assert.Single(connection.Bindings); var calls = 0;
             var binding = new NativeToolBinding(original.Declaration, (args, ct) => { Interlocked.Increment(ref calls); return original.ExecuteAsync(args, ct); });
             var session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "session" }, deadline.Token);
-            using var host = new NativeToolHost(session, "bridge-test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding });
+            var reports = new ConcurrentQueue<string>();
+            using var host = new NativeToolHost(session, "bridge-test", (_, _) => Task.CompletedTask, reports.Enqueue, new[] { binding });
+            await host.Ready.WaitAsync(deadline.Token);
             await session.ObserveAsync((item, _) => { host.HandleEvent(item); return Task.CompletedTask; }, new EventStreamOptions { Reconnect = false }, deadline.Token);
             await host.DrainAsync(deadline.Token);
             Assert.Equal(0, calls);
-            Assert.Equal("native_tool_host_requires_new_session", Assert.Single(server.Receipts).GetProperty("message").GetString());
-            Assert.Empty(server.Errors);
+            Assert.Equal("native_tool_prior_outcome_unknown", Assert.Single(server.Receipts).GetProperty("message").GetString());
+            Assert.Equal(1, server.MetadataReads);
+            Assert.Empty(reports); Assert.Empty(server.Errors);
         }
         finally { await connection.CloseAsync(); }
     }
@@ -90,13 +94,15 @@ public sealed class NativeMcpBridgeTests
         {
             using var server = new Sdk1Server(false, true); using var client = server.Client();
             var session = await client.CreateSessionAsync(new CreateSessionOptions { ClientTools = NativeToolHost.GetDeclarations(connection.Bindings) }, deadline.Token);
-            using var host = new NativeToolHost(session, "bridge-test", (_, _) => Task.CompletedTask, _ => { }, connection.Bindings);
+            var reports = new ConcurrentQueue<string>();
+            using var host = new NativeToolHost(session, "bridge-test", (_, _) => Task.CompletedTask, reports.Enqueue, connection.Bindings);
+            await host.Ready.WaitAsync(deadline.Token);
             await session.ObserveAsync((item, _) => { host.HandleEvent(item); return Task.CompletedTask; }, new EventStreamOptions { Reconnect = false }, deadline.Token);
             await host.DrainAsync(deadline.Token);
             var receipt = Assert.Single(server.Receipts);
             Assert.Equal("error", receipt.GetProperty("status").GetString());
             Assert.Equal("native_mcp_invalid_arguments", receipt.GetProperty("message").GetString());
-            Assert.Empty(server.Errors);
+            Assert.Empty(reports); Assert.Empty(server.Errors);
         }
         finally { await connection.CloseAsync(); }
     }
@@ -178,6 +184,7 @@ public sealed class NativeMcpBridgeTests
         private readonly TaskCompletionSource<bool> _received = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly ConcurrentQueue<JsonElement> Receipts = new();
         internal readonly ConcurrentQueue<Exception> Errors = new();
+        internal int MetadataReads;
         internal JsonElement? Creation;
         internal Sdk1Server(bool resumed, bool invalidArguments)
         { _resumed = resumed; _invalidArguments = invalidArguments; _listener.Start(); _loop = AcceptAsync(); }
@@ -211,6 +218,13 @@ public sealed class NativeMcpBridgeTests
                         Creation = Json(Encoding.UTF8.GetString(body));
                         await RespondAsync(stream, "{\"sessionId\":\"session\",\"resumed\":" + (_resumed ? "true" : "false") + ",\"lastSeq\":-1}");
                     }
+                    else if (first[0] == "GET" && first[1] == "/v2/sessions/session")
+                    {
+                        Assert.True(_resumed); Interlocked.Increment(ref MetadataReads);
+                        // The replayed call at seq 0 predates this authoritative watermark. A
+                        // live MCP connection never turns its unknown prior outcome into permission to redo it.
+                        await RespondAsync(stream, "{\"sessionId\":\"session\",\"endUserId\":\"bridge-test\",\"live\":true,\"status\":\"idle\",\"lastSeq\":0,\"createdAt\":\"2026-09-27T00:00:00Z\",\"lastActivityAt\":\"2026-09-27T00:00:00Z\"}");
+                    }
                     else if (first[1] == "/v2/sessions/session/events")
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"), _stop.Token);
@@ -231,7 +245,7 @@ public sealed class NativeMcpBridgeTests
                         await stream.WriteAsync(Encoding.UTF8.GetBytes("id: 2\ndata: {\"type\":\"session.ended\",\"sessionId\":\"session\",\"seq\":2}\n\n"), _stop.Token);
                     }
                     else if (first[1] == "/v2/sessions/session/tool-results/native-call")
-                    { Receipts.Enqueue(Json(Encoding.UTF8.GetString(body))); await RespondAsync(stream, "{\"ok\":true}"); _received.TrySetResult(true); }
+                    { Receipts.Enqueue(Json(Encoding.UTF8.GetString(body))); await RespondAsync(stream, "{\"accepted\":true}"); _received.TrySetResult(true); }
                     else throw new InvalidOperationException("Unexpected test route: " + first[0] + " " + first[1]);
                 }
                 catch (Exception error) when (_stop.IsCancellationRequested || error is IOException && Receipts.Count > 0) { }

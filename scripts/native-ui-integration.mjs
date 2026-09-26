@@ -29,29 +29,32 @@ async function candidate(path) {
   return { path, files };
 }
 const executables = { wpf: await candidate(wpf), winforms: await candidate(winforms) };
-const scripts = await Promise.all(['scripts/test-native-ui.ps1', 'scripts/native-media-ui.ps1',
+const scripts = await Promise.all(['scripts/test-native-ui.ps1', 'scripts/native-media-ui.ps1', 'scripts/native-storage-ui.ps1',
   'tests/Tansr.Sdk.IntegrationTests/ServeNativeUiFixture.mjs', 'tests/Tansr.Sdk.IntegrationTests/ServeNativeMediaFixture.mjs',
-  'tests/Tansr.Sdk.IntegrationTests/ServeNativeMemoryFixture.mjs'].map(async name => ({ path: join(repository, name), sha256: await sha(join(repository, name)) })));
+  'tests/Tansr.Sdk.IntegrationTests/ServeNativeMemoryFixture.mjs', 'tests/Tansr.Sdk.IntegrationTests/ServeNativeStorageFixture.mjs'].map(async name => ({ path: join(repository, name), sha256: await sha(join(repository, name)) })));
 const env = { ...process.env };
 for (const name of Object.keys(env)) if (/(TOKEN|SECRET|PASSWORD|API.?KEY|APP.?KEY|CREDENTIAL)/i.test(name) || /^TANSR_/.test(name)) delete env[name];
 Object.assign(env, { TANSR_SERVE_SOURCE: source, TANSR_SERVE_SOURCE_SNAPSHOT: snapshot, TANSR_NATIVE_UI_DIRECTORY: originDirectory, TANSR_NATIVE_UI_TOKEN: token });
 env.TANSR_NATIVE_UI_MEDIA_DIRECTORY = join(repository, 'tests/Tansr.Sdk.Windows.Tests/Hosting/Fixtures/Media');
 env.TANSR_NATIVE_UI_MEDIA_SCRIPT = join(repository, 'scripts/native-media-ui.ps1');
+env.TANSR_NATIVE_UI_STORAGE_SCRIPT = join(repository, 'scripts/native-storage-ui.ps1');
 const fixtureLog = openSync(join(directory, 'serve.log'), 'wx');
 const fixture = spawn(process.execPath, ['--import', pathToFile(source, 'node_modules/tsx/dist/loader.mjs'), join(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeNativeUiFixture.mjs')],
   { cwd: repository, env, windowsHide: true, stdio: ['ignore', fixtureLog, fixtureLog] });
 const fixtureExit = new Promise((accept, reject) => { fixture.once('error', reject); fixture.once('exit', code => accept(code)); });
 function pathToFile(root, path) { return pathToFileURL(join(root, path)).href; }
 const delay = ms => new Promise(resolve => { const timer = setTimeout(resolve, ms); timer.unref(); });
-let uiCode, failure;
+let uiCode, failure, readyWaitMilliseconds;
 try {
   let ready;
-  for (let i = 0; i < 300; i++) {
+  const waitingSince = Date.now();
+  for (let i = 0; i < 900; i++) {
     assert.equal(fixture.exitCode, null, 'Real Serve fixture exited before ready.');
     try { ready = JSON.parse(await readFile(join(originDirectory, 'ready.json'), 'utf8')); break; }
     catch (error) { if (error.code !== 'ENOENT') throw error; }
     await delay(100);
   }
+  readyWaitMilliseconds = Date.now() - waitingSince;
   assert.ok(ready, 'Real Serve fixture startup timed out.');
   const quote = value => `'${value.replaceAll("'", "''")}'`;
   const command = `$taskUiScript = [ScriptBlock]::Create([IO.File]::ReadAllText(${quote(join(repository, 'scripts/test-native-ui.ps1'))}, [Text.Encoding]::UTF8)); & $taskUiScript -WpfExecutable ${quote(wpf)} -WinFormsExecutable ${quote(winforms)} -OutputDirectory ${quote(join(directory, 'ui'))} -ServeUrl ${quote(ready.url)}; if (-not $?) { exit 1 }`;
@@ -71,7 +74,7 @@ finally {
   if (fixtureCode !== 0 && !failure) failure = new Error(`Serve cleanup failed: ${fixtureCode}`);
   let sourceAfter;
   try { sourceAfter = verifyServeSourceSnapshot(source, snapshot); } catch (error) { failure ??= error; }
-  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ executables, scripts, sourceBefore, sourceAfter, uiCode, fixtureCode, failure: failure?.message ?? null }, null, 2));
+  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ executables, scripts, sourceBefore, sourceAfter, fixturePid: fixture.pid, readyWaitMilliseconds, uiCode, fixtureCode, failure: failure?.message ?? null }, null, 2));
 }
 if (failure) throw failure;
 console.log(JSON.stringify({ directory, uiCode, result: 'passed', paidModelCalls: 0 }));

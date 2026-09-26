@@ -25,7 +25,9 @@ public sealed class SqliteArchiveCrashTests
             void Block()
             {
                 File.WriteAllText(Path.Combine(childDirectory, "writer-ready"), Environment.GetEnvironmentVariable(PhaseVariable));
-                Thread.Sleep(Timeout.Infinite);
+                // 独立后备期限；即使父验收异常退出，也不能遗留永久持锁的子进程。
+                Thread.Sleep(TimeSpan.FromSeconds(70));
+                throw new TimeoutException("Controlled writer was not killed within its fixture deadline.");
             }
             WalHook? hook = null;
             if (Environment.GetEnvironmentVariable(PhaseVariable) == "committed")
@@ -43,15 +45,25 @@ public sealed class SqliteArchiveCrashTests
             start.ArgumentList.Add("/TestCaseFilter:FullyQualifiedName=" + typeof(SqliteArchiveCrashTests).FullName + "." + nameof(KilledWriterPreservesOnlyCommittedOriginalArchiveAndAck));
             start.Environment[ChildVariable] = f.Directory; start.Environment[PhaseVariable] = phase;
             using var process = Process.Start(start)!; var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
+            int watchdogExpired = 0;
+            using var watchdog = new Timer(_ =>
+            {
+                Interlocked.Exchange(ref watchdogExpired, 1);
+                try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (Exception) { /* 子进程70秒后备期限仍有效；父测试必须以超时失败。 */ }
+            }, null, TimeSpan.FromSeconds(60), Timeout.InfiniteTimeSpan);
             try
             {
                 string ready = Path.Combine(f.Directory, "writer-ready"); var deadline = DateTime.UtcNow.AddSeconds(45);
                 while (!File.Exists(ready) && !process.HasExited && DateTime.UtcNow < deadline) await Task.Delay(30);
-                if (!File.Exists(ready)) throw new InvalidOperationException("Controlled writer did not reach " + phase + (process.HasExited ? ": " + await stdout + await stderr : "."));
+                if (!File.Exists(ready)) throw new InvalidOperationException("Controlled writer did not reach " + phase + (process.HasExited ? ": " + await stdout.WaitAsync(TimeSpan.FromSeconds(5)) + await stderr.WaitAsync(TimeSpan.FromSeconds(5)) : "."));
                 Assert.Equal(phase, File.ReadAllText(ready));
                 // Actual second opener while an EXCLUSIVE SQLite writer owns the file; no fake storage error.
-                await Assert.ThrowsAsync<StorageException>(() => SqliteArchiveStore.OpenAsync(f.Options(StorageOpenMode.Reopen)));
-                process.Kill(entireProcessTree: true); await process.WaitForExitAsync();
+                var lockWait = Stopwatch.StartNew();
+                await Assert.ThrowsAsync<StorageException>(async () => { using var unexpected = await SqliteArchiveStore.OpenAsync(f.Options(StorageOpenMode.Reopen)); });
+                Assert.True(lockWait.Elapsed < TimeSpan.FromSeconds(10), "Original driver must reject a busy store within the bounded lock wait.");
+                Assert.Equal(0, Volatile.Read(ref watchdogExpired));
+                process.Kill(entireProcessTree: true); await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(10));
                 using var reopened = await SqliteArchiveStore.OpenAsync(f.Options(StorageOpenMode.Reopen));
                 if (phase == "uncommitted") { Assert.Null(await reopened.HeadAsync()); Assert.Null(await reopened.PendingAsync()); }
                 else
@@ -61,7 +73,12 @@ public sealed class SqliteArchiveCrashTests
                     Assert.Null(await reopened.PendingAsync()); Assert.Equal("1", (await reopened.HeadAsync())!.Value.GetProperty("sequence").GetString());
                 }
             }
-            finally { if (!process.HasExited) process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); await stdout; await stderr; }
+            finally
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(10));
+            }
         }
     }
 

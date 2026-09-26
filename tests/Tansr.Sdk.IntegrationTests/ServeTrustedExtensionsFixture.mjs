@@ -30,6 +30,12 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
   const events = [], notices = [], requests = [], subjects = [], mcpCalls = [], decisions = [], handles = new Map();
   let next = null, hookMode = 'allow', promptBlocked = false, executeCount = 0, hookCalls = 0, closes = 0;
   let childId = '', childCalls = 0, failure, busy = false, closing = false;
+  async function recordFailure(stage, error, details = {}) {
+    if (failure) return;
+    failure = { stage, message: String(error.message), stack: String(error.stack), ...details };
+    await writeFile(join(directory, 'host-failure.tmp'), JSON.stringify(failure));
+    await rename(join(directory, 'host-failure.tmp'), join(directory, 'host-failure.json'));
+  }
   const governance = { enabled: false, sessionId: null, mainCalls: 0, childCalls: 0, adjudicationCalls: 0 };
   const frame = (name, data) => `event: ${name}\ndata: ${JSON.stringify(data)}\n\n`;
   const response = (request, answer, usage = { inTokens: 0, outTokens: 0, cacheRTokens: 0, cacheWTokens: 0 }) => new Response(frame('t.open', { exchangeId: `trusted-${requests.length}`, model: request.model, protocol: 'twp/1' }) +
@@ -41,11 +47,18 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
     const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
     assert.equal(url.origin, FAKE_API_BASE);
     if (url.pathname !== '/t1/exchange') return fake.fetchImpl(input, init);
+    let request;
     try {
-      const request = JSON.parse(String(init?.body)); assert.ok(requests.length < 48);
+      request = JSON.parse(String(init?.body)); assert.ok(requests.length < 48);
+      if (failure) throw new Error(`The controlled upstream already failed: ${failure.message}`);
       if (request.meta?.purpose === 'memory') return response(request, 'nothing to save');
       const tools = (request.tools ?? []).map(tool => tool.name);
-      const child = !tools.some(name => ['TrustedOrder', 'Skill', 'Task', 'NativeMcp'].includes(name));
+      // Tool availability is the subject under test, not a reliable request identity.
+      // Only the real child prompt names this lane; empty main tools must fail as main.
+      const textBlocks = (request.thread ?? []).filter(message => message.role === 'user')
+        .flatMap(message => message.blocks ?? []).filter(block => block.t === 'text').map(block => block.v);
+      const child = textBlocks.some(text => typeof text === 'string' &&
+        /^(?:Synthetic foreground task|Synthetic resident task|Continue the synthetic task|Consider two synthetic writes\.)$/.test(text));
       // A permission adjudicator is a separate original-kernel request, not a child.
       if (JSON.stringify(request.thread).includes('PERMISSION ADJUDICATION')) {
         if (governance.enabled) {
@@ -69,10 +82,18 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
         assert.ok(JSON.stringify(request.thread).includes('CHILD_DEVICE_SENTINEL'), 'The actual child must consume its original C# device read.');
         return response(request, 'TRUSTED_CHILD_DONE');
       }
-      const answer = next; next = null;
+      const answer = next;
+      if (answer) assert.ok(tools.includes(answer.name), `Planned main tool ${answer.name} must be visible; actual tools: ${tools.join(', ') || '(none)'}`);
+      next = null;
       if (answer?.name === 'AgentFollowup') answer.args.agent_id = childId;
       return response(request, answer ?? 'TRUSTED_PARENT_DONE');
-    } catch (error) { failure = { stage: 'upstream', message: String(error.message) }; throw error; }
+    } catch (error) {
+      await recordFailure('upstream', error, { request, executions: [...handles.keys()].map(sessionId => {
+        try { return build.factory.execution.session(scope.endUserId, sessionId).executionBoundary(); }
+        catch { return { sessionId, released: true }; }
+      }) });
+      throw error;
+    }
   };
   const order = defineTool({ name: 'TrustedOrder', description: 'Read one synthetic business order',
     parameters: { id: { type: 'string' } }, readOnly: true, handler: async (args, context) => {
@@ -128,7 +149,7 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
       }
       response.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'trusted-http-session' });
       response.end(JSON.stringify({ jsonrpc: '2.0', id: message.id, result }));
-    } catch (error) { failure = { stage: 'native-http-mcp', message: String(error.message) }; response.writeHead(500); response.end(); }
+    } catch (error) { await recordFailure('native-http-mcp', error); response.writeHead(500); response.end(); }
   });
   await new Promise((resolve, reject) => { mcpServer.once('error', reject); mcpServer.listen(0, '127.0.0.1', resolve); });
   const mcpUrl = `http://127.0.0.1:${mcpServer.address().port}/mcp`;
@@ -157,7 +178,7 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
   }
   const seen = new Set();
   const timer = setInterval(async () => {
-    if (closing || busy || failure) return; busy = true;
+    if (closing || busy) return; busy = true;
     try {
       const files = (await readdir(commands)).filter(file => file.endsWith('.json')).sort(); assert.ok(files.length <= 192);
       const file = files.find(file => !seen.has(file)); if (!file) return; seen.add(file);
@@ -167,7 +188,7 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
       const result = { id: input.id, value: await command(input) };
       await writeFile(join(responses, `${input.id}.tmp`), JSON.stringify(result), { flag: 'wx' });
       await rename(join(responses, `${input.id}.tmp`), join(responses, file));
-    } catch (error) { failure = { stage: 'host-command', message: String(error.message) }; await writeFile(join(directory, 'host-failure.json'), JSON.stringify(failure)); }
+    } catch (error) { await recordFailure('host-command', error); }
     finally { busy = false; }
   }, 10);
   return { url: server.url, async close() {
@@ -175,7 +196,7 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
     try { await server.close(); await server.settleResources?.(); await build.flush(); await build.factory.execution.settle(); }
     finally { unsubscribe(); spool.close(); await new Promise((resolve, reject) => mcpServer.close(error => error ? reject(error) : resolve())); }
     const result = { realKernel: true, realExecutionSpool: true, controlledModel: true, executeCount, hookCalls, closes, childCalls,
-      notices, requests: requests.length, subjects, events, mcpCalls, decisions, governance, failure: failure ?? null };
+      notices, requests: requests.length, requestEvidence: requests, subjects, events, mcpCalls, decisions, governance, failure: failure ?? null };
     await writeFile(join(directory, 'result.json'), JSON.stringify(result));
     if (failure) throw new Error(`${failure.stage}: ${failure.message}`); return result;
   } };

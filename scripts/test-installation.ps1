@@ -73,7 +73,8 @@ function Select-Version([string]$Version) {
     $pointer = Join-Path $installRoot 'current.json'
     $next = Join-Path $installRoot 'current.next.json'
     [IO.File]::WriteAllText($next, (@{ version = $Version } | ConvertTo-Json -Compress), [Text.UTF8Encoding]::new($false))
-    if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($next, $pointer, $null) } else { [IO.File]::Move($next, $pointer) }
+    # PowerShell converts an untyped $null string argument to an empty path; preserve the .NET null overload value.
+    if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($next, $pointer, [NullString]::Value) } else { [IO.File]::Move($next, $pointer) }
 }
 function Run-Installed([string]$Step) {
     $version = (Get-Content -LiteralPath (Join-Path $installRoot 'current.json') -Raw | ConvertFrom-Json).version
