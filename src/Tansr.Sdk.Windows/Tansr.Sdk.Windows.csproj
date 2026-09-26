@@ -8,7 +8,8 @@
   <ItemGroup>
     <ProjectReference Include="../Tansr.Sdk/Tansr.Sdk.csproj" />
     <None Include="../../README.md" Pack="true" PackagePath="/" />
-    <None Update="buildTransitive/Tansr.Sdk.Windows.targets" Pack="true" PackagePath="buildTransitive/net48/Tansr.Sdk.Windows.targets" />
+    <None Remove="buildTransitive/Tansr.Sdk.Windows.targets" />
+    <None Include="buildTransitive/Tansr.Sdk.Windows.targets" Pack="true" PackagePath="buildTransitive/net48/Tansr.Sdk.Windows.targets" />
     <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" Condition="'$(TargetFramework)' == 'net48'" />
     <Reference Include="System.Security" Condition="'$(TargetFramework)' == 'net48'" />
     <Reference Include="System.Net.Http" Condition="'$(TargetFramework)' == 'net48'" />
