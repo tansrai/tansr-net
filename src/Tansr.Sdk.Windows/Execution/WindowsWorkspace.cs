@@ -214,16 +214,32 @@ public sealed class WindowsWorkspace : IDisposable
         {
             Check(); string[] relative = Parts(relativeDirectory);
             var handles = new List<SafeFileHandle>();
+            SafeFileHandle? guard = null;
             try
             {
-                handles.Add(NativeWorkspace.OpenDrive(RootDirectory.Substring(0, 3), true));
-                foreach (string part in RootDirectory.Substring(3).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries).Concat(relative))
-                    handles.Add(NativeWorkspace.OpenDirectory(handles[handles.Count - 1], part, false, true));
+                // 不共享 DELETE 固定每级身份；共享 WRITE，不能因一个子进程禁止整盘普通文件原子保存。
+                handles.Add(NativeWorkspace.OpenDrive(RootDirectory.Substring(0, 3)));
+                var parts = RootDirectory.Substring(3).Split(new[] { '\\' }, StringSplitOptions.RemoveEmptyEntries).Concat(relative).ToArray();
+                foreach (string part in parts) handles.Add(NativeWorkspace.OpenDirectory(handles[handles.Count - 1], part));
+                try
+                {
+                    // 下一子项被固定使祖先持续非空；末目录也须如此，防止运行期转成 junction。
+                    // 对本次新建文件使用原句柄 delete-on-close，绝不清扫未知文件或按可替换路径删除。
+                    guard = NativeWorkspace.OpenFile(handles[handles.Count - 1], ReservedPrefix + "process-" + Guid.NewGuid().ToString("N") + ".lock",
+                        write: true, create: true, deleteOnClose: true);
+                }
+                catch (WindowsWorkspaceException error) when (error.Code == "access_denied" || error.Code == "native_error_19")
+                {
+                    // 只读工作区保留原可运行性，只对末目录使用原拒写保护，不锁它的祖先。
+                    handles.Add(parts.Length == 0 ? NativeWorkspace.OpenDrive(RootDirectory.Substring(0, 3), true) :
+                        NativeWorkspace.OpenDirectory(handles[handles.Count - 2], parts[parts.Length - 1], false, true));
+                }
                 string final = NativeWorkspace.FinalPath(handles[handles.Count - 1]);
                 if (!IsWithinRoot(final)) throw new WindowsWorkspaceException("path_identity_changed");
-                return new ProcessDirectoryLease(handles, final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final.Substring(4) : final);
+                var lease = new ProcessDirectoryLease(handles, guard, final.StartsWith(@"\\?\", StringComparison.Ordinal) ? final.Substring(4) : final);
+                lease.ValidateForExecution(); return lease;
             }
-            catch { DisposeHandles(handles); throw; }
+            catch { guard?.Dispose(); DisposeHandles(handles); throw; }
         }
     }
 
@@ -423,15 +439,16 @@ public sealed class WindowsWorkspace : IDisposable
 
     private sealed class ProcessDirectoryLease : IWindowsProcessWorkingDirectoryLease
     {
-        private readonly List<SafeFileHandle> _handles; private readonly string _finalPath; private bool _disposed;
-        internal ProcessDirectoryLease(List<SafeFileHandle> handles, string path) { _handles = handles; DirectoryPath = path; _finalPath = NativeWorkspace.FinalPath(handles[handles.Count - 1]); }
+        private readonly List<SafeFileHandle> _handles; private readonly SafeFileHandle? _guard; private readonly string _finalPath; private bool _disposed;
+        internal ProcessDirectoryLease(List<SafeFileHandle> handles, SafeFileHandle? guard, string path) { _handles = handles; _guard = guard; DirectoryPath = path; _finalPath = NativeWorkspace.FinalPath(handles[handles.Count - 1]); }
         public string DirectoryPath { get; }
         public void ValidateForExecution()
         {
             if (_disposed) throw new ObjectDisposedException(nameof(ProcessDirectoryLease));
             foreach (var handle in _handles) NativeWorkspace.Validate(handle, true);
+            if (_guard != null) NativeWorkspace.Validate(_guard, false);
             if (!string.Equals(_finalPath, NativeWorkspace.FinalPath(_handles[_handles.Count - 1]), StringComparison.OrdinalIgnoreCase)) throw new WindowsWorkspaceException("path_identity_changed");
         }
-        public void Dispose() { if (_disposed) return; _disposed = true; DisposeHandles(_handles); }
+        public void Dispose() { if (_disposed) return; _disposed = true; _guard?.Dispose(); DisposeHandles(_handles); }
     }
 }

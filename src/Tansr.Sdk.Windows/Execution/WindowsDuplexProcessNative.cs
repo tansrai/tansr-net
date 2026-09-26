@@ -51,13 +51,13 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
     }
 
     internal static WindowsDuplexProcessNative Start(string executable, IReadOnlyList<string> arguments, string directory,
-        IDictionary<string, string> environment, string? expectedExecutableSha256, CancellationToken cancellation)
+        IDictionary<string, string> environment, string? expectedExecutableSha256, CancellationToken cancellation, Action validateWorkingDirectory)
     {
         var native = new WindowsDuplexProcessNative();
         try
         {
             native.PinExecutable(executable, expectedExecutableSha256, cancellation);
-            native.Create(executable, arguments, directory, environment, cancellation);
+            native.Create(executable, arguments, directory, environment, cancellation, validateWorkingDirectory);
             return native;
         }
         catch
@@ -74,7 +74,7 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
     }
 
     private void Create(string executable, IReadOnlyList<string> arguments, string directory, IDictionary<string, string> environment,
-        CancellationToken cancellation)
+        CancellationToken cancellation, Action validateWorkingDirectory)
     {
         Job = new NativeProcessHandle(NativeProcessMethods.CreateJobObjectW(IntPtr.Zero, null));
         if (Job.IsInvalid) throw Failure();
@@ -123,6 +123,7 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
             environmentLength = environmentText.Length;
             environmentBlock = Marshal.StringToHGlobalUni(environmentText);
             cancellation.ThrowIfCancellationRequested();
+            ValidateExecutable(executable); validateWorkingDirectory();
             if (!NativeProcessMethods.CreateProcessW(executable, NativeProcessLaunch.BuildCommandLine(executable, arguments),
                 IntPtr.Zero, IntPtr.Zero, true,
                 NativeProcessMethods.Suspended | NativeProcessMethods.NoWindow | NativeProcessMethods.UnicodeEnvironment | NativeProcessMethods.ExtendedStartupInfo,
@@ -132,6 +133,7 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
             using var thread = new NativeProcessHandle(information.Thread);
             if (!NativeProcessMethods.AssignProcessToJobObject(Job, Process)) throw Failure();
             cancellation.ThrowIfCancellationRequested();
+            ValidateExecutable(executable); validateWorkingDirectory();
             if (NativeProcessMethods.ResumeThread(thread) == uint.MaxValue) throw Failure();
         }
         finally
@@ -168,12 +170,12 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
         ValidatePath(executable);
         if (!executable.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("An approved executable is required.", nameof(executable));
         var root = Path.GetPathRoot(executable)!;
-        var parent = NativeWorkspace.OpenDrive(root, denyWrite: true);
+        var parent = NativeWorkspace.OpenDrive(root);
         pins.Add(parent);
         var components = executable.Substring(root.Length).Split('\\');
         for (var index = 0; index < components.Length - 1; index++)
         {
-            parent = NativeWorkspace.OpenDirectory(parent, components[index], denyWrite: true);
+            parent = NativeWorkspace.OpenDirectory(parent, components[index]);
             pins.Add(parent);
         }
 
@@ -185,6 +187,17 @@ internal sealed class WindowsDuplexProcessNative : IDisposable
         if (!string.Equals(NativeWorkspace.FinalPath(file), @"\\?\" + executable, StringComparison.OrdinalIgnoreCase))
             throw new WindowsDuplexProcessException("aliased_executable");
         if (expectedExecutableSha256 != null) VerifyExecutableDigest(file, expectedExecutableSha256, cancellation);
+        ValidateExecutable(executable);
+    }
+
+    private void ValidateExecutable(string executable)
+    {
+        // 各目录下一个固定子项及 exe 叶不可删除，整条祖先链持续非空，不能设重解析点。
+        for (var index = 0; index < pins.Count - 1; index++) NativeWorkspace.Validate(pins[index], true);
+        var file = pins[pins.Count - 1];
+        if (!NativeProcessMethods.GetFileInformationByHandle(file, out var info) || (info.Attributes & 0x410) != 0 ||
+            !string.Equals(NativeWorkspace.FinalPath(file), @"\\?\" + executable, StringComparison.OrdinalIgnoreCase))
+            throw new WindowsDuplexProcessException("unsafe_executable");
     }
 
     private static void VerifyExecutableDigest(SafeFileHandle file, string expected, CancellationToken cancellation)

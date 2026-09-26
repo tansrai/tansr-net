@@ -74,7 +74,7 @@ public sealed class WindowsDuplexProcess : IDisposable
                 lease.ValidateForExecution();
                 WindowsDuplexProcessNative.ValidatePath(lease.DirectoryPath);
                 process = WindowsDuplexProcessNative.Start(settings.Executable, settings.Arguments, lease.DirectoryPath, settings.Environment,
-                    settings.ExpectedExecutableSha256, lifetimeCancellation);
+                    settings.ExpectedExecutableSha256, lifetimeCancellation, lease.ValidateForExecution);
                 return new WindowsDuplexProcess(settings, process, lease, lifetimeCancellation);
             }
             catch

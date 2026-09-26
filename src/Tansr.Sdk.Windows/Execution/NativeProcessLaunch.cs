@@ -61,6 +61,12 @@ internal sealed class NativeProcessLaunch : IDisposable
         }
         catch
         {
+            if (launch.Process != null)
+            {
+                // 身份/授权在 suspended 后失效时也保持原句柄，先回收尚未运行的子进程再释放路径锚。
+                NativeProcessMethods.TerminateProcess(launch.Process, 0xC000013A);
+                launch.CleanupConfirmed = NativeProcessMethods.WaitForSingleObject(launch.Process, 5000) == NativeProcessMethods.WaitObject;
+            }
             launch.Dispose();
             throw;
         }
@@ -148,6 +154,7 @@ internal sealed class NativeProcessLaunch : IDisposable
             var flags = NativeProcessMethods.Suspended | NativeProcessMethods.NoWindow |
                 NativeProcessMethods.UnicodeEnvironment | NativeProcessMethods.ExtendedStartupInfo;
             validateBeforeStart();
+            ValidateExecutable(executable);
             if (!NativeProcessMethods.CreateProcessW(executable, BuildCommandLine(executable, arguments), IntPtr.Zero, IntPtr.Zero,
                 true, flags, environmentBlock, directory, ref startup, out var information))
             {
@@ -164,6 +171,8 @@ internal sealed class NativeProcessLaunch : IDisposable
             }
 
             // 被挂起的主线程尚未运行用户代码，不存在先 fork 再加入 job 的窗口。
+            validateBeforeStart();
+            ValidateExecutable(executable);
             if (NativeProcessMethods.ResumeThread(thread) == uint.MaxValue)
             {
                 throw NativeError();
@@ -225,14 +234,21 @@ internal sealed class NativeProcessLaunch : IDisposable
     private void PinExecutable(string executable)
     {
         var root = Path.GetPathRoot(executable)!;
-        var current = root;
-        PinPath(current, true);
+        executablePins.Add(NativeWorkspace.OpenDrive(root));
         var parts = executable.Substring(root.Length).Split(Path.DirectorySeparatorChar);
-        for (var index = 0; index < parts.Length; index++)
-        {
-            current = Path.Combine(current, parts[index]);
-            PinPath(current, index != parts.Length - 1);
-        }
+        for (var index = 0; index < parts.Length - 1; index++)
+            executablePins.Add(NativeWorkspace.OpenDirectory(executablePins[executablePins.Count - 1], parts[index]));
+        PinPath(executable, false);
+        ValidateExecutable(executable);
+    }
+
+    private void ValidateExecutable(string executable)
+    {
+        for (var index = 0; index < executablePins.Count - 1; index++) NativeWorkspace.Validate(executablePins[index], true);
+        var file = executablePins[executablePins.Count - 1];
+        if (!NativeProcessMethods.GetFileInformationByHandle(file, out var info) || (info.Attributes & 0x410) != 0 ||
+            !string.Equals(NativeWorkspace.FinalPath(file), @"\\?\" + executable, StringComparison.OrdinalIgnoreCase))
+            throw new WindowsWorkspaceException("unsafe_executable");
     }
 
     private static void VerifyExecutableDigest(SafeFileHandle file, string expected, CancellationToken cancellation)
@@ -260,7 +276,7 @@ internal sealed class NativeProcessLaunch : IDisposable
     {
         // 逐级持有祖先，拒绝重解析点，并禁止 rename/delete；可执行文件另禁止写入。
         var handle = NativeProcessMethods.CreateFileW(path, directory ? 0x80U : 0x80000000U,
-            1, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
+            directory ? 3u : 1u, IntPtr.Zero, 3, 0x02200000, IntPtr.Zero);
         executablePins.Add(handle);
         if (handle.IsInvalid || !NativeProcessMethods.GetFileInformationByHandle(handle, out var information))
         {

@@ -64,7 +64,7 @@ public sealed class WindowsProcessExecutor
         directory.ValidateForExecution();
         ValidateLocalAbsolutePath(directory.DirectoryPath, false);
         using var process = NativeProcessLaunch.Start(options.Executable, options.Arguments, directory.DirectoryPath, options.Environment,
-            options.ExpectedExecutableSha256, cancellationToken, options.ValidateBeforeStart);
+            options.ExpectedExecutableSha256, cancellationToken, () => { directory.ValidateForExecution(); options.ValidateBeforeStart?.Invoke(); });
         if (!process.Started)
         {
             return new WindowsProcessResult(process.CleanupConfirmed ? WindowsProcessTermination.StartFailed : WindowsProcessTermination.Unknown,
