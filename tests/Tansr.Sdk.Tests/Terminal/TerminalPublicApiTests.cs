@@ -55,6 +55,68 @@ public sealed class TerminalPublicApiTests
     }
 
     [Fact]
+    public async Task ExecutorNotificationsUseDeviceCredentialsOriginalBindingAndExactCursor()
+    {
+        var adapter = new TerminalTestAdapter(); using var controllerHttp = ControllerHttp(adapter);
+        using var controller = new TerminalConnection(Options(), true, controllerHttp);
+        var authenticated = await controller.BindAsync(Request(adapter)); var calls = 0;
+        var notification = JsonSerializer.SerializeToElement(new
+        { contract = "terminal-services-v1", eventId = "9007199254740993", type = "operations-available", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null });
+        using var deviceHttp = new HttpClient(new Handler((request, _) =>
+        {
+            calls++; Assert.Equal("device-only", request.Headers.Authorization!.Parameter);
+            Assert.Equal(HttpMethod.Get, request.Method);
+            Assert.Equal("/v3/terminal/executors/executor-1/events?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&connectionId=connection-1", request.RequestUri!.PathAndQuery);
+            Assert.Equal("9007199254740992", request.Headers.GetValues("Last-Event-ID").Single());
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("retry: 1000\ndata:\n\nid: 9007199254740993\nevent: operations-available\ndata: " + WireJson.CanonicalString(notification) + "\n\n", Encoding.UTF8, "text/event-stream") });
+        }));
+        using var device = new TerminalConnection(Options("device-only"), true, deviceHttp);
+        await Assert.ThrowsAsync<ArgumentException>(() => device.ObserveExecutorAsync(authenticated, null, (_, _) => Task.CompletedTask));
+        var binding = device.AttachBinding(authenticated); var observed = 0;
+        Assert.Equal("event_stream_disconnected", (await Assert.ThrowsAsync<TansrProtocolException>(() =>
+            device.ObserveExecutorAsync(binding, 9007199254740992L, (value, _) =>
+            { observed++; Assert.Equal(WireJson.CanonicalString(notification), WireJson.CanonicalString(value)); return Task.CompletedTask; }))).Code);
+        Assert.Equal(1, observed); Assert.Equal(1, calls);
+        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => device.ObserveExecutorAsync(binding, -1, (_, _) => Task.CompletedTask));
+        Assert.Equal(1, calls);
+    }
+
+    [Fact]
+    public async Task ExecutorObservationRetainsItsSlotUntilCancelledCallbackActuallyEnds()
+    {
+        var adapter = new TerminalTestAdapter(); using var controllerHttp = ControllerHttp(adapter);
+        using var controller = new TerminalConnection(Options(), true, controllerHttp);
+        var authenticated = await controller.BindAsync(Request(adapter)); var calls = 0;
+        var notification = JsonSerializer.SerializeToElement(new
+        { contract = "terminal-services-v1", eventId = "0", type = "reconcile-required", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null });
+        using var deviceHttp = new HttpClient(new Handler((_, _) =>
+        {
+            calls++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent("id: 0\nevent: reconcile-required\ndata: " + WireJson.CanonicalString(notification) + "\n\n", Encoding.UTF8, "text/event-stream") });
+        }));
+        using var device = new TerminalConnection(Options("device-only"), true, deviceHttp);
+        var binding = device.AttachBinding(authenticated);
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var cancel = new CancellationTokenSource();
+        var observing = device.ObserveExecutorAsync(binding, null, async (_, _) => { entered.TrySetResult(); await release.Task; }, cancel.Token);
+        try
+        {
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancel.Cancel();
+            Assert.False(observing.IsCompleted);
+            Assert.Equal("observation_already_active", (await Assert.ThrowsAsync<TansrProtocolException>(() =>
+                device.ObserveExecutorAsync(binding, null, (_, _) => Task.CompletedTask))).Code);
+            Assert.Equal(1, calls);
+        }
+        finally { release.TrySetResult(); }
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observing.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal("event_stream_disconnected", (await Assert.ThrowsAsync<TansrProtocolException>(() =>
+            device.ObserveExecutorAsync(binding, null, (_, _) => Task.CompletedTask))).Code);
+        Assert.Equal(2, calls);
+    }
+
+    [Fact]
     public async Task ControllerBindingCanBeAttachedWithSeparateDeviceCredentialsAndRetainsUnknownCapture()
     {
         var adapter = new TerminalTestAdapter { CommitThenThrow = true };

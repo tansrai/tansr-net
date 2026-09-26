@@ -85,6 +85,40 @@ public sealed class TerminalCandidateHttpTransportTests
             (received, _) => { observed++; Assert.Equal(WireJson.CanonicalString(value), WireJson.CanonicalString(received)); return Task.CompletedTask; }, default));
         Assert.Equal("event_stream_disconnected", error.Code); Assert.Equal(1, observed);
     }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task EmptyServeRetryPreambleIsIgnoredForBothTerminalStreams(bool executor)
+    {
+        var value = executor ? JsonSerializer.SerializeToElement(new
+        { contract = "terminal-services-v1", eventId = "9007199254740993", type = "operations-available", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null }) : StatusEvent();
+        var observed = 0;
+        using var http = new HttpClient(new Handler(request =>
+        {
+            if (executor) Assert.Equal("9007199254740992", request.Headers.GetValues("Last-Event-ID").Single());
+            return Task.FromResult(Sse("retry: 1000\ndata:\n\n" + OutputFrame(value, executor ? "9007199254740993" : null)));
+        }));
+        using var transport = new TerminalCandidateHttpTransport(Options(), http);
+        Task Observe(JsonElement received, CancellationToken token)
+        { observed++; Assert.Equal(WireJson.CanonicalString(value), WireJson.CanonicalString(received)); return Task.CompletedTask; }
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => executor
+            ? transport.ObserveExecutorAsync("sdk2-offload-v1", "executor-1", "connection-1", 9007199254740992L, Observe, default)
+            : transport.ObserveOutputAsync(Session, Reference, null, Observe, default));
+        Assert.Equal("event_stream_disconnected", error.Code); Assert.Equal(1, observed);
+    }
+    [Theory]
+    [InlineData("event: operations-available\ndata:\n\n")]
+    [InlineData("id: 0\ndata:\n\n")]
+    [InlineData("data: not-json\n\n")]
+    public async Task NamedIdentifiedOrNonemptyMalformedFramesAreNeverSwallowed(string data)
+    {
+        var observed = 0;
+        using var http = new HttpClient(new Handler(_ => Task.FromResult(Sse(data))));
+        using var transport = new TerminalCandidateHttpTransport(Options(), http);
+        await Assert.ThrowsAsync<WireProtocolException>(() => transport.ObserveExecutorAsync("sdk2-offload-v1", "executor-1", "connection-1", null,
+            (_, _) => { observed++; return Task.CompletedTask; }, default));
+        Assert.Equal(0, observed);
+    }
     [Fact]
     public async Task OutputRejectsNotificationCursorAndBindingErrorsNeverRetry()
     {

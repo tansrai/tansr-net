@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Client;
 using Tansr.Sdk.Terminal;
 
 namespace Tansr.Examples;
@@ -56,11 +57,15 @@ internal sealed class ExampleSessionControls
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            using var lease = AcquireOperationLease("configuration");
             EnsureResolved("configuration");
             var state = await control.ReadConfigurationAsync(sessionId, ct).ConfigureAwait(false);
             var operation = control.CreateConfigurationOperation(sessionId, Guid.NewGuid().ToString("N"), state.GetProperty("configuration").GetProperty("revision").GetInt64(), changes);
             Write("configuration", operation.Request, operation.Scope, null);
-            var result = await control.ApplyConfigurationAsync(operation, ct).ConfigureAwait(false);
+            JsonElement result;
+            try { result = await control.ApplyConfigurationAsync(operation, ct).ConfigureAwait(false); }
+            catch (TansrException error) when (IsDefiniteRejection("configuration", error))
+            { Write("configuration", operation.Request, operation.Scope, null, error); throw; }
             Write("configuration", operation.Request, operation.Scope, result); return result;
         }
         finally { gate.Release(); }
@@ -71,7 +76,9 @@ internal sealed class ExampleSessionControls
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            using var lease = AcquireOperationLease("configuration");
             var saved = Read("configuration") ?? throw new InvalidOperationException("no_original_configuration_operation");
+            EnsureReplayable(saved, "configuration");
             var operation = control.RestoreConfigurationOperation(saved.GetProperty("request"), saved.GetProperty("scope"));
             var result = await control.ReplayConfigurationAsync(operation, ct).ConfigureAwait(false);
             Write("configuration", operation.Request, operation.Scope, result); return result;
@@ -84,6 +91,7 @@ internal sealed class ExampleSessionControls
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            using var lease = AcquireOperationLease("memory");
             EnsureResolved("memory");
             var state = await control.ReadMemoryAsync(sessionId, ct).ConfigureAwait(false);
             using var stream = new MemoryStream();
@@ -98,7 +106,10 @@ internal sealed class ExampleSessionControls
             using var document = JsonDocument.Parse(stream.ToArray());
             var operation = control.CreateMemoryOperation(sessionId, state, Guid.NewGuid().ToString("N"), Guid.NewGuid().ToString("N"), document.RootElement);
             Write("memory", operation.Request, operation.Scope, null);
-            var result = await control.SubmitMemoryAsync(operation, ct).ConfigureAwait(false);
+            JsonElement result;
+            try { result = await control.SubmitMemoryAsync(operation, ct).ConfigureAwait(false); }
+            catch (TansrException error) when (IsDefiniteRejection("memory", error))
+            { Write("memory", operation.Request, operation.Scope, null, error); throw; }
             Write("memory", operation.Request, operation.Scope, result); return result;
         }
         finally { gate.Release(); }
@@ -111,7 +122,9 @@ internal sealed class ExampleSessionControls
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            using var lease = AcquireOperationLease("memory");
             var saved = Read("memory") ?? throw new InvalidOperationException("no_original_memory_operation");
+            EnsureReplayable(saved, "memory");
             var operation = control.RestoreMemoryOperation(saved.GetProperty("request"), saved.GetProperty("scope"));
             var result = replay ? await control.ReplayMemoryAsync(operation, ct).ConfigureAwait(false) : await control.QueryMemoryAsync(operation, ct).ConfigureAwait(false);
             Write("memory", operation.Request, operation.Scope, result); return result;
@@ -123,7 +136,12 @@ internal sealed class ExampleSessionControls
     {
         var values = new List<string>();
         foreach (var kind in new[] { "configuration", "memory" })
-        { var value = Read(kind); if (value.HasValue) values.Add(kind + " 原操作：\n" + value.Value.GetRawText()); }
+        {
+            var value = Read(kind); if (!value.HasValue) continue;
+            values.Add(kind + " 原操作：\n" + value.Value.GetRawText());
+            if (Rejected(value.Value)) values.Add("原操作已确定拒绝；可再次选择修改或记忆命令，明确发起新请求。原失败保持可见，不自动重投。");
+            if (value.Value.TryGetProperty("lastRejection", out _)) values.Add("确定拒绝的完整原日志保留在：" + journalPrefix + "." + kind + ".rejected.<sha256>.json");
+        }
         return string.Join("\n", values);
     }
 
@@ -134,6 +152,7 @@ internal sealed class ExampleSessionControls
     }
     private static bool IsResolved(JsonElement saved, string kind)
     {
+        if (Rejected(saved)) return true;
         if (saved.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object)
         {
             if (kind == "configuration" && result.TryGetProperty("status", out var configurationStatus) &&
@@ -142,6 +161,29 @@ internal sealed class ExampleSessionControls
                 receipt.TryGetProperty("status", out var status) && (status.GetString() == "committed" || status.GetString() == "failed")) return true;
         }
         return false;
+    }
+
+    private static bool Rejected(JsonElement saved) => saved.TryGetProperty("rejection", out var rejection) && rejection.ValueKind == JsonValueKind.Object;
+    private static void EnsureReplayable(JsonElement saved, string kind)
+    {
+        if (Rejected(saved)) throw new InvalidOperationException(kind + "_original_operation_rejected_start_new_explicitly");
+    }
+
+    // Only a first, newly generated request can use these pre-commit refusals. A rejection while
+    // replaying an earlier unknown request cannot prove that the earlier attempt did not commit.
+    // In particular memory authority/lifecycle errors may follow the commit, so 4xx is not enough.
+    private static bool IsDefiniteRejection(string kind, TansrException error)
+    {
+        if (error is TansrProtocolException)
+            return error.Code == "contract_mismatch" || error.Code == "unsupported_capability" || error.Code == "payload_too_large";
+        if (error is not TansrHttpException http) return false;
+        if (http.StatusCode == 409 && ((http.Code == "revision_conflict" && http.RetryAction == "refresh") ||
+            (http.Code == "busy" && http.RetryAction == "backoff"))) return true;
+        if (kind != "configuration") return false;
+        return (http.StatusCode == 409 && ((http.Code == "context_transition_required" && http.RetryAction == "refresh") ||
+            (http.Code == "unsupported_capability" && http.RetryAction == "discover"))) ||
+            (http.StatusCode == 400 && http.Code == "invalid_request" && http.RetryAction == "none") ||
+            (http.StatusCode == 429 && http.Code == "request_limit" && http.RetryAction == "backoff");
     }
 
     private JsonElement? Read(string kind)
@@ -154,14 +196,23 @@ internal sealed class ExampleSessionControls
         return value.Clone();
     }
 
-    private void Write(string kind, JsonElement request, JsonElement scope, JsonElement? result)
+    private FileStream AcquireOperationLease(string kind)
+    {
+        var path = journalPrefix + "." + kind + ".active.lock";
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        // Do not let another example instance replay this request while its first outcome is
+        // being classified. A process crash releases the handle but leaves the journal unknown.
+        return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+    }
+
+    private void Write(string kind, JsonElement request, JsonElement scope, JsonElement? result, TansrException? rejection = null)
     {
         var path = journalPrefix + "." + kind + ".json"; Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         using var lease = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         var existing = Read(kind);
         if (existing.HasValue && existing.Value.GetProperty("request").GetRawText() != request.GetRawText() &&
-            (result.HasValue || !IsResolved(existing.Value, kind))) throw new InvalidOperationException("original_operation_changed_by_another_instance");
+            (result.HasValue || rejection is not null || !IsResolved(existing.Value, kind))) throw new InvalidOperationException("original_operation_changed_by_another_instance");
         try
         {
             using (var output = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
@@ -170,12 +221,42 @@ internal sealed class ExampleSessionControls
                 {
                     writer.WriteStartObject(); writer.WriteString("kind", kind); writer.WriteString("sessionId", sessionId);
                     writer.WritePropertyName("request"); request.WriteTo(writer); writer.WritePropertyName("scope"); scope.WriteTo(writer);
-                    writer.WritePropertyName("result"); if (result.HasValue) result.Value.WriteTo(writer); else writer.WriteNullValue(); writer.WriteEndObject(); writer.Flush();
+                    writer.WritePropertyName("result"); if (result.HasValue) result.Value.WriteTo(writer); else writer.WriteNullValue();
+                    if (rejection is not null)
+                    {
+                        writer.WritePropertyName("rejection"); WriteFailure(writer, rejection);
+                        writer.WritePropertyName("lastRejection"); writer.WriteStartObject();
+                        writer.WritePropertyName("request"); request.WriteTo(writer); writer.WritePropertyName("scope"); scope.WriteTo(writer);
+                        writer.WritePropertyName("failure"); WriteFailure(writer, rejection); writer.WriteEndObject();
+                    }
+                    else if (existing.HasValue && existing.Value.TryGetProperty("lastRejection", out var lastRejection))
+                    { writer.WritePropertyName("lastRejection"); lastRejection.WriteTo(writer); }
+                    writer.WriteEndObject(); writer.Flush();
                 }
                 output.Flush(true);
+            }
+            if (rejection is not null)
+            {
+                using var sha = SHA256.Create();
+                var key = BitConverter.ToString(sha.ComputeHash(Encoding.UTF8.GetBytes(request.GetRawText()))).Replace("-", "").ToLowerInvariant();
+                var rejectedPath = journalPrefix + "." + kind + ".rejected." + key + ".json";
+                // Preserve the exact original failure before allowing any replacement request.
+                // An existing archive is never overwritten or silently accepted as this receipt.
+                using var source = new FileStream(temporary, FileMode.Open, FileAccess.Read, FileShare.Read);
+                using var archive = new FileStream(rejectedPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                source.CopyTo(archive); archive.Flush(true);
             }
             if (File.Exists(path)) File.Replace(temporary, path, null); else File.Move(temporary, path);
         }
         finally { if (File.Exists(temporary)) File.Delete(temporary); }
+    }
+
+    private static void WriteFailure(Utf8JsonWriter writer, TansrException error)
+    {
+        writer.WriteStartObject(); writer.WriteString("code", error.Code);
+        if (error is TansrHttpException http)
+        { writer.WriteNumber("status", http.StatusCode); writer.WriteString("retryAction", http.RetryAction); }
+        else writer.WriteString("stage", "before_control_post");
+        writer.WriteEndObject();
     }
 }

@@ -179,15 +179,22 @@ internal sealed class TerminalExecutorEventCursor
         TerminalJson.Check(TerminalJson.Text(value, "executorId") == executorId && TerminalJson.Text(value, "connectionId") == connectionId, "binding_conflict");
         var next = TerminalJson.Sequence(value, "eventId");
         var digest = WireJson.Sha256(WireJson.EncodeControl(value));
+        // A restarted Serve may begin a new notification window at a lower (or equal) ID.
+        // This explicit control event resets the notification cursor, never output durability.
+        if (TerminalJson.Text(value, "type") == "reconcile-required")
+        {
+            last = next; fingerprint = digest; RequiresReconciliation = true; return true;
+        }
         if (last.HasValue && next <= last)
         {
             if (next == last) TerminalJson.Check(digest == fingerprint, "revision_conflict");
             else RequiresReconciliation = true;
             return false;
         }
-        if ((!last.HasValue ? next != 0 : last == long.MaxValue || next != last.Value + 1) || TerminalJson.Text(value, "type") == "reconcile-required")
+        if (!last.HasValue ? next != 0 : last == long.MaxValue || next != last.Value + 1)
             RequiresReconciliation = true;
         last = next; fingerprint = digest; return true;
     }
     internal void NoticeGap() => RequiresReconciliation = true;
+    internal void ClearReconciliation() => RequiresReconciliation = false;
 }

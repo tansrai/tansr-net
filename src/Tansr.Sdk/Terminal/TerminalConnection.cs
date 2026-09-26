@@ -80,6 +80,43 @@ public sealed class TerminalConnection : IDisposable
     public Task<JsonElement> GetExecutionStateAsync(TerminalBinding binding, JsonElement originalOperation, CancellationToken cancellationToken = default)
     { Check(binding); return client.GetExecutionStateAsync(binding.Inner, originalOperation, cancellationToken); }
 
+    /// <summary>Observe one executor notification stream using an already authenticated binding.
+    /// Notifications only wake or reconcile the original execution queue; they never grant execution
+    /// authority. Preserve the last successfully processed event ID when reconnecting.</summary>
+    public async Task ObserveExecutorAsync(TerminalBinding binding, long? lastEventId,
+        Func<JsonElement, CancellationToken, Task> observer, CancellationToken cancellationToken = default)
+    {
+        Check(binding);
+        if (observer is null) throw new ArgumentNullException(nameof(observer));
+        if (lastEventId < 0) throw new ArgumentOutOfRangeException(nameof(lastEventId));
+        TerminalJson.Check(binding.Inner.ExecutionBinding.ValueKind == JsonValueKind.Object &&
+            binding.Value.GetProperty("accepted").EnumerateArray().Any(x => x.GetString() == "execution-stream-v1"), "unsupported_capability");
+        var target = binding.Inner.ExecutionBinding.GetProperty("target");
+        var executorId = TerminalJson.Text(target, "executorId");
+        var connectionId = TerminalJson.Text(target, "connectionId");
+        // Executor notifications cover the connection, not a single session. Do not open a second
+        // subscription for another session on the same connection and spend its bounded slot twice.
+        var key = "executor:" + executorId + ":" + connectionId;
+        lock (gate)
+        {
+            EnsureOpen();
+            if (observations.Contains(key)) throw new TansrProtocolException("observation_already_active");
+            if (observations.Count >= 8) throw new TansrProtocolException("capacity_exceeded");
+            observations.Add(key);
+        }
+        try
+        {
+            await transport.ObserveExecutorAsync(TerminalJson.Text(binding.Inner.Session, "sessionContract"),
+                executorId, connectionId, lastEventId, async (value, token) =>
+                {
+                    Check(binding); token.ThrowIfCancellationRequested();
+                    await observer(value, token).ConfigureAwait(false);
+                    token.ThrowIfCancellationRequested(); Check(binding);
+                }, cancellationToken).ConfigureAwait(false);
+        }
+        finally { lock (gate) observations.Remove(key); }
+    }
+
     public async Task<JsonElement> GetOutputStatusAsync(TerminalBinding binding, JsonElement operationReference, CancellationToken cancellationToken = default)
     { Check(binding); return (await client.GetOutputStatusAsync(binding.Inner, operationReference, cancellationToken).ConfigureAwait(false)).Raw; }
 

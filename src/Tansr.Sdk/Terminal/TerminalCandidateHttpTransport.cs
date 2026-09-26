@@ -160,6 +160,9 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
             if (count == 0) { decoder.Complete(); throw new TansrProtocolException("event_stream_disconnected"); }
             foreach (var frame in decoder.Feed(buffer, count))
             {
+                // Serve starts the stream with a retry-only, empty-data control frame. It has
+                // no event identity; a named or identified empty frame remains invalid JSON.
+                if (frame.Name == null && frame.Id == null && frame.Data.Length == 0) continue;
                 var value = TerminalCandidateContract.Decode(definition, Encoding.UTF8.GetBytes(frame.Data));
                 TerminalJson.Check(frame.Name == TerminalJson.Text(value, "type"), "invalid_response");
                 TerminalJson.Check(definition == "OutputEvent" ? frame.Id == null : frame.Id == TerminalJson.Text(value, "eventId"), "invalid_event_id");

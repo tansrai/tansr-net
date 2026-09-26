@@ -68,7 +68,7 @@ internal sealed class AssistantWindow : Window
             _connect, Button("更新票据", () => { Volatile.Write(ref _currentToken, _token.Password); _status.Text = "已更新内存票据；下次请求使用新值。"; return Task.CompletedTask; }, false)));
         top.Children.Add(Row(Label("正文呈现"), _textMode, Label("思考呈现"), _thinkingMode,
             Button("历史", ShowHistoryAsync),
-            Button("状态", () => ShowAsync("会话状态", _session!.GetMetadataAsync())),
+            Button("状态", ShowMetadataAsync),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())),
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
@@ -308,6 +308,11 @@ internal sealed class AssistantWindow : Window
     }
 
     private Task ShowAsync(string title, Task<JsonElement> value) => ShowResultAsync(title, value);
+    private async Task ShowMetadataAsync()
+    {
+        var metadata = await _session!.ReadMetadataAsync(_lifetime!.Token);
+        new Window { Owner = this, Title = "会话状态 / 上下文", Width = 850, Height = 640, Content = new TextBox { Text = SessionContextText.Format(metadata), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } }.Show();
+    }
     private async Task ShowApplicationPromptAsync()
     {
         var value = await _session!.ReadApplicationPromptAsync(_lifetime!.Token);

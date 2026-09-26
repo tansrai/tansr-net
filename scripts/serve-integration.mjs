@@ -18,6 +18,9 @@ const required = name => {
   return value;
 };
 const source = realpathSync(required('TANSR_SERVE_SOURCE'));
+const suite = process.env.TANSR_SERVE_TEST_SUITE ?? 'all';
+assert.ok(['all', 'controls', 'execution', 'new'].includes(suite), 'Unknown named integration suite.');
+assert.ok(suite === 'all' || process.env.TANSR_SERVE_SOURCE_SNAPSHOT, 'Named candidate suites require the pinned source snapshot.');
 const sourceFile = path => resolve(source, path);
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
 
@@ -67,6 +70,8 @@ function sourceEvidence() {
     sourceFixtureSha256: sha(sourceFile('packages/server/test/v2-helpers.ts')), sourceResolutions: resolutions.length,
     publicFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')),
     memoryPublicationFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeMemoryPublicationFixture.mjs')),
+    sessionControlsFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeSessionControlsFixture.mjs')),
+    executionPipelineFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeExecutionPipelineFixture.mjs')),
     syntheticPlatformSha256: sha(sourceFile('packages/server/test/fake-platform-fetch.ts')),
     archiveSchemaSha256: sha(sourceFile('doc/rfc/sdk2-ext-v1.schema.json')),
     sourceResolutionSha256: createHash('sha256').update(resolutions.sort().join('\n')).digest('hex') };
@@ -154,7 +159,7 @@ async function fixture() {
     return null;
   };
   const { startPublicFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')).href);
-  let publicFixture, memoryFixture;
+  let publicFixture, memoryFixture, controlsFixture, executionFixture;
   try {
     publicFixture = await startPublicFixture({ source, directory: required('TANSR_SERVE_TEST_DIRECTORY'), authenticate,
       candidate: Boolean(process.env.TANSR_SERVE_SOURCE_SNAPSHOT) });
@@ -162,14 +167,24 @@ async function fixture() {
       const { startMemoryPublicationFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeMemoryPublicationFixture.mjs')).href);
       memoryFixture = await startMemoryPublicationFixture({ source,
         directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'memory-publication'), authenticate });
+      const { startSessionControlsFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeSessionControlsFixture.mjs')).href);
+      controlsFixture = await startSessionControlsFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'controls-host'), authenticate });
+      const { startExecutionPipelineFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeExecutionPipelineFixture.mjs')).href);
+      executionFixture = await startExecutionPipelineFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'execution-pipeline'), authenticate });
     }
-  } catch (error) { await server.close(); await publicFixture?.close(); throw error; }
+  } catch (error) {
+    await Promise.allSettled([server.close(), publicFixture?.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close()]);
+    throw error;
+  }
   let closing;
   const close = () => closing ??= (async () => {
     await server.close();
-    const results = await Promise.allSettled([publicFixture.close(), memoryFixture?.close()]);
+    const results = await Promise.allSettled([publicFixture.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close()]);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
-    return { publicEvidence: results[0].value, memoryEvidence: results[1].value };
+    return { publicEvidence: results[0].value, memoryEvidence: results[1].value,
+      controlsEvidence: results[2].value, executionEvidence: results[3].value };
   })();
   process.on('message', async message => {
     if (message?.type !== 'stop') return;
@@ -181,7 +196,8 @@ async function fixture() {
     } catch (error) { process.stderr.write(error.message + '\n'); process.exitCode = 1; process.disconnect(); }
   });
   process.on('disconnect', () => { void close(); });
-  process.send({ type: 'ready', url: server.url, publicUrl: publicFixture.url, memoryUrl: memoryFixture?.url });
+  process.send({ type: 'ready', url: server.url, publicUrl: publicFixture.url, memoryUrl: memoryFixture?.url,
+    controlsUrl: controlsFixture?.url, executionUrl: executionFixture?.url });
 }
 
 function waitMessage(child, type, timeoutMs = 30000) {
@@ -215,14 +231,21 @@ async function run() {
     assert.equal(url.hostname, '127.0.0.1');
     console.log(JSON.stringify({ acceptance: 'real-Serve-source-HTTP-SSE', kernel: 'controlled-FakeAgentFactory',
       paidSampling: false, ...evidence }));
-    const filter = 'FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSourceIntegrationTests|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServePublicHostIntegrationTests' +
-      (ready.memoryUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests' : '');
+    const allFilter = 'FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSourceIntegrationTests|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServePublicHostIntegrationTests' +
+      (ready.memoryUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests' : '') +
+      (ready.controlsUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests' : '') +
+      (ready.executionUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests' : '');
+    const filter = suite === 'all' ? allFilter : [
+      ...(suite === 'controls' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests'] : []),
+      ...(suite === 'execution' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests'] : [])].join('|');
     const args = ['test', resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj'),
       '--no-build', '--no-restore', '--configuration', process.env.TANSR_INTEGRATION_CONFIGURATION ?? 'Release',
       '--filter', filter, '--logger', 'console;verbosity=normal'];
     const test = own(spawn(process.env.TANSR_DOTNET ?? 'dotnet', args, { cwd: repository, shell: false, windowsHide: true,
       detached: process.platform !== 'win32', env: { ...env, TANSR_SERVE_TEST_URL: url.origin, TANSR_SERVE_PUBLIC_URL: ready.publicUrl,
-        ...(ready.memoryUrl ? { TANSR_SERVE_MEMORY_URL: ready.memoryUrl } : {}) }, stdio: 'inherit' }));
+        ...(ready.memoryUrl ? { TANSR_SERVE_MEMORY_URL: ready.memoryUrl } : {}),
+        ...(ready.controlsUrl ? { TANSR_SERVE_CONTROLS_URL: ready.controlsUrl } : {}),
+        ...(ready.executionUrl ? { TANSR_SERVE_EXECUTION_URL: ready.executionUrl } : {}) }, stdio: 'inherit' }));
     exitCode = await new Promise((resolveExit, reject) => {
       const timeout = setTimeout(() => { terminateTree(test); reject(new Error('Serve integration test deadline exceeded.')); }, 120000);
       test.once('error', error => { clearTimeout(timeout); reject(error); });
@@ -235,7 +258,7 @@ async function run() {
       try {
         const result = await closed;
         // Independent host evidence: real routes were used and observer cancellation never interrupted a turn.
-        if (exitCode === 0) {
+        if (exitCode === 0 && suite === 'all') {
           assert.ok(result.sessions >= 3 && result.sends >= 9, 'No substantive integration tests ran.');
           assert.equal(result.interrupts, 0, 'Observation cancellation unexpectedly interrupted the controlled session.');
           assert.ok(result.requests.some(r => r.path.endsWith('/events') && r.lastEventId === '0'), 'Last-Event-ID did not reach Serve.');
@@ -251,20 +274,42 @@ async function run() {
             assert.ok(result.memoryEvidence.routes.some(route => route.method === 'POST' && route.path.endsWith('/memory/commands')));
           }
         }
-        console.log(JSON.stringify({ acceptance: 'Serve-route-evidence', sessions: result.sessions, sends: result.sends,
+        if (exitCode === 0 && (suite === 'all' || suite === 'execution' || suite === 'new') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
+          assert.equal(result.executionEvidence?.realKernel, true);
+          assert.equal(result.executionEvidence.realExecutionSpool, true);
+          assert.equal(result.executionEvidence.operations.length, 3, 'All three original native commands must run exactly once.');
+          assert.ok(result.executionEvidence.acceptedBlocks > 2, 'Real Serve received no meaningful incremental output.');
+        }
+        if (exitCode === 0 && (suite === 'all' || suite === 'controls' || suite === 'new') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
+          assert.ok(result.controlsEvidence?.exchanges > 0, 'No actual session control model exchange ran.');
+          assert.equal(result.controlsEvidence.failure, null);
+        }
+        if (suite === 'all') console.log(JSON.stringify({ acceptance: 'Serve-route-evidence', sessions: result.sessions, sends: result.sends,
           interrupts: result.interrupts, requests: result.requests.length, passed: exitCode === 0 }));
         const routes = result.publicEvidence.routes;
         const routeCounts = Object.fromEntries([...new Set(routes.map(path => path.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact')))]
           .map(path => [path, routes.filter(actual => actual.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact') === path).length]));
-        console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
+        if (suite === 'all') console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
           exchanges: result.publicEvidence.exchanges, mainExchanges: result.publicEvidence.mainExchanges,
           memoryExchanges: result.publicEvidence.memoryExchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
-        if (result.memoryEvidence) console.log(JSON.stringify({ acceptance: 'public-Serve-device-memory-publication',
-          ...result.memoryEvidence, directory, passed: exitCode === 0 }));
+        if (suite === 'all' && result.memoryEvidence) console.log(JSON.stringify({ acceptance: 'public-Serve-device-memory-publication',
+          realKernel: result.memoryEvidence.realKernel, mainCalls: result.memoryEvidence.mainCalls,
+          extractionCalls: result.memoryEvidence.extractionCalls, initialExtractionDone: result.memoryEvidence.initialExtractionDone,
+          recallAdopted: result.memoryEvidence.recallAdopted, forgottenAbsent: result.memoryEvidence.forgottenAbsent,
+          closedSession: result.memoryEvidence.closedSession, directory, passed: exitCode === 0 }));
+        if (['all', 'new', 'controls'].includes(suite) && result.controlsEvidence)
+          console.log(JSON.stringify({ acceptance: 'public-Serve-session-controls', ...result.controlsEvidence, directory, passed: exitCode === 0 }));
+        if (['all', 'new', 'execution'].includes(suite) && result.executionEvidence)
+          console.log(JSON.stringify({ acceptance: 'public-Serve-native-execution', realKernel: result.executionEvidence.realKernel,
+            realExecutionSpool: result.executionEvidence.realExecutionSpool, modelCalls: result.executionEvidence.modelCalls,
+            operations: result.executionEvidence.operations.length, acceptedBlocks: result.executionEvidence.acceptedBlocks,
+            performanceBaseline: result.executionEvidence.performanceBaseline, directory, passed: exitCode === 0 }));
         if (process.env.TANSR_SERVE_SOURCE_SNAPSHOT) verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT);
-        writeFileSync(resolve(directory, 'result.json'), JSON.stringify({ source: evidence, passed: exitCode === 0,
+        writeFileSync(resolve(directory, 'result.json'), JSON.stringify({ source: evidence, suite, passed: exitCode === 0,
           legacy: { sessions: result.sessions, sends: result.sends, interrupts: result.interrupts, requests: result.requests.length },
           public: { ...result.publicEvidence, authorizationChecksByRoute: routeCounts },
+          ...(result.controlsEvidence ? { sessionControls: result.controlsEvidence } : {}),
+          ...(result.executionEvidence ? { executionPipeline: result.executionEvidence } : {}),
           ...(result.memoryEvidence ? { memoryPublication: result.memoryEvidence } : {}) }, null, 2));
       } finally { terminateTree(child); }
     } else terminateTree(child);

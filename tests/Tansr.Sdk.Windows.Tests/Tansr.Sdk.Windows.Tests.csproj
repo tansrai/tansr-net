@@ -12,6 +12,7 @@
     <Compile Include="../../examples/Shared/ExampleSessionControls.cs" Link="Shared/ExampleSessionControls.cs" />
     <Compile Include="../../examples/ConsoleAssistant/ConsoleWorker.cs" Link="Examples/ConsoleWorker.cs" />
     <ProjectReference Include="../../src/Tansr.Sdk.Windows/Tansr.Sdk.Windows.csproj" />
+    <ProjectReference Include="../../examples/ConsoleAssistant/ConsoleAssistant.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" PrivateAssets="all" />

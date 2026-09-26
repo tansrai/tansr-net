@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using System.Threading.Channels;
+using Tansr.Sdk.Client;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Storage;
 
@@ -9,6 +10,174 @@ namespace Tansr.Sdk.Tests.Execution;
 public sealed class ExecutionHostTests
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
+
+    [Fact]
+    public async Task NotificationReadReportingNetworkErrorDuringStopIsNormalShutdown()
+    {
+        // A real canceled/disposed HTTP stream can report an I/O error instead of OCE.
+        var source = new FakeNotifications { StopError = new TansrProtocolException("network_error") };
+        var client = new FakeClient(); var journal = new FakeJournal(); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, client, backend, journal, Allow, source.Options());
+        var run = host.RunAsync();
+        await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+        await host.StopAsync().WaitAsync(Deadline);
+        await run.WaitAsync(Deadline);
+        Assert.Equal(1, source.Exits); Assert.Single(source.Connections);
+        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, journal.ClaimCalls);
+        Assert.Null(host.LastNotificationErrorCode);
+    }
+
+    [Fact]
+    public async Task NotificationDuringEmptyPollIsRetainedAndDoesNotRepeatDurableExecution()
+    {
+        var operation = ExecutionFixture.Operation(); var polling = Signal(); var release = Signal();
+        var source = new FakeNotifications(); var client = new FakeClient(); var polls = 0;
+        client.Poll = async ct =>
+        {
+            var index = Interlocked.Increment(ref polls);
+            if (index == 1) { polling.TrySetResult(true); await release.Task.WaitAsync(ct); return ExecutionFixture.Batch(); }
+            if (index <= 3) return ExecutionFixture.Batch(operation);
+            await Task.Delay(Timeout.Infinite, ct); return ExecutionFixture.Batch();
+        };
+        var journal = new FakeJournal(); var backend = new FakeBackend(); var bound = false;
+        using var host = new ExecutionHost(client, client, backend, journal, Allow,
+            (_, _) => throw new InvalidOperationException("The pending notification was lost before idle waiting."),
+            new ExecutionHostOptions { NotificationSourceFactory = (_, _) => { Assert.True(bound); return Task.FromResult<IExecutionNotificationSource>(source); } });
+        var run = host.RunAsync((_, _) => { bound = true; return Task.CompletedTask; });
+        try
+        {
+            await polling.Task.WaitAsync(Deadline);
+            await source.EmitAsync(Notification("5", "operations-available", operation)).WaitAsync(Deadline);
+            release.TrySetResult(true);
+            var first = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            var replay = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.True(ExecutionFixture.Same(first, replay));
+            Assert.Equal(1, backend.SideEffects); Assert.Single(journal.Completions);
+            Assert.Equal(0, source.StatusReads);
+        }
+        finally { release.TrySetResult(true); await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+        Assert.Equal(1, source.Exits);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ReconnectResetsCursorAndCancellationRequiresTheOriginalActiveOperationStatus(bool explicitBackoff)
+    {
+        var operation = ExecutionFixture.Operation(); var started = Signal(); var source = new FakeNotifications();
+        var client = new FakeClient(); client.Enqueue(operation); var journal = new FakeJournal();
+        CancellationToken runningToken = default;
+        var backend = new FakeBackend();
+        backend.Execute = async (_, _, ct) =>
+        {
+            Interlocked.Increment(ref backend.SideEffects); runningToken = ct; started.TrySetResult(true);
+            await Task.Delay(Timeout.Infinite, ct); return ExecutionFixture.Result();
+        };
+        var unknown = false;
+        source.Status = value =>
+        {
+            Assert.True(ExecutionFixture.Same(operation, value));
+            var result = ExecutionFixture.Status(operation, null);
+            return unknown ? ExecutionFixture.Set(result, "status", JsonSerializer.SerializeToElement("unknown")) : result;
+        };
+        using var host = new ExecutionHost(client, client, backend, journal, Allow, source.Options());
+        var run = host.RunAsync();
+        try
+        {
+            Assert.Null(await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline));
+            await started.Task.WaitAsync(Deadline);
+            await source.EmitAsync(Notification("5", "operation-cancelled", operation)).WaitAsync(Deadline);
+            Assert.False(runningToken.IsCancellationRequested); // The hint does not override authoritative pending.
+            source.Fail(explicitBackoff ? new TansrHttpException(503, "source_unavailable", retryAction: "backoff") : new IOException("synthetic transport loss"));
+            Assert.Equal(5L, await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline));
+            await source.EmitAsync(Notification("0", "reconcile-required", null)).WaitAsync(Deadline);
+            Assert.False(runningToken.IsCancellationRequested);
+            unknown = true;
+            await source.EmitAsync(Notification("1", "operation-cancelled", operation)).WaitAsync(Deadline);
+            var receipt = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.True(runningToken.IsCancellationRequested);
+            Assert.Equal("unknown", receipt.GetProperty("status").GetString());
+            client.Enqueue(operation);
+            var replay = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.True(ExecutionFixture.Same(receipt, replay));
+            Assert.Equal(1, backend.SideEffects); Assert.Single(journal.Completions);
+            Assert.Equal(0, client.StatusReads);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+        Assert.Equal(2, source.Exits);
+    }
+
+    [Theory]
+    [InlineData("foreign")]
+    [InlineData("forbidden")]
+    [InlineData("stale")]
+    [InlineData("unsupported")]
+    public async Task ForeignNotificationOrUnrecoverableSubscriptionFailsWithoutTakingWork(string failure)
+    {
+        var source = new FakeNotifications(); var client = new FakeClient(); var backend = new FakeBackend(); var journal = new FakeJournal();
+        using var host = new ExecutionHost(client, client, backend, journal, Allow, source.Options());
+        var run = host.RunAsync();
+        await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+        if (failure == "foreign")
+        {
+            var foreign = ExecutionFixture.Set(Notification("0", "operations-available", null), "connectionId", JsonSerializer.SerializeToElement("foreign"));
+            await Assert.ThrowsAnyAsync<Exception>(() => source.EmitAsync(foreign).WaitAsync(Deadline));
+        }
+        else source.Fail(failure == "stale" ? new TansrHttpException(409, "stale_generation", retryAction: "refresh") :
+            failure == "unsupported" ? new TansrHttpException(400, "unsupported_capability", retryAction: "none") : new TansrHttpException(403, "forbidden"));
+        await Assert.ThrowsAsync<IOException>(() => run.WaitAsync(Deadline));
+        // Explicit stop cannot erase a failure already observed before cancellation.
+        await Assert.ThrowsAsync<IOException>(() => host.StopAsync().WaitAsync(Deadline));
+        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, journal.ClaimCalls); Assert.Equal(0, client.SubmitCalls);
+        Assert.Single(source.Connections); Assert.NotNull(host.LastNotificationErrorCode);
+    }
+
+    private static JsonElement Notification(string id, string type, JsonElement? operation) => JsonSerializer.SerializeToElement(new
+    {
+        contract = "terminal-services-v1",
+        eventId = id,
+        type,
+        executorId = "executor-1",
+        connectionId = "connection-1",
+        operation = operation.HasValue ? JsonSerializer.SerializeToElement(new
+        { operationId = operation.Value.GetProperty("operationId").GetString(), requestDigest = operation.Value.GetProperty("digest").GetString() }) : (JsonElement?)null
+    });
+
+    private sealed class FakeNotifications : IExecutionNotificationSource
+    {
+        private readonly Channel<Func<Func<JsonElement, CancellationToken, Task>, CancellationToken, Task>> _events =
+            Channel.CreateUnbounded<Func<Func<JsonElement, CancellationToken, Task>, CancellationToken, Task>>();
+        public Channel<long?> Opened { get; } = Channel.CreateUnbounded<long?>();
+        public ConcurrentQueue<JsonElement> Connections { get; } = new();
+        public JsonElement Scope => ExecutionFixture.Scope();
+        public Func<JsonElement, JsonElement>? Status;
+        public Exception? StopError;
+        public int Exits, StatusReads;
+        public ExecutionHostOptions Options() => new() { NotificationSourceFactory = (_, _) => Task.FromResult<IExecutionNotificationSource>(this) };
+        public async Task ObserveAsync(JsonElement connection, long? lastEventId, Func<JsonElement, CancellationToken, Task> observer, CancellationToken ct)
+        {
+            Connections.Enqueue(connection.Clone()); Opened.Writer.TryWrite(lastEventId);
+            try { while (true) await (await _events.Reader.ReadAsync(ct))(observer, ct); }
+            finally
+            {
+                Interlocked.Increment(ref Exits);
+                if (ct.IsCancellationRequested && StopError != null) throw StopError;
+            }
+        }
+        public Task EmitAsync(JsonElement value)
+        {
+            var done = Signal();
+            _events.Writer.TryWrite(async (observer, ct) =>
+            {
+                try { await observer(value, ct); done.TrySetResult(true); }
+                catch (Exception error) { done.TrySetException(error); throw; }
+            });
+            return done.Task;
+        }
+        public void Fail(Exception error) => _events.Writer.TryWrite((_, _) => Task.FromException(error));
+        public Task<JsonElement> GetStatusAsync(JsonElement operation, CancellationToken ct)
+        { ct.ThrowIfCancellationRequested(); Interlocked.Increment(ref StatusReads); return Task.FromResult(Status!(operation)); }
+    }
 
     [Theory]
     [InlineData(false)]

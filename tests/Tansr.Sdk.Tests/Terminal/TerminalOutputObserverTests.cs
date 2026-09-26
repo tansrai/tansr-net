@@ -76,6 +76,25 @@ public sealed class TerminalOutputObserverTests
             w.WriteString("type", "reconcile-required"); w.WriteString("executorId", "executor-1"); w.WriteString("connectionId", "connection-1"); w.WriteNull("operation");
         });
         Assert.True(cursor.Apply(notification)); Assert.Equal(9007199254740993L, cursor.LastEventId);
-        Assert.True(cursor.RequiresReconciliation); Assert.False(cursor.Apply(notification));
+        Assert.True(cursor.RequiresReconciliation); Assert.True(cursor.Apply(notification));
+    }
+    [Fact]
+    public void ExplicitReconciliationResetsAnEqualOrLowerNotificationWindow()
+    {
+        var cursor = new TerminalExecutorEventCursor("executor-1", "connection-1");
+        JsonElement Event(string type, string id) => TerminalJson.Object(w =>
+        {
+            w.WriteString("contract", TerminalCandidateContract.Protocol); w.WriteString("eventId", id);
+            w.WriteString("type", type); w.WriteString("executorId", "executor-1"); w.WriteString("connectionId", "connection-1"); w.WriteNull("operation");
+        });
+        Assert.True(cursor.Apply(Event("operations-available", "9007199254740993")));
+        Assert.True(cursor.Apply(Event("reconcile-required", "9007199254740993")));
+        Assert.True(cursor.RequiresReconciliation); cursor.ClearReconciliation();
+        Assert.True(cursor.Apply(Event("reconcile-required", "0")));
+        Assert.True(cursor.RequiresReconciliation); Assert.Equal(0, cursor.LastEventId);
+        cursor.ClearReconciliation();
+        Assert.True(cursor.Apply(Event("operations-available", "1")));
+        Assert.False(cursor.RequiresReconciliation);
+        Assert.False(cursor.Apply(Event("operations-available", "1")));
     }
 }

@@ -9,6 +9,58 @@ namespace Tansr.Sdk.Tests.Hosting;
 
 public sealed class DeviceSessionHostTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task NotificationAssemblyFailureNeverPublishesReadyOrStartsPolling(bool foreignScope)
+    {
+        var client = new Client(); var configured = false;
+        using var host = new DeviceSessionHost(client, new Backend(), new Journal(), new DeviceSessionOptions
+        {
+            SessionId = "session-1",
+            WorkspaceId = "workspace-1",
+            AfterBindingAsync = (_, _) => { configured = true; return Task.CompletedTask; },
+            ExecutionNotifications = (_, _) =>
+            {
+                Assert.True(configured); Assert.DoesNotContain("poll", client.Actions);
+                if (!foreignScope) throw new IOException("synthetic notification assembly failure");
+                var node = System.Text.Json.Nodes.JsonNode.Parse(client.ReadScope().GetRawText())!;
+                node["endUserId"] = "another-user";
+                return Task.FromResult<IExecutionNotificationSource>(new Notifications(JsonSerializer.SerializeToElement(node)));
+            }
+        }, (_, _) => Task.CompletedTask);
+        if (foreignScope) await Assert.ThrowsAsync<InvalidDataException>(() => host.StartAsync());
+        else await Assert.ThrowsAsync<IOException>(() => host.StartAsync());
+        Assert.Equal(DeviceSessionState.Failed, host.State); Assert.DoesNotContain("poll", client.Actions);
+    }
+
+    [Fact]
+    public async Task NotificationsAreAssembledOnceAfterBindingAndBeforeDeviceIsReady()
+    {
+        var client = new Client(); var calls = 0;
+        using var host = new DeviceSessionHost(client, new Backend(), new Journal(), new DeviceSessionOptions
+        {
+            SessionId = "session-1",
+            WorkspaceId = "workspace-1",
+            ExecutionNotifications = (connection, _) =>
+            {
+                calls++; Assert.Contains("bind", client.Actions); Assert.DoesNotContain("poll", client.Actions);
+                Assert.Equal("executor-1", connection.GetProperty("executorId").GetString());
+                return Task.FromResult<IExecutionNotificationSource>(new Notifications(client.ReadScope()));
+            }
+        }, (_, _) => Task.CompletedTask);
+        await host.StartAsync(); Assert.Equal(1, calls); Assert.Equal(DeviceSessionState.Ready, host.State);
+        await host.StopAsync(); Assert.Equal(DeviceSessionState.Stopped, host.State);
+    }
+
+    private sealed class Notifications(JsonElement scope) : IExecutionNotificationSource
+    {
+        public JsonElement Scope => scope;
+        public Task ObserveAsync(JsonElement connection, long? lastEventId, Func<JsonElement, CancellationToken, Task> observer, CancellationToken cancellationToken) =>
+            Task.Delay(Timeout.Infinite, cancellationToken);
+        public Task<JsonElement> GetStatusAsync(JsonElement operation, CancellationToken cancellationToken) => throw new InvalidOperationException("No operation was started.");
+    }
+
     [Fact]
     public async Task InitializesBindsThenPollsAndAwaitsDeviceShutdown()
     {

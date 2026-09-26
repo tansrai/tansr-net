@@ -38,6 +38,29 @@ HTTP 失回时保留原请求。配置目前没有按请求键只读查询的接
 
 每连接最多 8 个输出 sink、8 条观察；同一操作只允许一条观察。每 sink 最多 8 个保留捕获或实际在途泵。取消不释放仍在执行的回调和请求所占限额；`CloseAsync` 等原泵退出，`Dispose` 仅发起收尾。宿主注入的 HTTP handler 和回调仍须遵守取消。
 
+### 设备派工通知与取消
+
+`DeviceSessionOptions.ExecutionNotifications` 在 `AfterBindingAsync` 完成后调用一次，装配失败不会返回 Ready。将上一节已使用设备凭据附着的绑定交给适配器：
+
+```csharp
+deviceOptions.ExecutionNotifications = (connection, cancellationToken) =>
+    Task.FromResult<IExecutionNotificationSource>(
+        new TerminalExecutionNotifications(deviceTerminal, deviceBinding));
+```
+
+所需命名空间是 `Tansr.Sdk.Execution`。`deviceBinding` 必须来自 `AfterBindingAsync` 中已确认的原绑定，并已获准 `execution-stream-v1`；控制凭据和设备凭据仍分离。SDK 自行维护通知 SSE、原游标及重连，不需要应用编写心跳或派工循环。原轮询保留为有界兜底；通知只唤醒领取，取消通知先查询完整原操作状态，绝不直接执行通知正文或把断线当作副作用回滚。
+
+`reconcile-required` 可以从较低游标重开通知窗口，它不重置工具输出的序号、耐久水位或执行账本。网络故障仅重新打开原通知连接；401/403、失效代际、绑定冲突及不支持能力会使宿主失败，不自动登记新设备或降级。可从 `DeviceSessionHost.LastNotificationErrorCode` 读取不含秘密的暂时错误码，最终失败必须观察 `Completion`。
+
+停止设备时等待 `StopAsync`，再释放调用者拥有的 TerminalConnection、输出 sink 和本地存储。若自定义通知回调忽略取消，SDK 在五秒后明确报告 `execution_notifications_stop_timeout`，不会将仍在占用的观察槽当作已释放。
+
+The optional notification factory runs once after binding and before the device reports Ready.
+Pass the device's authenticated terminal binding to `TerminalExecutionNotifications`; the SDK
+handles SSE wake-ups, the original cursor, reconnects, and status reconciliation. Notifications
+never grant tool authority or prove that a side effect was rolled back. Legacy callers keep the
+existing polling behavior. Await `StopAsync` before disposing caller-owned connections and stores;
+a callback that ignores cancellation produces an explicit shutdown timeout, not a successful stop.
+
 ## 档案 ACK 恢复
 
 独立的 `sdk2-archive-recovery-v1` 扩展保留原 ACK 和旧控制消息大小限制。恢复请求上限为 263,168 字节，响应为 528,384 字节；内部 ACK/receipt 仍各受旧 262,144 字节限制。
@@ -52,4 +75,4 @@ SDK 的恢复协调器和 SQLite 介质是两个独立能力，须明确装配�
 
 WPF、WinForms 和 Console 示例的本地草稿／显示历史属于应用界面缓存，可离线回看，不作为可信模型供材。原 SDK2 档案读取和材料提供仍要求当前可信授权，不能用离线快照自证成员关系或撤权状态。
 
-本批无真实模型收费请求、NuGet 发布或生产部署。完整的 Electron 能力对照、原生界面验收、记忆自动出版链以及发行条件继续按原六张工程卡、24 项验收记录。
+本批无真实模型收费请求、NuGet 发布或生产部署。自动记忆的典型生成、终端落盘、检索与删除链已有真实 Serve 联验；完整晚到写回、备份回放和跨连接维护矩阵仍未齐。完整 Electron 能力对照、原生界面验收与发行条件继续按原六张工程卡、24 项验收记录。

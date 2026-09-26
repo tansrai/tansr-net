@@ -1,7 +1,10 @@
 using System.Globalization;
+using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
+using Tansr.Sdk.Terminal;
 
 namespace Tansr.Sdk.Execution;
 
@@ -14,6 +17,13 @@ public sealed class ExecutionHost : IDisposable
     private readonly IExecutorJournal _journal;
     private readonly Func<JsonElement, CancellationToken, Task> _authorize;
     private readonly Func<int, CancellationToken, Task> _idleDelay;
+    private readonly Func<JsonElement, CancellationToken, Task<IExecutionNotificationSource>>? _notificationFactory;
+    private readonly SemaphoreSlim _wake = new(0, 1);
+    private IExecutionNotificationSource? _notifications;
+    private JsonElement _notificationScope;
+    private JsonElement _notificationConnection;
+    private ActiveExecution? _active;
+    private string? _notificationError;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
     private readonly JsonElement _registration;
@@ -31,8 +41,14 @@ public sealed class ExecutionHost : IDisposable
         IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize)
         : this(client, observationClient, backend, journal, authorize, Task.Delay) { }
 
+    /// <summary>Enable explicitly negotiated executor notifications without changing original execution or polling semantics.</summary>
+    public ExecutionHost(IExecutionClient client, IExecutionClient observationClient, IExecutionBackend backend,
+        IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize, ExecutionHostOptions options)
+        : this(client, observationClient, backend, journal, authorize, Task.Delay, options ?? throw new ArgumentNullException(nameof(options))) { }
+
     internal ExecutionHost(IExecutionClient client, IExecutionClient observationClient, IExecutionBackend backend,
-        IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize, Func<int, CancellationToken, Task> idleDelay)
+        IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize, Func<int, CancellationToken, Task> idleDelay,
+        ExecutionHostOptions? options = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _observationClient = observationClient ?? throw new ArgumentNullException(nameof(observationClient));
@@ -40,6 +56,7 @@ public sealed class ExecutionHost : IDisposable
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
         _authorize = authorize ?? throw new ArgumentNullException(nameof(authorize));
         _idleDelay = idleDelay ?? throw new ArgumentNullException(nameof(idleDelay));
+        _notificationFactory = options?.NotificationSourceFactory;
         _registration = backend.Registration.Clone();
         WireJson.ValidateNamed("ExecutorRegistrationRequest", _registration);
         var operations = _registration.GetProperty("operations").EnumerateArray().Select(x => x.GetString()).ToArray();
@@ -56,6 +73,8 @@ public sealed class ExecutionHost : IDisposable
     }
 
     public JsonElement? Connection { get { lock (_gate) return _connection?.Clone(); } }
+    /// <summary>Last notification transport failure, without payloads or credentials. Polling remains the fallback.</summary>
+    public string? LastNotificationErrorCode { get { lock (_gate) return _notificationError; } }
 
     /// <summary>登记后调用 onConnected 进行明确的会话绑定。宿主必须保留并等待此任务。</summary>
     public Task RunAsync(Func<JsonElement, CancellationToken, Task>? onConnected = null, CancellationToken cancellationToken = default)
@@ -86,7 +105,9 @@ public sealed class ExecutionHost : IDisposable
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(outer, _stop.Token);
         Exception? heartbeatFailure = null;
+        Exception? notificationFailure = null;
         Task? heartbeat = null;
+        Task? notifications = null;
         var token = lifetime.Token;
         try
         {
@@ -97,6 +118,18 @@ public sealed class ExecutionHost : IDisposable
             lock (_gate) _connection = registered.Clone();
             heartbeat = RenewAsync(lifetime, error => heartbeatFailure = error);
             if (onConnected != null) await onConnected(registered.Clone(), token).ConfigureAwait(false);
+            if (_notificationFactory != null)
+            {
+                var scope = _client.ReadScope();
+                _notifications = await _notificationFactory(registered.Clone(), token).ConfigureAwait(false)
+                    ?? throw new InvalidDataException("执行通知来源缺失。");
+                _notificationScope = _notifications.Scope.Clone();
+                _notificationConnection = registered.Clone();
+                WireJson.ValidateNamed("Scope", _notificationScope);
+                ExecutionJson.Check(ExecutionJson.Equal(scope, _notificationScope));
+                CheckNotifications(registered, token);
+                notifications = ObserveNotificationsAsync(registered, lifetime, error => notificationFailure = error);
+            }
             var idleDelayMs = 250;
             while (true)
             {
@@ -130,7 +163,7 @@ public sealed class ExecutionHost : IDisposable
                 // Stay briefly responsive after settled work; sustained idle keeps the original cap.
                 if (batch.GetProperty("operations").GetArrayLength() == 0)
                 {
-                    await _idleDelay(idleDelayMs, token).ConfigureAwait(false);
+                    await WaitForWorkAsync(idleDelayMs, token).ConfigureAwait(false);
                     idleDelayMs = Math.Min(250, idleDelayMs * 2);
                 }
                 else idleDelayMs = 25;
@@ -144,8 +177,19 @@ public sealed class ExecutionHost : IDisposable
         {
             lifetime.Cancel();
             if (heartbeat != null) await heartbeat.ConfigureAwait(false);
+            if (notifications != null)
+            {
+                if (await Task.WhenAny(notifications, Task.Delay(5000)).ConfigureAwait(false) != notifications)
+                {
+                    _ = notifications.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    throw new IOException("execution_notifications_stop_timeout");
+                }
+                await notifications.ConfigureAwait(false);
+            }
         }
         if (heartbeatFailure != null) throw new IOException("执行器续租失败。", heartbeatFailure);
+        if (notificationFailure != null) throw new IOException("执行通知失效；设备执行已取消并等待收尾。", notificationFailure);
     }
 
     private async Task RenewAsync(CancellationTokenSource lifetime, Action<Exception> failed)
@@ -163,7 +207,8 @@ public sealed class ExecutionHost : IDisposable
                 var renewed = await _client.HeartbeatAsync(connection, token).ConfigureAwait(false);
                 WireJson.ValidateNamed("ExecutorConnection", renewed);
                 ExecutionJson.Check(ExecutionJson.Text(renewed, "executorId") == ExecutionJson.Text(connection, "executorId") &&
-                    ExecutionJson.Text(renewed, "connectionId") == ExecutionJson.Text(connection, "connectionId"));
+                    ExecutionJson.Text(renewed, "connectionId") == ExecutionJson.Text(connection, "connectionId") &&
+                    ExecutionJson.Text(renewed, "connectionRevision") == ExecutionJson.Text(connection, "connectionRevision"));
                 EnsureLive(renewed);
                 lock (_gate) _connection = renewed.Clone();
             }
@@ -235,6 +280,8 @@ public sealed class ExecutionHost : IDisposable
         var invoked = false;
         using var operationLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var observation = CancellationTokenSource.CreateLinkedTokenSource(operationLifetime.Token);
+        var active = new ActiveExecution(operation, operationLifetime);
+        lock (_gate) _active = active;
         Task? monitor = null;
         var remaining = Expiry(operation) - DateTimeOffset.UtcNow;
         operationLifetime.CancelAfter(remaining <= TimeSpan.Zero ? TimeSpan.Zero : remaining < TimeSpan.FromSeconds(125) ? remaining : TimeSpan.FromSeconds(125));
@@ -252,6 +299,7 @@ public sealed class ExecutionHost : IDisposable
         catch (Exception) { receipt = ExecutionJson.ReceiptFor(operation, invoked ? "unknown" : "failed", null, invoked ? "execution_outcome_unknown" : "ECANCELED"); }
         finally
         {
+            lock (_gate) if (ReferenceEquals(_active, active)) _active = null;
             observation.Cancel();
             if (monitor != null) await monitor.ConfigureAwait(false);
         }
@@ -267,8 +315,25 @@ public sealed class ExecutionHost : IDisposable
         ExecutionJson.Check(ExecutionJson.Equal(current, _observationClient.ReadScope()) &&
             ExecutionJson.Text(current, "applicationScopeId") == ExecutionJson.Text(original, "applicationScopeId") &&
             ExecutionJson.Text(current, "endUserId") == ExecutionJson.Text(original, "endUserId"));
-        var result = await _observationClient.GetStatusAsync(ExecutionJson.Text(operation, "sessionId"),
-            ExecutionJson.Text(operation, "operationId"), cancellationToken).ConfigureAwait(false);
+        JsonElement result;
+        if (_notifications == null)
+            result = await _observationClient.GetStatusAsync(ExecutionJson.Text(operation, "sessionId"),
+                ExecutionJson.Text(operation, "operationId"), cancellationToken).ConfigureAwait(false);
+        else
+        {
+            CheckNotifications(Current(), cancellationToken);
+            result = await _notifications.GetStatusAsync(operation.Clone(), cancellationToken).ConfigureAwait(false);
+            CheckNotifications(Current(), cancellationToken);
+            WireJson.ValidateNamed("ExecutionStatus", result);
+            ExecutionJson.Check(ExecutionJson.Equal(result.GetProperty("operation"), operation));
+            var receipt = result.GetProperty("receipt");
+            if (receipt.ValueKind != JsonValueKind.Null)
+            {
+                ExecutionJson.Receipt(operation, receipt);
+                ExecutionJson.Check(ExecutionJson.Text(result, "status") == ExecutionJson.Text(receipt, "status"));
+            }
+            else ExecutionJson.Check(ExecutionJson.Text(result, "status") == "pending" || ExecutionJson.Text(result, "status") == "unknown");
+        }
         ExecutionJson.Check(ExecutionJson.Equal(current, _client.ReadScope()) && ExecutionJson.Equal(current, _observationClient.ReadScope()));
         return result;
     }
@@ -294,6 +359,146 @@ public sealed class ExecutionHost : IDisposable
         }
         catch (OperationCanceledException) when (observation.IsCancellationRequested) { }
         catch (Exception) { execution.Cancel(); }
+    }
+
+    private async Task WaitForWorkAsync(int milliseconds, CancellationToken token)
+    {
+        if (_notifications == null) { await _idleDelay(milliseconds, token).ConfigureAwait(false); return; }
+        if (_wake.Wait(0)) return;
+        using var waiting = CancellationTokenSource.CreateLinkedTokenSource(token);
+        var delay = _idleDelay(milliseconds, waiting.Token);
+        var wake = _wake.WaitAsync(waiting.Token);
+        var completed = await Task.WhenAny(delay, wake).ConfigureAwait(false);
+        waiting.Cancel();
+        try { await completed.ConfigureAwait(false); }
+        finally
+        {
+            try { await (ReferenceEquals(completed, delay) ? wake : delay).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (waiting.IsCancellationRequested) { }
+        }
+        token.ThrowIfCancellationRequested();
+    }
+
+    private void Wake()
+    {
+        try { _wake.Release(); }
+        catch (SemaphoreFullException) { } // At most one pending wake survives polling/execution.
+    }
+
+    private void CheckNotifications(JsonElement connection, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        EnsureLive(Current());
+        ExecutionJson.Check(ExecutionJson.Equal(_notificationScope, _client.ReadScope()) &&
+            ExecutionJson.Equal(_notificationScope, _notifications!.Scope));
+        foreach (var field in new[] { "executorId", "connectionId", "connectionRevision" })
+            ExecutionJson.Check(ExecutionJson.Text(Current(), field) == ExecutionJson.Text(connection, field) &&
+                ExecutionJson.Text(connection, field) == ExecutionJson.Text(_notificationConnection, field));
+    }
+
+    private async Task ObserveNotificationsAsync(JsonElement connection, CancellationTokenSource lifetime, Action<Exception> failed)
+    {
+        var token = lifetime.Token;
+        var cursor = new TerminalExecutorEventCursor(ExecutionJson.Text(connection, "executorId"), ExecutionJson.Text(connection, "connectionId"));
+        try
+        {
+            while (true)
+            {
+                CheckNotifications(connection, token);
+                var reconnectDelayMs = 250;
+                try
+                {
+                    await _notifications!.ObserveAsync(connection.Clone(), cursor.LastEventId, async (value, callbackToken) =>
+                    {
+                        callbackToken.ThrowIfCancellationRequested(); CheckNotifications(connection, token);
+                        bool accepted = cursor.Apply(value);
+                        if (accepted || cursor.RequiresReconciliation)
+                        {
+                            // Notifications never grant execution or cancellation authority. Read the exact
+                            // active operation, including its digest, before stopping that operation.
+                            if (await ReconcileActiveAsync(token).ConfigureAwait(false))
+                            {
+                                cursor.ClearReconciliation();
+                                lock (_gate) _notificationError = null;
+                            }
+                        }
+                        callbackToken.ThrowIfCancellationRequested(); CheckNotifications(connection, token);
+                    }, token).ConfigureAwait(false);
+                    token.ThrowIfCancellationRequested();
+                    ReportNotificationError(new TansrProtocolException("event_stream_disconnected"));
+                }
+                catch (Exception error) when (!token.IsCancellationRequested && CanReconnect(error))
+                {
+                    ReportNotificationError(error);
+                    if (error is TansrHttpException http && http.RetryAfterMs.HasValue)
+                        reconnectDelayMs = Math.Max(reconnectDelayMs, http.RetryAfterMs.Value);
+                }
+                token.ThrowIfCancellationRequested();
+                cursor.NoticeGap();
+                if (await ReconcileActiveAsync(token).ConfigureAwait(false)) cursor.ClearReconciliation();
+                // Reopen the same negotiated source, never register/rebind or retry side effects.
+                await Task.Delay(reconnectDelayMs, token).ConfigureAwait(false);
+            }
+        }
+        // Closing an HTTP stream during shutdown may surface an I/O/protocol transport error
+        // instead of OCE. A failure recorded before cancellation is still retained by RunCoreAsync.
+        catch (Exception) when (token.IsCancellationRequested) { }
+        catch (Exception error)
+        {
+            ReportNotificationError(error); failed(error); lifetime.Cancel();
+        }
+    }
+
+    private async Task<bool> ReconcileActiveAsync(CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested(); Wake();
+        ActiveExecution? active;
+        lock (_gate) active = _active;
+        if (active == null) return true;
+        try
+        {
+            using var query = CancellationTokenSource.CreateLinkedTokenSource(token);
+            query.CancelAfter(5000);
+            var state = await ReadStatusAsync(active.Operation, query.Token).ConfigureAwait(false);
+            token.ThrowIfCancellationRequested();
+            ExecutionJson.Check(ExecutionJson.Equal(state.GetProperty("operation"), active.Operation));
+            if (ExecutionJson.Text(state, "status") != "pending")
+            {
+                lock (_gate) if (!ReferenceEquals(_active, active)) return true;
+                try { active.Lifetime.Cancel(); }
+                catch (ObjectDisposedException) { } // This exact operation has already finished.
+            }
+            return true;
+        }
+        catch (Exception error) when (!token.IsCancellationRequested && CanReconnect(error))
+        {
+            ReportNotificationError(error);
+            return false; // A failed read is not proof of cancellation; the original monitor remains active.
+        }
+    }
+
+    private static bool CanReconnect(Exception error)
+    {
+        if (error is TansrHttpException http) return http.RetryAction == "backoff" &&
+            (http.StatusCode == 429 && (http.Code == "capacity_exceeded" || http.Code == "request_limit") ||
+             http.StatusCode == 503 && http.Code == "source_unavailable" || http.StatusCode == 409 && http.Code == "busy");
+        if (error is TansrProtocolException protocol) return protocol.Code == "network_error" || protocol.Code == "stream_idle_timeout" ||
+            protocol.Code == "event_stream_disconnected" || protocol.Code == "sse_incomplete_frame";
+        if (error is InvalidDataException || error is WireProtocolException) return false;
+        return error is HttpRequestException || error is IOException || error is OperationCanceledException;
+    }
+
+    private void ReportNotificationError(Exception error)
+    {
+        lock (_gate) _notificationError = error is TansrException tansr ? tansr.Code :
+            error is OperationCanceledException ? "notification_timeout" : "execution_notification_failed";
+    }
+
+    private sealed class ActiveExecution
+    {
+        internal ActiveExecution(JsonElement operation, CancellationTokenSource lifetime) { Operation = operation.Clone(); Lifetime = lifetime; }
+        internal JsonElement Operation { get; }
+        internal CancellationTokenSource Lifetime { get; }
     }
 
     public void Dispose()

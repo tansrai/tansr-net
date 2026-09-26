@@ -17,6 +17,10 @@ public sealed class DeviceSessionOptions
     /// <remarks>此回调结束后才开始设备 polling；只做能力协商/绑定。需要设备执行的记忆读取或命令
     /// 必须在 StartAsync 成功之后调用，否则服务等待设备而回调等待服务会形成循环。</remarks>
     public Func<JsonElement, CancellationToken, Task>? AfterBindingAsync { get; set; }
+    /// <summary>Opt-in executor notifications, created after AfterBindingAsync. The factory
+    /// uses the original authenticated terminal binding; it never grants new execution rights.
+    /// The caller owns its terminal connection and releases it after StopAsync completes.</summary>
+    public Func<JsonElement, CancellationToken, Task<IExecutionNotificationSource>>? ExecutionNotifications { get; set; }
 }
 
 /// <summary>
@@ -29,6 +33,8 @@ public sealed class DeviceSessionHost : IDisposable
     private readonly IDeviceExecutionClient _client;
     private readonly IExecutionClient _deviceClient;
     private readonly Func<JsonElement, CancellationToken, Task>? _afterBinding;
+    private readonly Func<JsonElement, CancellationToken, Task<IExecutionNotificationSource>>? _notificationFactory;
+    private IExecutionNotificationSource? _notificationSource;
     private readonly ExecutionHost _execution;
     private readonly JsonElement _registration, _workspace;
     private readonly string _sessionId;
@@ -66,6 +72,7 @@ public sealed class DeviceSessionHost : IDisposable
             throw new ArgumentException("工具声明不得重复。", nameof(options));
         _connectionTimeout = options.ConnectionTimeout;
         _afterBinding = options.AfterBindingAsync;
+        _notificationFactory = options.ExecutionNotifications;
         if (_connectionTimeout <= TimeSpan.Zero || _connectionTimeout > TimeSpan.FromMinutes(10))
             throw new ArgumentOutOfRangeException(nameof(options));
         WireJson.ValidateNamed("SessionInitializeRequest", Initialization());
@@ -76,12 +83,19 @@ public sealed class DeviceSessionHost : IDisposable
             await authorize(operation, ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
             GuardBoundOperation(operation);
+        }, new ExecutionHostOptions
+        {
+            NotificationSourceFactory = _notificationFactory == null ? null : (_, _) =>
+                Task.FromResult(_notificationSource ?? throw new InvalidOperationException("执行通知尚未装配。"))
         });
     }
 
     public DeviceSessionState State { get { lock (_gate) return _state; } }
     public JsonElement? Capabilities { get { lock (_gate) return _capabilities?.Clone(); } }
     public JsonElement? Connection => _execution.Connection;
+    /// <summary>Last recoverable notification transport error; contains a code only, never
+    /// credentials or remote diagnostics. A fatal error is observed through Completion.</summary>
+    public string? LastNotificationErrorCode => _execution.LastNotificationErrorCode;
     /// <summary>设备生命周期任务；异常必须由宿主观察。Ready 只证明绑定完成，不证明模型终局。</summary>
     public Task Completion { get { lock (_gate) return _completion ?? throw new InvalidOperationException("设备宿主尚未启动。"); } }
 
@@ -166,6 +180,15 @@ public sealed class DeviceSessionHost : IDisposable
                 var binding = bound.GetProperty("binding");
                 ExecutionJson.Check(binding.ValueKind == JsonValueKind.Object && ExecutionJson.Equal(binding.GetProperty("target"), target));
                 if (_afterBinding != null) await _afterBinding(bound.Clone(), ct).ConfigureAwait(false);
+                if (_notificationFactory != null)
+                {
+                    var source = await _notificationFactory(connection.Clone(), ct).ConfigureAwait(false)
+                        ?? throw new InvalidDataException("执行通知来源缺失。");
+                    var notificationScope = source.Scope;
+                    WireJson.ValidateNamed("Scope", notificationScope);
+                    ExecutionJson.Check(ExecutionJson.Equal(scope, notificationScope));
+                    _notificationSource = source;
+                }
                 VerifyScope(scope);
                 ct.ThrowIfCancellationRequested();
                 deadline.CancelAfter(Timeout.InfiniteTimeSpan);

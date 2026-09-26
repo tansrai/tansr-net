@@ -143,6 +143,13 @@
           "xunit.extensibility.core": "[2.9.3]"
         }
       },
+      "consoleassistant": {
+        "type": "Project",
+        "dependencies": {
+          "Tansr.Sdk": "[0.1.0-preview.1, )",
+          "Tansr.Sdk.Windows": "[0.1.0-preview.1, )"
+        }
+      },
       "tansr.sdk": {
         "type": "Project"
       },

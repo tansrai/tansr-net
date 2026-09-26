@@ -9,6 +9,8 @@
     <Compile Include="../../examples/Shared/NativeToolHost.cs" Link="Examples/NativeToolHost.cs" />
     <Compile Include="../../examples/Shared/TurnInputEditor.cs" Link="Examples/TurnInputEditor.cs" />
     <Compile Include="../../examples/Shared/LocalConversationState.cs" Link="Examples/LocalConversationState.cs" />
+    <Compile Include="../../examples/Shared/ExampleSessionControls.cs" Link="Examples/ExampleSessionControls.cs" />
+    <Compile Include="../../examples/Shared/SessionContextText.cs" Link="Examples/SessionContextText.cs" />
     <None Include="../../contract/*.json" Link="contract/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Terminal/Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

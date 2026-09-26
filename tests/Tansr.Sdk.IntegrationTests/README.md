@@ -1,6 +1,6 @@
 # Serve 源码 HTTP/SSE 联验
 
-这里使用两组回环监听，均导入 CLI 当前源码。SDK1 传输回归采用原 `FakeAgentFactory` 的受控子类；高阶链通过公开 `createServeArchiveHost`，使用真实平台装配、kernel 查询循环、设备执行、档案介质和 HTTP/SSE，仅把上游平台与模型替换为确定性合成响应。所有运行零真实平台凭据、零付费采样。
+这些回环监听均导入指定的 CLI 源码。SDK1 传输回归采用原 `FakeAgentFactory` 的受控子类；高阶链通过公开 Serve 工厂，使用真实平台装配、kernel 查询循环、设备执行、档案介质和 HTTP/SSE，仅把上游平台与模型替换为确定性合成响应。所有运行零真实平台凭据、零付费采样。
 
 先由统一工程门编译 Release，再单独运行：
 
@@ -20,7 +20,13 @@ $env:TANSR_SERVE_SOURCE_SNAPSHOT = '<本次归档目录>/serve-source-snapshot.j
 node scripts/serve-integration.mjs
 ```
 
-快照写入新文件并固定原 base commit、`sourceCommitted: false`、三份已会签 schema 和所有运行源码依赖。脚本在运行前后逐文件核对；任一漂移使本次验收失败，不能在运行中刷新快照。当前终端合同是 `2026-09-26.candidate-7`，仍为显式 preview；来源区间通过不表示整个 Serve 开发树已经最终冻结。
+快照写入新文件并固定原 base commit、受检 Git 路径是否已提交的 `sourceCommitted`、三份已会签 schema 和所有运行源码依赖。脚本在运行前后逐文件核对；任一漂移使本次验收失败，不能在运行中刷新快照。当前终端合同是 `2026-09-26.candidate-7`，仍为显式 preview；来源区间通过不表示整个 Serve 开发树已经最终冻结。
+
+显式快照模式在原链之外加入设备自动记忆、会话控制和原生进程三组场景。默认 `TANSR_SERVE_TEST_SUITE=all` 运行全部 16 项；只复验已修改部分时，可选择 `controls`（8项）、`execution`（3项）或 `new`（这两组11项）。具名选择必须使用源码快照，并写入结果中的 `suite`，不得把子集写成全量通过。原五项包含 SDK1 两项、公开工具/档案两项和自动记忆一项；不同批次存在重叠时不相加。
+
+会话控制覆盖原图文输入、同轮插入与回执丢失后原键恢复、取消、配置 CAS/回滚/忙态，以及 fallback/prepend 与三种可信宿主提示词组合。元信息游标、SSE 与历史均消费真实 Serve，不能用等待时间或跳过 gap 检查掩盖事件发布竞态。
+
+原生进程组通过 Windows 真实进程、公开 `DeviceSessionHost`、协商后的执行通知、分块 HTTP 和原输出 SSE，检查进程存活时可见的 UTF-8 stdout/stderr、重连去重、进程树取消及丢响应后只查询原操作。IPC 只控制合成进程的确定性释放屏障，不代替产品输出流。实际运行、接收和视图时间分别记录；这些记录没有 Electron 同机场景基准，不能作为完整性能对照通过的证据。
 
 未设置必要环境直接失败，不静默跳过。SDK1 独立测试覆盖默认族的 create/send、真实在线非 ASCII SSE、取消观察不 interrupt、原游标重连、历史及分页、窗口缺口和身份隔离。高阶产品链覆盖公开 DeviceSessionHost 自动初始化/注册/绑定、原审批、Windows 真实 Read、原执行回执、真实轮终局、ArchiveClient 发现既有绑定、ArchiveTransferSession 拉页/正文、DPAPI/AES-GCM SQLite 耐久 ACK 和重开，再通过原档案 SSE 将真实材料请求交给 MaterialSource/SQLite 响应箱，上传后由原核心下一轮消费。材料请求/入队由受控文件 IPC 调用可信宿主生命周期；IPC 不传输材料正文、不代理 SSE，也不是新增产品 HTTP 路由。
 

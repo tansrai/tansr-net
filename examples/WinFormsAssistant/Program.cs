@@ -71,7 +71,7 @@ internal sealed class AssistantForm : Form
         top.Controls.Add(Row(Label("恢复会话 ID"), _resume, Label("新会话模型"), _model, _connect,
             Button("更新票据", () => { Volatile.Write(ref _currentToken, _token.Text); _status.Text = "内存票据已更新。"; return Task.CompletedTask; }, false)));
         top.Controls.Add(Row(Label("正文"), _textMode, Label("思考"), _thinkingMode,
-            Button("历史", ShowHistoryAsync), Button("状态", () => ShowAsync("会话状态", _session!.GetMetadataAsync())),
+            Button("历史", ShowHistoryAsync), Button("状态", ShowMetadataAsync),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())), Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
         top.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(1020, 0), Text = "真实入口：会话流、图片、取消、审批/提问、历史与快照。动态切模/思考、完整记忆、设备工具绑定仍需宿主可信配置。" });
@@ -269,6 +269,13 @@ internal sealed class AssistantForm : Form
         if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "question") throw new InvalidOperationException("select_question_request");
         await _session!.AnswerAsync(item.Request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
         _status.Text = "答案已提交；等待服务端关闭请求。";
+    }
+    private async Task ShowMetadataAsync()
+    {
+        var metadata = await _session!.ReadMetadataAsync(_lifetime!.Token);
+        if (IsDisposed) return;
+        var dialog = new Form { Text = "会话状态 / 上下文", Width = 850, Height = 640, Owner = this };
+        dialog.Controls.Add(new TextBox { Text = SessionContextText.Format(metadata).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); dialog.Show(this);
     }
     private async Task ShowApplicationPromptAsync()
     {
