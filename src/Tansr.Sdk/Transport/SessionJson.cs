@@ -35,6 +35,17 @@ internal static class SessionJson
         }
     }
 
+    internal static JsonElement Control(byte[] bytes, int maximum)
+    {
+        try
+        {
+            var value = WireJson.DecodeControl(bytes, maximum);
+            if (value.ValueKind != JsonValueKind.Object) throw new TansrProtocolException("invalid_response");
+            return value;
+        }
+        catch (WireProtocolException) { throw new TansrProtocolException("invalid_response"); }
+    }
+
     internal static string String(JsonElement value, string key)
     {
         if (!value.TryGetProperty(key, out var field) || field.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(field.GetString()))

@@ -24,7 +24,7 @@ public sealed class SessionView : IDisposable
     private Message? _current;
     private SessionNoticeView? _error;
     private SessionViewSnapshot _snapshot;
-    private long _version, _nextMessage, _turnTokens, _sessionTokens, _usageRequests;
+    private long _structuredBytes, _turn, _nextTool, _version, _nextMessage, _turnTokens, _sessionTokens, _usageRequests;
     private long? _lastSequence;
     private string? _sessionId;
     private bool _running, _failed, _compacting, _sealed, _gap, _truncated, _disposed;
@@ -154,7 +154,7 @@ public sealed class SessionView : IDisposable
         switch (type)
         {
             case "turn.started":
-                _running = true; _failed = false; _error = null; _turnTokens = 0; _current = null; _blocks.Clear(); _sealed = false;
+                _turn++; _running = true; _failed = false; _error = null; _turnTokens = 0; _current = null; _blocks.Clear(); _sealed = false;
                 break;
             case "turn.completed":
             case "turn.aborted":
@@ -270,12 +270,13 @@ public sealed class SessionView : IDisposable
     private void ReduceTool(string type, JsonElement data)
     {
         var id = String(data, "toolCallId"); if (id == null) return;
-        if (!_tools.TryGetValue(id, out var tool))
+        var key = _turn.ToString(CultureInfo.InvariantCulture) + ":" + id;
+        if (!_tools.TryGetValue(key, out var tool))
         {
             if (type != "tool.proposed" && type != "tool.started" && type != "tool.permission.requested") return;
             if (_tools.Count >= 1024) { _truncated = true; return; }
-            tool = new Tool(id, String(data, "name") ?? id); _tools[id] = tool;
-            _current ??= AddMessage("assistant"); AddPart(_current, new Part("toolCall") { ToolId = id });
+            tool = new Tool(id, "tool-" + (++_nextTool).ToString(CultureInfo.InvariantCulture), String(data, "name") ?? id); _tools[key] = tool;
+            _current ??= AddMessage("assistant"); AddPart(_current, new Part("toolCall") { ToolId = id, ToolInstanceId = tool.InstanceId });
         }
         switch (type)
         {
@@ -290,9 +291,25 @@ public sealed class SessionView : IDisposable
                 tool.Output = Tail(joined, _options.MaximumOutputCharacters); break;
             case "tool.completed":
                 tool.Status = Boolean(data, "isError") ? "failed" : "completed";
-                tool.Result = Property(data, "data"); tool.ResultText = Prefix(String(data, "content") ?? ""); break;
+                SetToolResult(tool, data); tool.ResultText = Prefix(String(data, "content") ?? ""); break;
             case "tool.failed": tool.Status = "failed"; tool.Error = Prefix(String(data, "message") ?? String(data, "errorType") ?? ""); break;
         }
+    }
+
+    private void SetToolResult(Tool tool, JsonElement data)
+    {
+        _structuredBytes -= tool.ResultBytes; tool.Result = null; tool.ResultBytes = 0;
+        if (!data.TryGetProperty("data", out var result)) return;
+        var bytes = System.Text.Encoding.UTF8.GetByteCount(result.GetRawText());
+        // 与历史单产物的 8 MiB 窗口一致；视图总结构化呈现上限 32 MiB，权威结果仍在服务历史。
+        if (bytes > 8 * 1024 * 1024) { _truncated = true; return; }
+        foreach (var previous in _tools.Values)
+        {
+            if (_structuredBytes + bytes <= 32 * 1024 * 1024) break;
+            if (previous.ResultBytes == 0) continue;
+            _structuredBytes -= previous.ResultBytes; previous.Result = null; previous.ResultBytes = 0; _truncated = true;
+        }
+        tool.Result = result.Clone(); tool.ResultBytes = bytes; _structuredBytes += bytes;
     }
 
     private void ReduceAgent(string type, JsonElement data)
@@ -309,7 +326,8 @@ public sealed class SessionView : IDisposable
         if (_messages.Count >= _options.MaximumMessages)
         {
             var removed = _messages[0]; _messages.RemoveAt(0); _truncated = true;
-            foreach (var part in removed.Parts) if (part.ToolId != null) _tools.Remove(part.ToolId);
+            foreach (var part in removed.Parts)
+                foreach (var key in _tools.Where(x => x.Value.InstanceId == part.ToolInstanceId).Select(x => x.Key).ToArray()) { _structuredBytes -= _tools[key].ResultBytes; _tools.Remove(key); }
         }
         var message = new Message("msg-" + (++_nextMessage).ToString(CultureInfo.InvariantCulture), role);
         _messages.Add(message); return message;
@@ -326,8 +344,8 @@ public sealed class SessionView : IDisposable
             _tools.Values.Any(x => IsActive(x.Status)) ? "tooling" :
             _blocks.Values.Any(x => x.Open && x.Kind == "text") ? "responding" : "thinking";
         return new SessionViewSnapshot(_version, _lastSequence, status,
-            _messages.Select(m => new MessageView(m.Id, m.Role, m.Parts.Select(p => new MessagePartView(p.Kind, p.Text, p.ToolId, p.Truncated)).ToList())).ToList(),
-            _tools.Values.Select(t => new ToolView(t.Id, t.Name, t.Status, t.Output, t.Progress, t.ResultText, t.Result, t.Error, t.Truncated)).ToList(),
+            _messages.Select(m => new MessageView(m.Id, m.Role, m.Parts.Select(p => new MessagePartView(p.Kind, p.Text, p.ToolId, p.ToolInstanceId, p.Truncated)).ToList())).ToList(),
+            _tools.Values.Select(t => new ToolView(t.Id, t.InstanceId, t.Name, t.Status, t.Output, t.Progress, t.ResultText, t.Result, t.Error, t.Truncated)).ToList(),
             _notices.ToList(), _requests.Values.ToList(), _todos.ToList(), _agents.Values.ToList(),
             _turnTokens, _sessionTokens, _usageRequests, _gap, _truncated, _error);
     }
@@ -367,11 +385,11 @@ public sealed class SessionView : IDisposable
     private sealed class Message(string id, string role)
     { internal readonly string Id = id, Role = role; internal readonly List<Part> Parts = new(); }
     private sealed class Part(string kind)
-    { internal readonly string Kind = kind; internal string Text = ""; internal string? ToolId; internal bool Truncated; }
+    { internal readonly string Kind = kind; internal string Text = ""; internal string? ToolId, ToolInstanceId; internal bool Truncated; }
     private sealed class Block(string kind)
     { internal readonly string Kind = kind; internal bool Open = true, Hidden, Final, Truncated; internal Part? Part; internal string Buffer = ""; }
-    private sealed class Tool(string id, string name)
-    { internal readonly string Id = id, Name = name; internal string Status = "proposed", Output = ""; internal string? Progress, ResultText, Error; internal JsonElement? Result; internal bool Truncated; }
+    private sealed class Tool(string id, string instanceId, string name)
+    { internal readonly string Id = id, InstanceId = instanceId, Name = name; internal string Status = "proposed", Output = ""; internal string? Progress, ResultText, Error; internal JsonElement? Result; internal int ResultBytes; internal bool Truncated; }
 
     private sealed class Subscription(SessionView owner, Action<SessionViewSnapshot> observer,
         SynchronizationContext? context, Action<Exception>? onError) : IDisposable

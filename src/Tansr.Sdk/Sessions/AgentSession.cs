@@ -11,7 +11,7 @@ using Tansr.Sdk.Transport;
 namespace Tansr.Sdk.Sessions;
 
 /// <summary>远端会话引用。观察连接取消不会调用 interrupt；显式 CancelAsync 才中断当前轮。</summary>
-public sealed class AgentSession
+public sealed partial class AgentSession
 {
     private readonly TansrClient client;
     private long lastSequence;
@@ -27,18 +27,22 @@ public sealed class AgentSession
         while (Interlocked.CompareExchange(ref lastSequence, value, previous) != previous);
     }
     private string Path => client.SessionPath(Id);
-    private Task<JsonElement> Post(string suffix, byte[]? body, CancellationToken ct, int limit = 2 * 1024 * 1024)
-        => client.SendSessionAsync(HttpMethod.Post, Path + suffix, body ?? SessionJson.Object(), ct, limit);
+    private Task<JsonElement> Post(string suffix, byte[]? body, CancellationToken ct, int limit = 2 * 1024 * 1024, InputErrorMode inputErrorMode = InputErrorMode.None)
+        => client.SendSessionAsync(HttpMethod.Post, Path + suffix, body ?? SessionJson.Object(), ct, limit, inputErrorMode);
 
     public Task<JsonElement> SendAsync(string prompt, CancellationToken cancellationToken = default)
     {
+        client.AssertSessionWritable(Id);
         if (string.IsNullOrWhiteSpace(prompt)) throw new ArgumentException("Prompt must not be blank.", nameof(prompt));
         SessionJson.Unicode(prompt);
         return Post("/messages", SessionJson.Object(w => w.WriteString("prompt", prompt)), cancellationToken, 20 * 1024 * 1024);
     }
 
     public Task<JsonElement> SendBlocksAsync(IReadOnlyList<MessageBlock> blocks, CancellationToken cancellationToken = default)
-        => Post("/messages", SessionJson.Object(w => { w.WritePropertyName("blocks"); SessionRequestWriter.Blocks(w, blocks); }), cancellationToken, 20 * 1024 * 1024);
+    {
+        client.AssertSessionWritable(Id);
+        return Post("/messages", SessionJson.Object(w => { w.WritePropertyName("blocks"); SessionRequestWriter.Blocks(w, blocks); }), cancellationToken, 20 * 1024 * 1024);
+    }
 
     public async Task<JsonElement> GetMetadataAsync(CancellationToken cancellationToken = default)
     {
@@ -77,7 +81,27 @@ public sealed class AgentSession
             w.WriteString("inputId", inputId); w.WriteStartObject("target");
             w.WriteString("historyEpoch", target.HistoryEpoch); w.WriteString("turnId", target.TurnId); w.WriteEndObject();
             w.WriteStartObject("content"); w.WriteString("text", text); w.WriteEndObject(); w.WriteString("ack", durable ? "durable" : "memory");
-        }), cancellationToken);
+        }), cancellationToken, 20 * 1024 * 1024, InputErrorMode.Submit);
+    }
+
+    /// <summary>冻结插入协议只接受文本块；图片仍使用空闲会话 messages blocks。</summary>
+    public Task<JsonElement> SubmitInputBlocksAsync(string inputId, SessionInputTarget target, IReadOnlyList<string> textBlocks,
+        bool durable = false, CancellationToken cancellationToken = default)
+    {
+        SessionJson.Text(inputId, 128, nameof(inputId)); ValidateTarget(target);
+        if (textBlocks is null || textBlocks.Count < 1 || textBlocks.Count > 64) throw new ArgumentException("Invalid input blocks.", nameof(textBlocks));
+        return Post("/inputs", SessionJson.Object(w =>
+        {
+            w.WriteString("inputId", inputId); w.WriteStartObject("target");
+            w.WriteString("historyEpoch", target.HistoryEpoch); w.WriteString("turnId", target.TurnId); w.WriteEndObject();
+            w.WriteStartObject("content"); w.WriteStartArray("blocks");
+            foreach (var text in textBlocks)
+            {
+                if (string.IsNullOrEmpty(text) || text.Length > 262144) throw new ArgumentException("Invalid input text.", nameof(textBlocks));
+                SessionJson.Unicode(text); w.WriteStartObject(); w.WriteString("t", "text"); w.WriteString("text", text); w.WriteEndObject();
+            }
+            w.WriteEndArray(); w.WriteEndObject(); w.WriteString("ack", durable ? "durable" : "memory");
+        }), cancellationToken, 20 * 1024 * 1024, InputErrorMode.Submit);
     }
 
     private static void ValidateTarget(SessionInputTarget target)
@@ -89,7 +113,7 @@ public sealed class AgentSession
     public Task<JsonElement> GetInputStatusAsync(string inputId, SessionInputTarget target, CancellationToken cancellationToken = default)
     {
         ValidateTarget(target);
-        return client.SendSessionAsync(HttpMethod.Get, Path + "/inputs/" + SessionJson.Segment(inputId) + "?historyEpoch=" + SessionJson.Segment(target.HistoryEpoch) + "&turnId=" + SessionJson.Segment(target.TurnId), null, cancellationToken);
+        return client.SendSessionAsync(HttpMethod.Get, Path + "/inputs/" + SessionJson.Segment(inputId) + "?historyEpoch=" + SessionJson.Segment(target.HistoryEpoch) + "&turnId=" + SessionJson.Segment(target.TurnId), null, cancellationToken, inputErrorMode: InputErrorMode.Status);
     }
 
     public Task<JsonElement> PermissionAsync(string requestId, string digest, bool allow, CancellationToken cancellationToken = default)
@@ -156,6 +180,7 @@ public sealed class AgentSession
     public Task<JsonElement> CheckpointAsync(string? label = null, CancellationToken cancellationToken = default)
     {
         if (label?.Length > 120) throw new ArgumentException("Checkpoint label is too long.", nameof(label));
+        if (label is not null) SessionJson.Unicode(label);
         return Post("/checkpoints", SessionJson.Object(w => SessionJson.Optional(w, "label", label)), cancellationToken);
     }
     public Task<JsonElement> ListCheckpointsAsync(CancellationToken cancellationToken = default)
@@ -170,6 +195,7 @@ public sealed class AgentSession
     {
         if (bytes is null) throw new ArgumentNullException(nameof(bytes));
         if (label?.Length > 120) throw new ArgumentException("Checkpoint label is too long.", nameof(label));
+        if (label is not null) SessionJson.Unicode(label);
         var copy = (byte[])bytes.Clone();
         var value = await client.SendBinaryAsync(HttpMethod.Post, Path + "/checkpoints/import" + (label is null ? string.Empty : "?label=" + Uri.EscapeDataString(label)), copy, cancellationToken).ConfigureAwait(false);
         return SessionJson.Parse(value);

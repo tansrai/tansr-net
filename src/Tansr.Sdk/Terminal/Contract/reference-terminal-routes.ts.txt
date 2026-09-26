@@ -1,0 +1,274 @@
+/** 终端扩展沿用原认证、准入和有界SSE；通知游标与输出水位分别处理。 */
+import { randomUUID } from 'node:crypto';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { decodeArchiveMetadata, encodeArchiveMetadata } from '@tansr/kernel';
+import { AuthenticationUnavailableError, type RequestAuthenticator } from '../auth.js';
+import { PAYLOAD_TOO_LARGE_LINGER_MS, readJsonBody } from '../http-util.js';
+import { encodeSseFrame } from '../sse.js';
+import type { SseTransport, SubscriberWriter } from '../subscriber-writer.js';
+import { bodyReservationBytes, retryAfterHeader, type AdmissionController } from './admission.js';
+import { AgentExecutionError, type AgentExecutionAuthority } from './agent-execution.js';
+import { TerminalCapabilityError } from './terminal-capabilities.js';
+import { TerminalOutputError } from './terminal-output.js';
+import { parseTerminalContract } from './terminal-contract.generated.js';
+import type { TerminalErrorCode, TerminalErrorResponse, TerminalExecutorEvent, TerminalOutputEvent,
+  TerminalBindingRequest, TerminalCapabilitiesResponse, TerminalOutputBatchRequest, TerminalOperationReference,
+  TerminalSessionContract, TerminalSessionReference } from './terminal-contract.generated.js';
+import type { TerminalExecutionService } from './terminal-execution.js';
+
+const CONTRACT = 'terminal-services-v1', MAX_CONTROL = 262144, MAX_PENDING_REQUESTS = 128;
+type Subscription = { close(): void; check(authority: AgentExecutionAuthority, signal?: AbortSignal): Promise<void> };
+export interface TerminalControlRouteContext {
+  readonly req: IncomingMessage; readonly res: ServerResponse; readonly pathname: string; readonly method: string;
+  readonly endUserId: string; readonly signal: AbortSignal;
+  readBody(): Promise<unknown>;
+  authorize(contract: TerminalSessionContract): Promise<AgentExecutionAuthority>;
+  reply(name: string, value: unknown, status?: number): void;
+}
+export interface TerminalRoutesDeps {
+  readonly serviceFor: (contract: TerminalSessionContract) => TerminalExecutionService | undefined;
+  readonly capabilities: () => TerminalCapabilitiesResponse;
+  readonly authenticate: RequestAuthenticator['authenticate'];
+  readonly authorize: (req: IncomingMessage, res: ServerResponse, user: string, contract: TerminalSessionContract) => Promise<AgentExecutionAuthority>;
+  readonly admission: AdmissionController;
+  readonly sse: SseTransport;
+  readonly maxBodyBytes: number;
+  readonly sseKeepAliveMs: number;
+  readonly trackRequestWork: (work: Promise<void>) => void;
+  /** 测试/宿主可缩短复验周期；不可放宽默认10秒上界。 */
+  readonly revalidateMs?: number;
+  readonly control?: (context: TerminalControlRouteContext) => Promise<boolean>;
+}
+function fail(code: TerminalErrorCode): never { throw new TerminalCapabilityError(code); }
+function parse<T>(name: string, value: unknown): T {
+  try { return parseTerminalContract<T>(name, value); } catch { return fail('invalid_request'); }
+}
+function query(req: IncomingMessage, required: readonly string[], optional: readonly string[] = []): URLSearchParams {
+  const values = new URL(req.url ?? '/', 'http://serve.invalid').searchParams;
+  if ([...values.keys()].some(key => ![...required, ...optional].includes(key) || values.getAll(key).length !== 1)) fail('invalid_request');
+  if (required.includes('contract') && values.get('contract') !== CONTRACT) fail('protocol_version_mismatch');
+  if (required.some(key => !values.has(key))) fail('invalid_request');
+  return values;
+}
+export { query as terminalRouteQuery, parse as parseTerminalRouteValue };
+function policy(code: TerminalErrorCode): readonly [TerminalErrorResponse['status'], TerminalErrorResponse['retryAction']] {
+  switch (code) {
+    case 'unauthorized': return [401, 'none'];
+    case 'forbidden': return [403, 'none'];
+    case 'not_found': return [404, 'none'];
+    case 'invalid_request': case 'protocol_version_mismatch': return [400, 'none'];
+    case 'payload_too_large': return [413, 'none'];
+    case 'capacity_exceeded': case 'request_limit': return [429, 'backoff'];
+    case 'source_unavailable': return [503, 'backoff'];
+    case 'unsupported_capability': case 'capability_unconfirmed': return [409, 'discover'];
+    case 'stale_generation': case 'binding_conflict': case 'revision_conflict': case 'context_transition_required': return [409, 'refresh'];
+    case 'busy': return [409, 'backoff'];
+    case 'output_gap': case 'integrity_mismatch': case 'commit_unknown': case 'request_conflict': return [409, 'reconcile'];
+  }
+}
+function response(res: ServerResponse, name: string, value: unknown, status = 200): void {
+  if (res.destroyed || res.writableEnded) return;
+  const body = encodeArchiveMetadata(parse(name, value), { maxBytes: MAX_CONTROL });
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'content-length': body.length });
+  res.end(body);
+}
+function errorCode(error: unknown): TerminalErrorCode {
+  if (error instanceof TerminalCapabilityError || error instanceof TerminalOutputError) return error.code;
+  if (error instanceof AgentExecutionError) return error.code === 'request_expired' ? 'stale_generation' : error.code;
+  if (error instanceof URIError || (error instanceof Error && error.name === 'ZodError')) return 'invalid_request';
+  if (error instanceof AuthenticationUnavailableError) return error.code === 'overloaded' ? 'capacity_exceeded' : 'source_unavailable';
+  return 'source_unavailable';
+}
+
+export function createTerminalRoutesHandler(deps: TerminalRoutesDeps):
+  (req: IncomingMessage, res: ServerResponse, pathname: string, method: string) => boolean {
+  const revalidateMs = deps.revalidateMs ?? 10000;
+  if (!Number.isSafeInteger(revalidateMs) || revalidateMs < 1 || revalidateMs > 10000) throw new RangeError('Invalid terminal revalidation interval');
+  const maximum = Math.min(deps.maxBodyBytes, MAX_CONTROL);
+  let inflight = 0;
+  async function identity(req: IncomingMessage, res: ServerResponse): Promise<string> {
+    let authenticated;
+    try { authenticated = await deps.authenticate(req, res); }
+    catch (error) { if (error instanceof AuthenticationUnavailableError) throw error; return fail('unauthorized'); }
+    if (!authenticated?.endUserId) fail('unauthorized');
+    if (req.aborted || res.destroyed || res.writableEnded) fail('source_unavailable');
+    return authenticated.endUserId;
+  }
+  async function body(req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+    if (!/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type'] ?? '') || req.headers['content-encoding']) fail('invalid_request');
+    const reservation = bodyReservationBytes(req, maximum);
+    if (!deps.admission.reserveBody(reservation).admitted) fail('capacity_exceeded');
+    try {
+      const read = await readJsonBody(req, maximum, bytes => decodeArchiveMetadata(bytes, { maxBytes: maximum }));
+      if (!read.ok) {
+        if (read.reason === 'too_large') res.setHeader('connection', 'close');
+        fail(read.reason === 'too_large' ? 'payload_too_large' : 'invalid_request');
+      }
+      return read.value;
+    } finally { deps.admission.releaseBody(reservation); }
+  }
+  function serviceFor(contract: TerminalSessionContract): TerminalExecutionService {
+    return deps.serviceFor(contract) ?? fail('unsupported_capability');
+  }
+  async function stream(req: IncomingMessage, res: ServerResponse, user: string, contract: TerminalSessionContract,
+    subscribe: (authority: AgentExecutionAuthority, emit: (event: TerminalExecutorEvent | TerminalOutputEvent) => void,
+      replay: (events: Iterable<TerminalOutputEvent>) => void, close: (code: TerminalErrorCode) => void, signal: AbortSignal) => Promise<Subscription>): Promise<void> {
+    const decision = deps.admission.tryAdmitSse(user);
+    if (!decision.admitted) fail('capacity_exceeded');
+    const abort = new AbortController();
+    let subscription: Subscription | undefined, writer: SubscriberWriter | undefined;
+    let timer: NodeJS.Timeout | undefined, failure: TerminalErrorCode | undefined, released = false;
+    let pending: string[] = [], pendingBytes = 0, checking: Promise<boolean> | undefined;
+    let initialReplay: Iterable<TerminalOutputEvent> | undefined;
+    const encode = (event: TerminalExecutorEvent | TerminalOutputEvent): string => {
+      const executorEvent = 'eventId' in event;
+      const value = parse(executorEvent ? 'ExecutorEvent' : 'OutputEvent', event);
+      return encodeSseFrame({ event: event.type, ...(executorEvent ? { id: event.eventId } : {}),
+        data: Buffer.from(encodeArchiveMetadata(value, { maxBytes: MAX_CONTROL })).toString('utf8') });
+    };
+    const close = (code: TerminalErrorCode) => {
+      if (failure) return;
+      failure = code; abort.abort(); subscription?.close();
+      if (res.headersSent && !res.destroyed) res.destroy();
+    };
+    const cleanup = () => {
+      if (released) return; released = true;
+      if (timer) clearInterval(timer);
+      abort.abort(); subscription?.close(); pending = []; pendingBytes = 0; initialReplay = undefined;
+      deps.admission.releaseSse(user); req.removeListener('aborted', onAborted);
+    };
+    const onAborted = () => { close('source_unavailable'); cleanup(); };
+    req.once('aborted', onAborted); res.once('close', cleanup);
+    const check = (): Promise<boolean> => {
+      if (checking) return checking;
+      checking = (async () => {
+        if (abort.signal.aborted || await identity(req, res) !== user) return false;
+        const authority = await deps.authorize(req, res, user, contract);
+        await subscription!.check(authority, abort.signal);
+        return !abort.signal.aborted;
+      })().catch(() => false).then(valid => { if (!valid) close('forbidden'); return valid; }).finally(() => { checking = undefined; });
+      return checking;
+    };
+    try {
+      const authority = await deps.authorize(req, res, user, contract);
+      subscription = await subscribe(authority, event => {
+        if (abort.signal.aborted) return;
+        const frame = encode(event);
+        if (writer) writer.write(frame);
+        else {
+          pendingBytes += Buffer.byteLength(frame);
+          if (pending.length >= 32 || pendingBytes > MAX_CONTROL) { close('capacity_exceeded'); return; }
+          pending.push(frame);
+        }
+      }, events => {
+        if (initialReplay !== undefined || writer !== undefined) { close('invalid_request'); return; }
+        initialReplay = events;
+      }, close, abort.signal);
+      if (failure || abort.signal.aborted || res.destroyed) { subscription.close(); fail(failure ?? 'source_unavailable'); }
+      if (deps.sseKeepAliveMs > 0) req.socket.setKeepAlive(true, deps.sseKeepAliveMs);
+      req.socket.setTimeout(0);
+      res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform',
+        connection: 'keep-alive', 'x-accel-buffering': 'no' });
+      // 既有writer负责背压/帧帽。丢帧直接断流，对端按独立游标/水位重连对账。
+      writer = deps.sse.attach(res, { beforeFlush: check, gapFrame: () => { close('output_gap'); return ''; } });
+      const replay = initialReplay, early = pending;
+      writer.replay((function* () { for (const event of replay ?? []) yield encode(event); yield* early; })());
+      pending = []; pendingBytes = 0; initialReplay = undefined;
+      if (released || abort.signal.aborted || res.destroyed) { cleanup(); return; }
+      timer = setInterval(() => { void check(); }, revalidateMs); timer.unref();
+    } catch (error) { cleanup(); throw error; }
+  }
+  async function dispatch(req: IncomingMessage, res: ServerResponse, pathname: string, method: string, signal: AbortSignal): Promise<void> {
+    const user = await identity(req, res);
+    if (deps.admission.overloaded()) fail('source_unavailable');
+    if (method === 'GET' && (req.headers['transfer-encoding'] !== undefined ||
+      (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0'))) fail('invalid_request');
+    const executor = /^\/v3\/terminal\/executors\/([^/]+)\/(events|output-batches)$/.exec(pathname);
+    const executionState = /^\/v3\/terminal\/executors\/([^/]+)\/operations\/([^/]+)$/.exec(pathname);
+    const session = /^\/v3\/terminal\/sessions\/([^/]+)\/(tool-output|tool-output-status)$/.exec(pathname);
+    const capabilities = pathname === '/v3/terminal/capabilities', binding = pathname === '/v3/terminal/bindings';
+    if (!executor && !executionState && !session && !capabilities && !binding) {
+      let read: Promise<unknown> | undefined;
+      if (await deps.control?.({ req, res, pathname, method, endUserId: user, signal,
+        readBody: () => read ??= body(req, res),
+        authorize: async contract => {
+          signal.throwIfAborted(); if (await identity(req, res) !== user) fail('unauthorized');
+          const authority = await deps.authorize(req, res, user, contract); signal.throwIfAborted(); return authority;
+        }, reply: (name, value, status) => response(res, name, value, status) })) return;
+      fail('not_found');
+    }
+    const expected = binding || executor?.[2] === 'output-batches' ? 'POST' : 'GET';
+    if (method !== expected) fail('invalid_request');
+    if (capabilities) {
+      query(req, ['contract']); response(res, 'CapabilitiesResponse', deps.capabilities()); return;
+    }
+    if (executionState) {
+      const values = query(req, ['contract', 'sessionContract', 'sessionId', 'requestDigest', 'connectionId']);
+      const reference = parse<TerminalSessionReference>('SessionReference', { sessionContract: values.get('sessionContract'), sessionId: values.get('sessionId') });
+      const operation = parse<TerminalOperationReference>('OperationReference', { operationId: decodeURIComponent(executionState[2]!), requestDigest: values.get('requestDigest') });
+      const executorId = parse<string>('Id', decodeURIComponent(executionState[1]!)), connectionId = parse<string>('Id', values.get('connectionId'));
+      const authority = await deps.authorize(req, res, user, reference.sessionContract);
+      response(res, 'ExecutionState', await serviceFor(reference.sessionContract).executionState(user, authority, executorId, connectionId, reference, operation, signal));
+      return;
+    }
+    if (method === 'POST') {
+      query(req, []);
+      const value = await body(req, res);
+      if (await identity(req, res) !== user) fail('unauthorized');
+      if (binding) {
+        const input = parse<TerminalBindingRequest>('BindingRequest', value), contract = input.session.sessionContract;
+        const service = serviceFor(contract), authority = await deps.authorize(req, res, user, contract);
+        response(res, 'BindingResponse', await service.bind(user, authority, input, signal));
+      } else {
+        const input = parse<TerminalOutputBatchRequest>('OutputBatchRequest', value), contract = input.session.sessionContract;
+        if (input.executorId !== decodeURIComponent(executor![1]!)) fail('invalid_request');
+        const service = serviceFor(contract), authority = await deps.authorize(req, res, user, contract);
+        response(res, 'OutputStatus', await service.receive(user, authority, input, signal));
+      }
+      return;
+    }
+    if (executor) {
+      const values = query(req, ['contract', 'sessionContract', 'connectionId']);
+      const contract = parse<TerminalSessionContract>('SessionContract', values.get('sessionContract')), service = serviceFor(contract);
+      const executorId = parse<string>('Id', decodeURIComponent(executor[1]!)), connectionId = parse<string>('Id', values.get('connectionId'));
+      const cursor = req.headers['last-event-id'];
+      if (cursor !== undefined) parse('Sequence', cursor);
+      await stream(req, res, user, contract, (authority, event, _replay, close, signal) =>
+        service.subscribeExecutor(user, authority, executorId, connectionId, { event, close }, signal));
+      return;
+    }
+    const output = session![2] === 'tool-output';
+    const values = query(req, ['contract', 'sessionContract', 'operationId', 'requestDigest'], output ? ['afterSeq'] : []);
+    if (req.headers['last-event-id'] !== undefined) fail('invalid_request');
+    const reference = parse<TerminalSessionReference>('SessionReference', { sessionContract: values.get('sessionContract'), sessionId: decodeURIComponent(session![1]!) });
+    const service = serviceFor(reference.sessionContract);
+    const operation = parse<TerminalOperationReference>('OperationReference', { operationId: values.get('operationId'), requestDigest: values.get('requestDigest') });
+    if (output) {
+      const after = values.has('afterSeq') ? parse<string>('Sequence', values.get('afterSeq')) : null;
+      await stream(req, res, user, reference.sessionContract, (authority, event, replay, close, signal) =>
+        service.subscribeOutput(user, authority, reference, operation, after, { event, replay, close }, signal));
+    } else response(res, 'OutputStatus', await service.outputStatus(user, await deps.authorize(req, res, user, reference.sessionContract), reference, operation, signal));
+  }
+  return (req, res, pathname, method) => {
+    if (pathname !== '/v3/terminal' && !pathname.startsWith('/v3/terminal/')) return false;
+    const occupied = inflight < MAX_PENDING_REQUESTS;
+    if (occupied) inflight++;
+    const abort = new AbortController(), cancel = () => abort.abort();
+    req.once('aborted', cancel); res.once('close', cancel);
+    const work = (async () => { if (!occupied) fail('capacity_exceeded'); await dispatch(req, res, pathname, method, abort.signal); })().catch(error => {
+      if (res.destroyed || res.writableEnded) return;
+      if (res.headersSent) { res.destroy(); return; }
+      const code = errorCode(error), [status, retryAction] = policy(code);
+      if (status === 429 || status === 503) for (const [name, value] of Object.entries(retryAfterHeader(deps.admission.retryAfterMs))) res.setHeader(name, value);
+      const value = { contract: CONTRACT, requestId: randomUUID(), code, status, retryAction };
+      if (status === 413 && !req.complete) {
+        const bytes = encodeArchiveMetadata(parse('ErrorResponse', value), { maxBytes: MAX_CONTROL });
+        res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', 'content-length': bytes.length, connection: 'close' });
+        res.write(bytes);
+        const timer = setTimeout(() => { if (!res.destroyed) res.end(); }, PAYLOAD_TOO_LARGE_LINGER_MS); timer.unref();
+        res.once('close', () => clearTimeout(timer));
+      } else response(res, 'ErrorResponse', value, status);
+    }).finally(() => { if (occupied) inflight--; req.removeListener('aborted', cancel); res.removeListener('close', cancel); });
+    deps.trackRequestWork(work); return true;
+  };
+}

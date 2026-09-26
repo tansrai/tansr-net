@@ -13,6 +13,13 @@ public interface IExecutionClient
     Task<JsonElement> GetStatusAsync(string sessionId, string operationId, CancellationToken cancellationToken);
 }
 
+/// <summary>设备初始化与会话绑定；应用策略仍由 Serve 决定。</summary>
+public interface IDeviceExecutionClient : IExecutionClient
+{
+    Task<JsonElement> InitializeAsync(JsonElement initialization, CancellationToken cancellationToken);
+    Task<JsonElement> BindExecutionAsync(JsonElement request, JsonElement expectedTarget, CancellationToken cancellationToken);
+}
+
 /// <summary>宿主注入的设备资源后端，不在此处创建模型循环或放宽权限。</summary>
 public interface IExecutionBackend
 {

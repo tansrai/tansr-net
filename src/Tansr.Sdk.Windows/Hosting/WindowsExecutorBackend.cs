@@ -27,6 +27,13 @@ public sealed class WindowsBusinessTool
     public Func<JsonElement, CancellationToken, Task<JsonElement>> Invoke { get; }
 }
 
+public sealed class WindowsExecutionOutputFailure
+{
+    internal WindowsExecutionOutputFailure(string operationId) { OperationId = operationId; }
+    public string OperationId { get; }
+    public string Code => "output_transfer_unconfirmed";
+}
+
 /// <summary>将既有SDK2资源调用映射到真实Windows后端；生命周期、账本及本地批准由ExecutionHost统一负责。</summary>
 public sealed class WindowsExecutorBackend : IExecutionBackend
 {
@@ -36,10 +43,17 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
     private readonly Func<JsonElement, WindowsWorkspace, WindowsProcessRequest>? _processFactory;
     private readonly WindowsProcessOutputHandler? _output;
     private readonly WindowsProcessExecutor _process = new();
+    private readonly IExecutionOutputSink? _executionOutput;
+    private readonly SemaphoreSlim _outputLifetimes = new(8, 8);
+    private WindowsExecutionOutputFailure? _lastOutputFailure;
+    /// <summary>流式传输未决与进程终态分开；可显示原最终结果，同时提示增量输出需对账。</summary>
+    public WindowsExecutionOutputFailure? LastOutputFailure => Volatile.Read(ref _lastOutputFailure);
+    public event Action<WindowsExecutionOutputFailure>? OutputFailed;
 
     public WindowsExecutorBackend(string executorId, IEnumerable<WindowsExecutorWorkspace> workspaces,
         IEnumerable<WindowsBusinessTool>? tools = null, JsonElement? interpreter = null,
-        Func<JsonElement, WindowsWorkspace, WindowsProcessRequest>? processFactory = null, WindowsProcessOutputHandler? output = null)
+        Func<JsonElement, WindowsWorkspace, WindowsProcessRequest>? processFactory = null, WindowsProcessOutputHandler? output = null,
+        IExecutionOutputSink? executionOutput = null)
     {
         if (!IsSupportedWindows())
             throw new PlatformNotSupportedException("执行后端要求 Windows 10 或更新版本。");
@@ -47,7 +61,7 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
         _tools = (tools ?? Array.Empty<WindowsBusinessTool>()).ToDictionary(x => x.Name, StringComparer.Ordinal);
         if (interpreter.HasValue != (processFactory != null)) throw new ArgumentException("解释器声明与受控进程工厂必须同时提供。");
         if (interpreter.HasValue) WireJson.ValidateNamed("ExecutionInterpreter", interpreter.Value);
-        _interpreter = interpreter?.Clone(); _processFactory = processFactory; _output = output;
+        _interpreter = interpreter?.Clone(); _processFactory = processFactory; _output = output; _executionOutput = executionOutput;
         var write = _workspaces.Values.All(x => x.Workspace.SupportsCooperativeCompareExchange);
         Registration = Object(writer =>
         {
@@ -168,7 +182,7 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 foreach (var variable in selected.Environment) processRequest.Environment.Add(variable.Key, variable.Value);
                 await guard(cancellationToken).ConfigureAwait(false);
                 var watch = Stopwatch.StartNew();
-                var result = await _process.ExecuteAsync(processRequest, _output, cancellationToken).ConfigureAwait(false);
+                var result = await ExecuteProcessAsync(operation, processRequest, guard, cancellationToken).ConfigureAwait(false);
                 if (!result.CleanupConfirmed) throw new IOException("进程资源清理尚未确认。");
                 if (!result.Started) throw new ExecutionRejectedException("resource_start_failed");
                 if (!result.OutputComplete && result.Termination != WindowsProcessTermination.Canceled && result.Termination != WindowsProcessTermination.TimedOut)
@@ -183,6 +197,104 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 });
             default: throw new ExecutionRejectedException("ENOTSUP");
         }
+    }
+
+    private async Task<WindowsProcessResult> ExecuteProcessAsync(JsonElement operation, WindowsProcessRequest request,
+        Func<CancellationToken, Task> guard, CancellationToken ct)
+    {
+        IExecutionOutputCapture? capture = null;
+        var captureTruncated = 0;
+        Task<IExecutionOutputCapture>? opening = null;
+        var pending = new List<Task>();
+        var reserved = _executionOutput != null;
+        if (reserved && !_outputLifetimes.Wait(0)) throw new ExecutionRejectedException("output_transport_capacity");
+        try
+        {
+            if (_executionOutput != null)
+            {
+                try
+                {
+                    opening = _executionOutput.OpenAsync(operation.Clone(), ct);
+                    if (opening == null) throw new InvalidOperationException("Output sink returned no task.");
+                    pending.Add(opening);
+                    using var openingTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                    var elapsed = Task.Delay(TimeSpan.FromSeconds(5), openingTimeout.Token);
+                    if (await Task.WhenAny(opening, elapsed).ConfigureAwait(false) != opening)
+                    { ct.ThrowIfCancellationRequested(); throw new TimeoutException("Output transport did not open in time."); }
+                    openingTimeout.Cancel();
+                    capture = await opening.ConfigureAwait(false);
+                    if (capture != null) pending.Add(capture.Completion);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch { throw new ExecutionRejectedException("output_transport_unavailable"); }
+                if (capture == null) throw new ExecutionRejectedException("output_transport_unavailable");
+            }
+            await guard(ct).ConfigureAwait(false);
+            WindowsProcessOutputHandler? handler = capture == null ? _output : async (chunk, token) =>
+            {
+                if (!capture.Append(chunk.Stream == WindowsProcessOutputStream.StandardOutput ? "stdout" : "stderr", "utf-8", chunk.RawBytes.ToArray()))
+                    Interlocked.Exchange(ref captureTruncated, 1);
+                if (_output != null) await _output(chunk, token).ConfigureAwait(false);
+            };
+            var result = await _process.ExecuteAsync(request, handler, ct).ConfigureAwait(false);
+            if (capture != null)
+            {
+                // 即使用户取消也尝试封口已有前缀；输送失败不改变已知的进程事实。
+                using var finish = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                Task? sealing = null;
+                try
+                {
+                    sealing = capture.SealAsync(!result.OutputComplete || Volatile.Read(ref captureTruncated) != 0, finish.Token);
+                    pending.Add(sealing);
+                    var settled = Task.WhenAll(sealing, capture.Completion);
+                    if (await Task.WhenAny(settled, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false) != settled)
+                    {
+                        finish.Cancel();
+                        _ = settled.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+                            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                        OutputUnconfirmed(operation);
+                    }
+                    else await settled.ConfigureAwait(false);
+                }
+                catch
+                {
+                    if (sealing != null) _ = sealing.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    OutputUnconfirmed(operation);
+                }
+            }
+            return result;
+        }
+        finally
+        {
+            if (capture != null)
+            {
+                try { capture.Dispose(); }
+                catch { OutputUnconfirmed(operation); }
+            }
+            else if (opening != null) pending.Add(CloseLateCaptureAsync(opening));
+            if (reserved)
+            {
+                // 不响应取消的用户输送仍占原槽；下一操作不能无限累积悬挂Open/Seal/Pump。
+                _ = Task.WhenAll(pending).ContinueWith(task => { _ = task.Exception; _outputLifetimes.Release(); },
+                    CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+        }
+    }
+
+    private static async Task CloseLateCaptureAsync(Task<IExecutionOutputCapture> opening)
+    {
+        var late = await opening.ConfigureAwait(false);
+        if (late == null) return;
+        try { late.Dispose(); }
+        finally { await late.Completion.ConfigureAwait(false); }
+    }
+
+    private void OutputUnconfirmed(JsonElement operation)
+    {
+        var failure = new WindowsExecutionOutputFailure(Text(operation, "operationId"));
+        Volatile.Write(ref _lastOutputFailure, failure);
+        try { OutputFailed?.Invoke(failure); } catch { /* 观察回调不得更改执行终态。 */ }
     }
 
     private static string Text(JsonElement value, string name) => value.GetProperty(name).GetString()!;

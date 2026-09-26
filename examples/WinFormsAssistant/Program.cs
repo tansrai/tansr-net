@@ -41,6 +41,9 @@ internal sealed class AssistantForm : Form
     private string _currentToken = "";
     private AgentSession? _session;
     private TansrClient? _client;
+    private ExampleConnection? _connection;
+    private MediaWorkspace? _media;
+    private MediaForm? _mediaWindow;
     private SessionView? _view;
     private IDisposable? _subscription;
     private CancellationTokenSource? _lifetime;
@@ -63,8 +66,8 @@ internal sealed class AssistantForm : Form
         top.Controls.Add(Row(Label("正文"), _textMode, Label("思考"), _thinkingMode,
             Button("历史", () => ShowAsync("历史", _session!.GetHistoryAsync())), Button("状态", () => ShowAsync("会话状态", _session!.GetMetadataAsync())),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())), Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
-            Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
-        top.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(1020, 0), Text = "真实入口：会话流、图片、取消、审批/提问、历史与快照。动态切模/思考、完整记忆、本地 Serve 自动启动与媒体播放仍待接线。" });
+            Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
+        top.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(1020, 0), Text = "真实入口：会话流、图片、取消、审批/提问、历史与快照。动态切模/思考、完整记忆、设备工具绑定仍需宿主可信配置。" });
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 155 };
         var actions = Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
             Button("取消当前工作", async () => { await _session!.CancelAsync(); _status.Text = "取消请求已接纳，等待运行终态。"; }));
@@ -104,18 +107,14 @@ internal sealed class AssistantForm : Form
     private async Task ConnectAsync()
     {
         Volatile.Write(ref _currentToken, _token.Text);
-        var client = new TansrClient(new TansrClientOptions
-        {
-            BaseUri = new Uri(_endpoint.Text, UriKind.Absolute),
-            AllowInsecureLoopback = _loopback.Checked,
-            TokenProvider = _ => Task.FromResult(Volatile.Read(ref _currentToken)),
-        });
+        var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.Checked);
+        var client = connection.Client;
         AgentSession session;
-        try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.Declarations : null }); }
-        catch { client.Dispose(); throw; }
-        _client = client; _session = session; _resume.Text = session.Id; _lifetime = new CancellationTokenSource(); _closeFailure = null;
+        try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.GetDeclarations(connection.NativeTools) : null }); }
+        catch { await connection.CloseAsync(); throw; }
+        _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _lifetime = new CancellationTokenSource(); _closeFailure = null;
         _nativeTools = new NativeToolHost(session, "Tansr.WinForms", SetWindowTitleAsync,
-            code => { if (!IsDisposed) BeginInvoke(new Action(() => _status.Text = code)); });
+            code => { if (!IsDisposed) BeginInvoke(new Action(() => _status.Text = code)); }, connection.NativeTools);
         _view = new SessionView(new SessionViewOptions
         {
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
@@ -133,6 +132,7 @@ internal sealed class AssistantForm : Form
     }
     private void Render(SessionViewSnapshot snapshot)
     {
+        _media?.Register(snapshot);
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.SelectionStart = _conversation.TextLength; _conversation.ScrollToCaret();
         var selected = (_requests.SelectedItem as RequestItem)?.Request.Id;
         if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request.Id).SequenceEqual(snapshot.PendingRequests.Select(x => x.Id)))
@@ -143,6 +143,14 @@ internal sealed class AssistantForm : Form
             _requests.SelectedItem = _requests.Items.Cast<RequestItem>().FirstOrDefault(x => x.Request.Id == selected) ?? _requests.Items.Cast<RequestItem>().FirstOrDefault();
         }
     }
+    private Task OpenMediaAsync()
+    {
+        if (_mediaWindow != null) { _mediaWindow.Activate(); return Task.CompletedTask; }
+        var session = _session;
+        _mediaWindow = new MediaForm(_media!, text => { if (ReferenceEquals(_session, session)) _draft.Text += (_draft.Text.Length == 0 ? "" : Environment.NewLine) + text; }, _draft.Text);
+        _mediaWindow.FormClosed += (_, _) => _mediaWindow = null; _mediaWindow.Show(this); return Task.CompletedTask;
+    }
+
     private async Task SendAsync()
     {
         var text = _draft.Text; if (string.IsNullOrWhiteSpace(text)) return;
@@ -216,20 +224,28 @@ internal sealed class AssistantForm : Form
         catch (Exception error) { _closeFailure = ErrorText(error); throw; }
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
         _lifetime!.Cancel(); if (_observation != null) await _observation;
-        _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose(); _lifetime.Dispose(); _client!.Dispose();
+        _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
+        _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
+        if (_connection != null) await _connection.CloseAsync(); _connection = null;
+        _lifetime?.Dispose(); _lifetime = null;
         _session = null; _client = null; _view = null; _status.Text = "关闭请求已确认；未删除历史。";
     }
     private async Task DetachAsync()
     {
+        var ownedLocalServe = _connection?.OwnsLocalServe == true;
         // 本地断开不发远端 interrupt/close/delete；保留会话 ID 供以后查账。
         _lifetime?.Cancel(); if (_observation != null) await _observation;
         string? cleanupFailure = null;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token); }
         catch (Exception error) { cleanupFailure = ErrorText(error); }
+        _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
         _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
-        _lifetime?.Dispose(); _client?.Dispose(); _session = null; _client = null; _view = null;
-        _status.Text = "已断开本机连接，可正常退出；远端会话未关闭或删除，工作可能继续。" +
+        _lifetime?.Dispose(); _lifetime = null;
+        try { if (_connection != null) await _connection.CloseAsync(); }
+        catch (Exception error) { cleanupFailure = ErrorText(error); }
+        finally { _connection = null; _session = null; _client = null; _view = null; }
+        _status.Text = (ownedLocalServe ? (cleanupFailure == null ? "已断开并回收本实例启动的本地 Serve；未删除历史。" : "已断开本机连接；本地 Serve 或 MCP 收尾未确认，可退出，未删除历史。") : "已断开本机连接，可正常退出；远端会话未关闭或删除，工作可能继续。") +
             (_closeFailure == null ? "" : " 上次远端关闭未确认：" + _closeFailure) +
             (cleanupFailure == null ? "" : " 本机收尾未确认：" + cleanupFailure);
     }

@@ -21,11 +21,12 @@ public sealed class SessionViewOptions
 
 public sealed class MessagePartView
 {
-    internal MessagePartView(string kind, string text, string? toolId, bool truncated)
-    { Kind = kind; Text = text; ToolId = toolId; Truncated = truncated; }
+    internal MessagePartView(string kind, string text, string? toolId, string? toolInstanceId, bool truncated)
+    { Kind = kind; Text = text; ToolId = toolId; ToolInstanceId = toolInstanceId; Truncated = truncated; }
     public string Kind { get; }
     public string Text { get; }
     public string? ToolId { get; }
+    public string? ToolInstanceId { get; }
     public bool Truncated { get; }
 }
 
@@ -40,13 +41,15 @@ public sealed class MessageView
 
 public sealed class ToolView
 {
-    internal ToolView(string id, string name, string status, string output, string? progress,
+    internal ToolView(string id, string instanceId, string name, string status, string output, string? progress,
         string? resultText, JsonElement? result, string? error, bool truncated)
     {
-        Id = id; Name = name; Status = status; OutputTail = output; Progress = progress;
+        Id = id; InstanceId = instanceId; Name = name; Status = status; OutputTail = output; Progress = progress;
         ResultText = resultText; Result = result; Error = error; OutputTruncated = truncated;
     }
     public string Id { get; }
+    /// <summary>视图中的工具发生实例标识；Id 仍保留原始 toolCallId。</summary>
+    public string InstanceId { get; }
     public string Name { get; }
     public string Status { get; }
     public string OutputTail { get; }

@@ -1,0 +1,76 @@
+/** SRV-01 内部候选：能力协商只收窄可信宿主快照；不代替身份票和会话归属核验。 */
+import { bindingCanonical } from '@tansr/kernel';
+import { parseTerminalContract, TERMINAL_CONTRACT_SCHEMA_SHA256 } from './terminal-contract.generated.js';
+import type { TerminalBindingRequest, TerminalBindingResponse, TerminalCapabilitiesResponse,
+  TerminalErrorCode, TerminalFeature, TerminalFeatureAvailability, TerminalLimits } from './terminal-contract.generated.js';
+
+export const TERMINAL_FEATURES: readonly TerminalFeature[] = Object.freeze([
+  'execution-stream-v1', 'execution-background-v1', 'memory-lifecycle-v1', 'session-configuration-v1',
+]);
+export const TERMINAL_LIMITS: TerminalLimits = Object.freeze({ maxControlBytes: 262144, maxBlockBytes: 16384,
+  maxBatchBytes: 65536, maxPendingBytes: 2097152, maxRetainedBytes: 8388608 });
+
+export class TerminalCapabilityError extends Error {
+  constructor(readonly code: TerminalErrorCode) { super(code); this.name = 'TerminalCapabilityError'; }
+}
+function fail(code: TerminalErrorCode): never { throw new TerminalCapabilityError(code); }
+function parse<T>(name: string, value: unknown): T {
+  try { return parseTerminalContract<T>(name, value); }
+  catch { return fail('invalid_request'); }
+}
+function features(input: readonly TerminalFeatureAvailability[]): readonly TerminalFeatureAvailability[] {
+  const names = new Set(input.map(value => value.feature));
+  if (names.size !== TERMINAL_FEATURES.length || TERMINAL_FEATURES.some(name => !names.has(name)) ||
+    input.some(value => value.installed && !value.supported)) fail('invalid_request');
+  return input;
+}
+function limits(input: TerminalLimits): void {
+  if (input.maxBlockBytes > input.maxBatchBytes || input.maxBatchBytes > input.maxPendingBytes ||
+    input.maxBatchBytes > input.maxRetainedBytes) fail('invalid_request');
+}
+
+/** 宿主只在相应实现真实安装时填写 supported/installed；schema存在不代表已支持。
+ * 本函数不读取平台、路径或环境；响应不授予后续执行权限。 */
+export function terminalCapabilities(input: Pick<TerminalCapabilitiesResponse, 'sessionContracts' | 'features' | 'limits'>): TerminalCapabilitiesResponse {
+  const value = parse<TerminalCapabilitiesResponse>('CapabilitiesResponse', {
+    ...input, contract: 'terminal-services-v1', schemaRevision: '2026-09-26.candidate-4', schemaSha256: TERMINAL_CONTRACT_SCHEMA_SHA256,
+  });
+  features(value.features); limits(value.limits); return value;
+}
+
+export interface TrustedTerminalBinding {
+  /** 调用者须先按票据、registry真实family和当前租约取快照，不能从请求反射。 */
+  readonly session: TerminalBindingResponse['session'];
+  readonly scope: TerminalBindingResponse['scope'];
+  readonly executionBinding: TerminalBindingResponse['executionBinding'];
+  readonly features: readonly TerminalFeatureAvailability[];
+  readonly limits: TerminalLimits;
+}
+
+/** 仅计算本次协商交集；不创建新运行、持久身份或执行许可。
+ * 可选能力只有明确未支持/未安装才略过。撤权、离线和未确认不能冒充旧端安全降级。 */
+export function negotiateTerminalBinding(raw: unknown, trusted: TrustedTerminalBinding): TerminalBindingResponse {
+  const request = parse<TerminalBindingRequest>('BindingRequest', raw);
+  const available = terminalCapabilities({ sessionContracts: [trusted.session.sessionContract], features: trusted.features, limits: trusted.limits });
+  const overlap = request.required.some(name => request.optional.includes(name));
+  if (overlap || request.required.length + request.optional.length === 0) fail('invalid_request');
+  if (bindingCanonical(request.session) !== bindingCanonical(trusted.session)) fail('not_found');
+  if (bindingCanonical(request.executionBinding) !== bindingCanonical(trusted.executionBinding)) fail('stale_generation');
+  const accepted: TerminalFeature[] = [], unavailable: TerminalFeatureAvailability[] = [];
+  for (const name of [...request.required, ...request.optional]) {
+    const feature = available.features.find(value => value.feature === name)!;
+    if (!feature.supported || !feature.installed) {
+      if (request.required.includes(name)) fail('unsupported_capability');
+      unavailable.push(feature); continue;
+    }
+    if (feature.authorization === 'denied') fail('forbidden');
+    if (feature.authorization === 'unconfirmed' || feature.device === 'unconfirmed') fail('capability_unconfirmed');
+    if (feature.device === 'unavailable') fail('source_unavailable');
+    if ((name === 'execution-stream-v1' || name === 'execution-background-v1') && trusted.executionBinding === null) fail('stale_generation');
+    accepted.push(name);
+  }
+  // 再解析可信宿主的scope/binding，剥离外部可变对象的别名；原Scope仍不来自客户端。
+  return parse<TerminalBindingResponse>('BindingResponse', { contract: request.contract, requestId: request.requestId,
+    session: trusted.session, scope: trusted.scope, executionBinding: trusted.executionBinding, accepted, unavailable,
+    outputAuthority: accepted.includes('execution-stream-v1') ? 'tool-output' : 'session-events', limits: trusted.limits });
+}

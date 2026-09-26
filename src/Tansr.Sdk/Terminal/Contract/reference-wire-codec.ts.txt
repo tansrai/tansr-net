@@ -1,0 +1,32 @@
+/** 独立终端合同复用SDK2有界匹配器与原错误类型，不建立另一套编解码。 */
+import { clientFail, validateWireNamed } from '../sdk2/wire-codec.js';
+import { TERMINAL_WIRE_SCHEMA } from './wire-schema-generated.js';
+import type { TerminalOutputStatus } from './wire-types-generated.js';
+
+export function validateTerminalNamed<T>(name: string, value: unknown): T {
+  if (!Object.hasOwn(TERMINAL_WIRE_SCHEMA, name)) clientFail();
+  return validateWireNamed<T>(name, value, TERMINAL_WIRE_SCHEMA);
+}
+
+/** 状态的跨字段约束独立于schema；仅校验声明自洽，不证明真实耐久或取得输出权限。 */
+export function validateTerminalOutputStatus(value: unknown): TerminalOutputStatus {
+  const status = validateTerminalNamed<TerminalOutputStatus>('OutputStatus', value);
+  const { acceptedThrough, durableThrough, retainedFrom, nextByteOffset, seal, state } = status;
+  if (durableThrough !== null && (acceptedThrough === null || BigInt(durableThrough) > BigInt(acceptedThrough))) clientFail();
+  if (retainedFrom !== null && (acceptedThrough === null || BigInt(retainedFrom) > BigInt(acceptedThrough))) clientFail();
+  if (nextByteOffset === null) {
+    if (state !== 'unavailable' || acceptedThrough !== null || durableThrough !== null || retainedFrom !== null || seal !== null) clientFail();
+  } else if (acceptedThrough === null && nextByteOffset !== '0') clientFail();
+  if (acceptedThrough !== null && (nextByteOffset === null || BigInt(nextByteOffset) < BigInt(acceptedThrough) + 1n)) clientFail();
+  if (seal !== null) {
+    if (seal.lastSeq !== acceptedThrough || seal.totalBytes !== nextByteOffset) clientFail();
+    if (seal.lastSeq === null && (seal.totalBytes !== '0' ||
+      seal.payloadDigest !== 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')) clientFail();
+  }
+  if (state === 'complete' && (seal === null || seal.truncated)) clientFail();
+  if (state === 'truncated' && (seal === null || !seal.truncated)) clientFail();
+  if (state === 'available' && (acceptedThrough !== null || seal !== null)) clientFail();
+  if (state === 'receiving' && (acceptedThrough === null || seal !== null)) clientFail();
+  if (state === 'gap' && acceptedThrough === null) clientFail();
+  return status;
+}

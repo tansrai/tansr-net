@@ -10,6 +10,8 @@ using Tansr.Sdk.Protocol;
 
 namespace Tansr.Sdk.Transport;
 
+internal enum InputErrorMode { None, Submit, Status }
+
 internal sealed class SessionAccess
 {
     internal SessionAccess(string token, string? principal) { Token = token; Principal = principal; }
@@ -28,7 +30,7 @@ internal sealed class SessionTransport : IDisposable
     private string? principal;
     private bool principalBound;
 
-    internal SessionTransport(TansrClientOptions options, HttpClient? injected)
+    internal SessionTransport(TansrClientOptions options, HttpClient? injected, bool ownsInjected = false)
     {
         if (options.BaseUri is null || !options.BaseUri.IsAbsoluteUri || options.BaseUri.AbsolutePath != "/" ||
             options.BaseUri.Query.Length != 0 || options.BaseUri.Fragment.Length != 0 || options.BaseUri.UserInfo.Length != 0)
@@ -43,7 +45,7 @@ internal sealed class SessionTransport : IDisposable
         principalProvider = options.PrincipalProvider;
         if ((options.SessionContract == SessionContract.Sdk2OffloadV1 || options.ExecutionScopeProvider is not null) && principalProvider is null)
             throw new ArgumentException("SDK2 requires a trusted PrincipalProvider.", nameof(options));
-        ownsClient = injected is null;
+        ownsClient = injected is null || ownsInjected;
         client = injected ?? new HttpClient(new HttpClientHandler
         { AllowAutoRedirect = false, UseCookies = false, AutomaticDecompression = DecompressionMethods.None })
         { Timeout = Timeout.InfiniteTimeSpan };
@@ -158,13 +160,32 @@ internal sealed class SessionTransport : IDisposable
         catch (IOException) { throw new TansrProtocolException("network_error"); }
     }
 
-    internal static async Task ThrowHttpAsync(HttpResponseMessage response, int maximum, CancellationToken cancellationToken, bool strictControl = false)
+    internal static async Task ThrowHttpAsync(HttpResponseMessage response, int maximum, CancellationToken cancellationToken, bool strictControl = false,
+        InputErrorMode inputErrorMode = InputErrorMode.None)
     {
         ExpectContent(response, "application/json");
         var bytes = await ReadBodyAsync(response, maximum, cancellationToken).ConfigureAwait(false);
-        var json = strictControl ? WireJson.DecodeControl(bytes, maximum) : SessionJson.Parse(bytes);
+        var json = strictControl ? SessionJson.Control(bytes, maximum) : SessionJson.Parse(bytes);
+        if (strictControl && json.TryGetProperty("protocol", out _))
+        {
+            try { WireJson.ValidateNamed("ErrorResponse", json); }
+            catch (WireProtocolException) { throw new TansrProtocolException("invalid_response"); }
+            if (json.GetProperty("status").GetInt32() != (int)response.StatusCode) throw new TansrProtocolException("invalid_response");
+            throw new TansrHttpException((int)response.StatusCode, json.GetProperty("code").GetString()!,
+                retryAction: json.GetProperty("retryAction").GetString(),
+                retryAfterMs: json.TryGetProperty("retryAfterMs", out var retryAfter) ? retryAfter.GetInt32() : (int?)null);
+        }
         string code = "invalid_response";
         string? scope = null, reason = null;
+        if (inputErrorMode != InputErrorMode.None && json.TryGetProperty("outcome", out var outcome) && outcome.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            var inputCode = SessionJson.Code(json, "code"); var state = outcome.GetString(); var status = (int)response.StatusCode;
+            var valid = inputErrorMode == InputErrorMode.Status
+                ? state == "rejected" && inputCode == "input_not_found" && status == 404
+                : state == "closed" ? status == 409
+                : state == "rejected" && status == (inputCode == "injection_limit" ? 429 : inputCode == "input_conflict" ? 409 : 422);
+            if (valid && inputCode is not null) throw new TansrHttpException(status, inputCode, inputOutcome: state);
+        }
         if (json.TryGetProperty("error", out var error) && error.ValueKind == System.Text.Json.JsonValueKind.Object)
         {
             code = SessionJson.Code(error, "code") ?? code;

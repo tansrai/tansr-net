@@ -11,7 +11,8 @@ using Tansr.Sdk.Transport;
 namespace Tansr.Sdk.Client;
 
 /// <summary>原生 Serve 客户端；副作用请求不自动重试。Dispose 只释放客户端资源，不关闭远端会话。</summary>
-/// <remarks>注入 HttpClient 时宿主必须禁用自动重定向、自动副作用重试和共享 Cookie；其生命周期归宿主。</remarks>
+/// <remarks>注入 HttpClient 时宿主必须禁用自动重定向、自动副作用重试和共享 Cookie；默认其生命周期归宿主。
+/// 显式 disposeInjectedClient=true 在客户端 Dispose 时一并释放；构造失败仍由调用方释放。</remarks>
 public sealed partial class TansrClient : IDisposable
 {
     private readonly SessionTransport transport;
@@ -28,13 +29,13 @@ public sealed partial class TansrClient : IDisposable
     private string? discoveredToken;
     private int disposed;
 
-    public TansrClient(TansrClientOptions options, HttpClient? injected = null)
+    public TansrClient(TansrClientOptions options, HttpClient? injected = null, bool disposeInjectedClient = false)
     {
         if (options is null) throw new ArgumentNullException(nameof(options));
         if (!Enum.IsDefined(typeof(SessionContract), options.SessionContract) || options.RequestTimeout <= TimeSpan.Zero ||
             options.RequestTimeout > TimeSpan.FromHours(24) || options.StreamIdleTimeout <= TimeSpan.Zero || options.StreamIdleTimeout > TimeSpan.FromHours(24) ||
             options.ReconnectDelay < TimeSpan.Zero || options.ReconnectDelay > TimeSpan.FromMinutes(1) ||
-            options.MaxResponseBytes < 1 || options.MaxResponseBytes > 32 * 1024 * 1024 || options.MaxEventBytes < 1 || options.MaxEventBytes > 2 * 1024 * 1024 ||
+            options.MaxResponseBytes < 1 || options.MaxResponseBytes > 32 * 1024 * 1024 || options.MaxEventBytes < 1 || options.MaxEventBytes > 32 * 1024 * 1024 ||
             options.MaxReconnectAttempts < 0 || options.MaxReconnectAttempts > 100)
             throw new ArgumentException("Invalid transport limits.", nameof(options));
         contract = options.SessionContract;
@@ -42,7 +43,7 @@ public sealed partial class TansrClient : IDisposable
         maxResponseBytes = options.MaxResponseBytes; maxEventBytes = options.MaxEventBytes;
         maxReconnectAttempts = options.MaxReconnectAttempts; reconnectDelay = options.ReconnectDelay;
         scopeProvider = options.ExecutionScopeProvider;
-        transport = new SessionTransport(options, injected);
+        transport = new SessionTransport(options, injected, disposeInjectedClient);
     }
 
     internal CancellationTokenSource RequestCancellation(CancellationToken cancellationToken, bool timed = true)
@@ -71,7 +72,7 @@ public sealed partial class TansrClient : IDisposable
             null, "application/json", null, null, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellationToken).ConfigureAwait(false);
         SessionTransport.ExpectContent(response, "application/json");
-        var value = WireJson.DecodeControl(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellationToken).ConfigureAwait(false));
+        var value = SessionJson.Control(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellationToken).ConfigureAwait(false), WireJson.MaximumControlBytes);
         if (value.ValueKind != JsonValueKind.Object || SessionJson.String(value, "protocol") != "sdk2-ext-v1" ||
             !value.TryGetProperty("contracts", out var contracts) || contracts.ValueKind != JsonValueKind.Array || contracts.GetArrayLength() > 2)
             throw new TansrProtocolException("invalid_response");
@@ -116,14 +117,16 @@ public sealed partial class TansrClient : IDisposable
             throw new TansrProtocolException("invalid_response");
     }
 
-    internal async Task<JsonElement> SendSessionAsync(HttpMethod method, string path, byte[]? body, CancellationToken cancellationToken, int requestLimit = 2 * 1024 * 1024)
+    internal async Task<JsonElement> SendSessionAsync(HttpMethod method, string path, byte[]? body, CancellationToken cancellationToken,
+        int requestLimit = 2 * 1024 * 1024, InputErrorMode inputErrorMode = InputErrorMode.None, int? expectedStatus = null)
     {
         if (body is not null && body.Length > requestLimit) throw new TansrProtocolException("payload_too_large");
         using var cancellation = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
         using var response = await transport.SendAsync(method, Route(path), access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token, inputErrorMode: inputErrorMode).ConfigureAwait(false);
+        if (expectedStatus.HasValue && (int)response.StatusCode != expectedStatus.Value) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
         var value = SessionJson.Parse(await SessionTransport.ReadBodyAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false));
         transport.AssertCurrent(access);
@@ -141,8 +144,11 @@ public sealed partial class TansrClient : IDisposable
     }
 
     /// <summary>严格 SDK2 控制传输；具名请求/响应及执行语义由对应协调器校验。</summary>
-    internal async Task<JsonElement> SendControlAsync(HttpMethod method, string relativePath, JsonElement? body, CancellationToken cancellationToken)
+    internal async Task<JsonElement> SendControlAsync(HttpMethod method, string relativePath, JsonElement? body, CancellationToken cancellationToken,
+        int responseMaximum = WireJson.MaximumControlBytes, int? expectedStatus = null)
     {
+        if (responseMaximum < 1 || responseMaximum > 32 * 1024 * 1024 || expectedStatus.HasValue && (expectedStatus < 200 || expectedStatus > 299))
+            throw new ArgumentOutOfRangeException(nameof(responseMaximum));
         byte[]? request = body.HasValue ? WireJson.EncodeControl(body.Value) : null;
         var expectedScope = WireJson.CanonicalString(ReadExecutionScope());
         using var cancellation = RequestCancellation(cancellationToken);
@@ -152,8 +158,9 @@ public sealed partial class TansrClient : IDisposable
         if (expectedScope != WireJson.CanonicalString(ReadExecutionScope())) throw new TansrProtocolException("context_changed");
         using var response = await transport.SendAsync(method, Route(relativePath), access, request, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, WireJson.MaximumControlBytes, cancellation.Token, true).ConfigureAwait(false);
+        if (expectedStatus.HasValue && (int)response.StatusCode != expectedStatus.Value) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
-        var value = WireJson.DecodeControl(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellation.Token).ConfigureAwait(false));
+        var value = SessionJson.Control(await SessionTransport.ReadBodyAsync(response, responseMaximum, cancellation.Token).ConfigureAwait(false), responseMaximum);
         transport.AssertCurrent(access);
         if (expectedScope != WireJson.CanonicalString(ReadExecutionScope())) throw new TansrProtocolException("context_changed");
         return value;

@@ -13,6 +13,22 @@ internal static class Program
 
     private static async Task<int> Main(string[] args)
     {
+        if (args.Length == 1 && args[0] == "--mcp")
+        {
+            using var shutdown = new CancellationTokenSource();
+            ConsoleCancelEventHandler handler = (_, e) => { e.Cancel = true; shutdown.Cancel(); };
+            Console.CancelKeyPress += handler;
+            try { await new NativeMcpServer().RunAsync(Console.OpenStandardInput(), Console.OpenStandardOutput(), shutdown.Token); return 0; }
+            catch (OperationCanceledException) when (shutdown.IsCancellationRequested) { return 0; }
+            catch (Exception error) { Console.Error.WriteLine(error.GetType().Name); return 2; }
+            finally { Console.CancelKeyPress -= handler; }
+        }
+        if (args.Length == 1 && args[0] == "--mcp-client")
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            try { Console.WriteLine((await NativeMcpDemo.RunAsync(deadline.Token)).GetRawText()); return 0; }
+            catch (Exception error) { Console.Error.WriteLine(ErrorCode(error)); return 2; }
+        }
         if (args.Contains("--help", StringComparer.Ordinal))
         {
             Console.WriteLine("Tansr 原生控制台\n环境：TANSR_SERVE_URL、TANSR_SESSION_TOKEN；可选 TANSR_ALLOW_HTTP_LOOPBACK=1、TANSR_RESUME_SESSION、TANSR_MODEL。\n命令：普通文字发送；/history /meta /compact /checkpoint /checkpoints /cancel /requests /allow <requestId> /deny <requestId> /answer <requestId> <答案JSON数组> /quit。\n无界面 --once <prompt> 会拒绝审批、以明确的无人值守说明回答提问，等待终态后关闭。Ctrl+C / SIGTERM 中断当前工作并有界收尾。票据不写入文件或日志。");
@@ -22,32 +38,29 @@ internal static class Program
         ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; stop.Cancel(); };
         Console.CancelKeyPress += cancel;
         using var term = !OperatingSystem.IsWindows() ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context => { context.Cancel = true; stop.Cancel(); }) : null;
-        TansrClient? client = null; AgentSession? session = null; Task? observation = null; NativeToolHost? nativeTools = null;
+        MediaWorkspace? media = null; ConsoleMediaCommands? mediaCommands = null; ExampleConnection? connection = null; TansrClient? client = null; AgentSession? session = null; Task? observation = null; NativeToolHost? nativeTools = null;
         using var view = new SessionView();
         var completed = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var once = args.Length >= 2 && args[0] == "--once";
         try
         {
-            var baseUrl = Required("TANSR_SERVE_URL");
-            client = new TansrClient(new TansrClientOptions
-            {
-                BaseUri = new Uri(baseUrl),
-                AllowInsecureLoopback = Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1",
-                TokenProvider = _ => Task.FromResult(Required("TANSR_SESSION_TOKEN")),
-            });
+            connection = await ExampleConnection.ConnectAsync(Environment.GetEnvironmentVariable("TANSR_SERVE_URL"),
+                _ => Task.FromResult(Required("TANSR_SESSION_TOKEN")), Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", stop.Token);
+            client = connection.Client;
             session = await client.CreateSessionAsync(new CreateSessionOptions
             {
                 Model = Environment.GetEnvironmentVariable("TANSR_MODEL"),
                 ResumeSessionId = Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"),
-                ClientTools = Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") == null ? NativeToolHost.Declarations : null,
+                ClientTools = Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") == null ? NativeToolHost.GetDeclarations(connection.NativeTools) : null,
             }, stop.Token);
             var active = session;
+            media = new MediaWorkspace(session); mediaCommands = new ConsoleMediaCommands(media, view, Write);
             nativeTools = new NativeToolHost(session, "Tansr.Console", (title, ct) =>
             {
                 ct.ThrowIfCancellationRequested();
                 if (Console.IsOutputRedirected || !OperatingSystem.IsWindows()) throw new InvalidOperationException("console_window_title_unavailable");
                 Console.Title = title; return Task.CompletedTask;
-            }, Write);
+            }, Write, connection.NativeTools);
             Write("session=" + session.Id);
             observation = ObserveAsync(active, view, nativeTools, once, completed, stop.Token);
             if (once)
@@ -62,7 +75,8 @@ internal static class Program
                 if (line == null || line == "/quit") break;
                 try
                 {
-                    if (line == "/history") Write((await active.GetHistoryAsync(stop.Token)).GetRawText());
+                    if (await mediaCommands.TryHandleAsync(line, stop.Token)) { }
+                    else if (line == "/history") Write((await active.GetHistoryAsync(stop.Token)).GetRawText());
                     else if (line == "/meta") Write((await active.GetMetadataAsync(stop.Token)).GetRawText());
                     else if (line == "/compact") Write((await active.CompactAsync(cancellationToken: stop.Token)).GetRawText());
                     else if (line == "/checkpoint") Write((await active.CheckpointAsync(cancellationToken: stop.Token)).GetRawText());
@@ -113,7 +127,9 @@ internal static class Program
             }
             stop.Cancel();
             if (observation != null) { try { await observation; } catch (Exception error) { Write("observer=" + ErrorCode(error)); } }
-            nativeTools?.Dispose(); client?.Dispose(); Console.CancelKeyPress -= cancel;
+            media?.Dispose(); nativeTools?.Dispose(); client?.Dispose();
+            if (connection != null) { try { await connection.CloseAsync(); } catch (Exception error) { Write("local_serve_cleanup_unconfirmed=" + ErrorCode(error)); } }
+            Console.CancelKeyPress -= cancel;
         }
     }
 

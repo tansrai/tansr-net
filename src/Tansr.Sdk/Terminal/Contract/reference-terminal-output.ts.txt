@@ -1,0 +1,132 @@
+/** SRV-02 内部输出观察窗。调用方须先鉴权并从原 operation 构造身份，不能用请求体创建窗口。 */
+import { createHash, type Hash } from 'node:crypto';
+import {
+  parseTerminalContract, type TerminalOutputBatchRequest, type TerminalOutputBlock,
+  type TerminalOutputSeal, type TerminalOutputStatus,
+} from './terminal-contract.generated.js';
+
+type Identity = Pick<TerminalOutputBatchRequest, 'session' | 'operation' | 'executorId' | 'connectionId'>;
+type OutputErrorCode = 'invalid_request' | 'binding_conflict' | 'revision_conflict' | 'payload_too_large' |
+  'output_gap' | 'integrity_mismatch' | 'capacity_exceeded';
+const MAX_SEQUENCE = 9223372036854775807n;
+const MAX_BATCH_BYTES = 65536;
+const MAX_RETAINED_BYTES = 8 * 1024 * 1024;
+const MAX_RETAINED_BLOCKS = 4096;
+
+export class TerminalOutputError extends Error {
+  constructor(readonly code: OutputErrorCode) { super(code); this.name = 'TerminalOutputError'; }
+}
+function fail(code: OutputErrorCode): never { throw new TerminalOutputError(code); }
+function parse<T>(name: string, value: unknown): T {
+  try { return parseTerminalContract<T>(name, value); }
+  catch { return fail('invalid_request'); }
+}
+function sameBlock(left: TerminalOutputBlock, right: TerminalOutputBlock): boolean {
+  return left.seq === right.seq && left.byteOffset === right.byteOffset && left.channel === right.channel &&
+    left.encoding === right.encoding && left.byteLength === right.byteLength &&
+    left.payloadDigest === right.payloadDigest && left.base64 === right.base64;
+}
+function sameSeal(left: TerminalOutputSeal, right: TerminalOutputSeal): boolean {
+  return left.lastSeq === right.lastSeq && left.totalBytes === right.totalBytes &&
+    left.payloadDigest === right.payloadDigest && left.truncated === right.truncated;
+}
+
+/** 仅观察事实，不授予执行权、不持久化、不推导工具成功。
+ * available 表示尚无输出；complete/truncated 仅表示输出封口，均不是进程终局。
+ * 窗口逐出后 state=gap 只说明旧原文不可完整回放，accepted 水位和已核验 seal 仍保留。
+ * 身份及块/状态均复制并冻结；哈希增量维护，窗口不保留无限历史或已逐出摘要表。 */
+export class TerminalOutputWindow {
+  readonly #identity: Identity;
+  readonly #maxRetainedBytes: number;
+  readonly #maxRetainedBlocks: number;
+  #blocks = new Map<bigint, TerminalOutputBlock>();
+  #encodings = new Map<TerminalOutputBlock['channel'], TerminalOutputBlock['encoding']>();
+  #retainedBytes = 0;
+  #nextSeq = 0n;
+  #nextByteOffset = 0n;
+  #hash: Hash = createHash('sha256');
+  #seal: TerminalOutputSeal | null = null;
+  #evicted = false;
+
+  constructor(identity: Identity, options: { maxRetainedBytes?: number; maxRetainedBlocks?: number } = {}) {
+    const trusted = parse<TerminalOutputBatchRequest>('OutputBatchRequest', {
+      contract: 'terminal-services-v1', ...identity, blocks: [], seal: null,
+    });
+    this.#identity = Object.freeze({ session: Object.freeze({ ...trusted.session }), operation: Object.freeze({ ...trusted.operation }),
+      executorId: trusted.executorId, connectionId: trusted.connectionId });
+    this.#maxRetainedBytes = options.maxRetainedBytes ?? MAX_RETAINED_BYTES;
+    this.#maxRetainedBlocks = options.maxRetainedBlocks ?? MAX_RETAINED_BLOCKS;
+    if (!Number.isSafeInteger(this.#maxRetainedBytes) || this.#maxRetainedBytes < 1 || this.#maxRetainedBytes > MAX_RETAINED_BYTES ||
+      !Number.isSafeInteger(this.#maxRetainedBlocks) || this.#maxRetainedBlocks < 1 || this.#maxRetainedBlocks > MAX_RETAINED_BLOCKS) fail('invalid_request');
+  }
+
+  status(): TerminalOutputStatus {
+    const first = this.#blocks.keys().next().value;
+    return Object.freeze({ contract: 'terminal-services-v1', operation: this.#identity.operation,
+      state: this.#evicted ? 'gap' : this.#seal ? (this.#seal.truncated ? 'truncated' : 'complete') : this.#nextSeq ? 'receiving' : 'available',
+      acceptedThrough: this.#nextSeq ? String(this.#nextSeq - 1n) : null,
+      durableThrough: null, retainedFrom: first === undefined ? null : String(first),
+      nextByteOffset: String(this.#nextByteOffset), seal: this.#seal });
+  }
+
+  /** 只有全部块、连续水位与封口都校验通过才提交；错误不留下部分接纳或逐出。 */
+  receive(value: unknown): TerminalOutputStatus {
+    const batch = parse<TerminalOutputBatchRequest>('OutputBatchRequest', value), identity = this.#identity;
+    if (batch.session.sessionContract !== identity.session.sessionContract || batch.session.sessionId !== identity.session.sessionId ||
+      batch.operation.operationId !== identity.operation.operationId || batch.operation.requestDigest !== identity.operation.requestDigest ||
+      batch.executorId !== identity.executorId || batch.connectionId !== identity.connectionId) fail('binding_conflict');
+    if (batch.blocks.reduce((sum, block) => sum + block.byteLength, 0) > MAX_BATCH_BYTES) fail('payload_too_large');
+
+    const blocks = new Map(this.#blocks), encodings = new Map(this.#encodings), hash = this.#hash.copy();
+    let nextSeq = this.#nextSeq, nextByteOffset = this.#nextByteOffset, retainedBytes = this.#retainedBytes;
+    let seal = this.#seal, evicted = this.#evicted;
+    for (const block of batch.blocks) {
+      const bytes = Buffer.from(block.base64, 'base64');
+      if (bytes.toString('base64') !== block.base64 || bytes.length !== block.byteLength ||
+        createHash('sha256').update(bytes).digest('hex') !== block.payloadDigest) fail('integrity_mismatch');
+      const seq = BigInt(block.seq);
+      if (seq < nextSeq) {
+        const retained = blocks.get(seq);
+        // 不为无界幂等保留已逐出块；无法核对时必须明确要求原操作对账。
+        if (!retained) fail('output_gap');
+        if (!sameBlock(retained, block)) fail('revision_conflict');
+        continue;
+      }
+      if (seal) fail('revision_conflict');
+      if (seq !== nextSeq) fail('output_gap');
+      if (BigInt(block.byteOffset) !== nextByteOffset) fail('integrity_mismatch');
+      // 每通道独立锁定首块编码，不能在 UTF-8 半字符后切到 binary 再切回。
+      const encoding = encodings.get(block.channel);
+      if (encoding !== undefined && encoding !== block.encoding) fail('revision_conflict');
+      encodings.set(block.channel, block.encoding);
+      const end = nextByteOffset + BigInt(bytes.length);
+      if (nextSeq > MAX_SEQUENCE || end > MAX_SEQUENCE) fail('capacity_exceeded');
+      hash.update(bytes); blocks.set(seq, Object.freeze({ ...block }));
+      nextSeq++; nextByteOffset = end; retainedBytes += bytes.length;
+    }
+    if (batch.seal) {
+      if (seal) {
+        if (!sameSeal(seal, batch.seal)) fail('revision_conflict');
+      } else {
+        if (batch.seal.lastSeq !== (nextSeq ? String(nextSeq - 1n) : null) || batch.seal.totalBytes !== String(nextByteOffset) ||
+          batch.seal.payloadDigest !== hash.copy().digest('hex')) fail('integrity_mismatch');
+        seal = Object.freeze({ ...batch.seal });
+      }
+    }
+    while (blocks.size > this.#maxRetainedBlocks || retainedBytes > this.#maxRetainedBytes) {
+      const first = blocks.entries().next().value!;
+      blocks.delete(first[0]); retainedBytes -= first[1].byteLength; evicted = true;
+    }
+    this.#blocks = blocks; this.#encodings = encodings; this.#hash = hash; this.#nextSeq = nextSeq; this.#nextByteOffset = nextByteOffset;
+    this.#retainedBytes = retainedBytes; this.#seal = seal; this.#evicted = evicted;
+    return this.status();
+  }
+
+  /** afterSeq 是已观察序号，不是持久确认。缺口时不能把剩余窗口冒充完整原文。 */
+  observe(afterSeq: string | null = null): { readonly blocks: readonly TerminalOutputBlock[]; readonly status: TerminalOutputStatus } {
+    const after = afterSeq === null ? -1n : BigInt(parse<string>('Sequence', afterSeq));
+    if (after >= this.#nextSeq || after + 1n < (this.#blocks.keys().next().value ?? this.#nextSeq)) fail('output_gap');
+    const blocks = Object.freeze([...this.#blocks].filter(([seq]) => seq > after).map(([, block]) => block));
+    return Object.freeze({ blocks, status: this.status() });
+  }
+}

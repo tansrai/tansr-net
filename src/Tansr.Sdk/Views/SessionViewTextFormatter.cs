@@ -18,7 +18,7 @@ public static class SessionViewTextFormatter
                 if (part.Kind == "thinking") text.Append("[thinking] ");
                 if (part.Kind == "toolCall")
                 {
-                    var tool = snapshot.Tools.FirstOrDefault(x => x.Id == part.ToolId);
+                    var tool = snapshot.Tools.FirstOrDefault(x => x.InstanceId == part.ToolInstanceId);
                     if (tool == null) continue;
                     text.Append('[').Append(tool.Name).Append(": ").Append(tool.Status).AppendLine("]");
                     if (!string.IsNullOrEmpty(tool.Progress)) text.AppendLine(tool.Progress);

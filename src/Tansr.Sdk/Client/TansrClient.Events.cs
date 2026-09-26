@@ -26,12 +26,13 @@ public sealed partial class TansrClient
     }
 
     internal async Task ObserveSessionAsync(AgentSession session, Func<AgentEvent, CancellationToken, Task> observer,
-        EventStreamOptions options, CancellationToken cancellationToken)
+        EventStreamOptions options, CancellationToken cancellationToken, Action? connected = null)
     {
         if (observer is null) throw new ArgumentNullException(nameof(observer));
         if (options is null) throw new ArgumentNullException(nameof(options));
         var cursor = new EventCursor { Id = options.LastEventId };
         if (cursor.Id is not null) cursor.Sequence = ParseEventId(cursor.Id);
+        var suffix = EventQuery(options);
         bool reconnect = options.Reconnect, stopOnGap = options.StopOnGap;
         using var observation = RequestCancellation(cancellationToken, false);
         int retries = 0;
@@ -40,7 +41,7 @@ public sealed partial class TansrClient
             observation.Token.ThrowIfCancellationRequested();
             try
             {
-                if (await ObserveConnectionAsync(session, observer, cursor, stopOnGap, observation.Token).ConfigureAwait(false)) return;
+                if (await ObserveConnectionAsync(session, observer, cursor, stopOnGap, suffix, connected, observation.Token).ConfigureAwait(false)) return;
                 if (!reconnect || retries >= maxReconnectAttempts) throw new TansrProtocolException("event_stream_disconnected");
             }
             catch (ObserverFailure failure) { failure.Cause.Throw(); throw; }
@@ -56,12 +57,12 @@ public sealed partial class TansrClient
     }
 
     private async Task<bool> ObserveConnectionAsync(AgentSession session, Func<AgentEvent, CancellationToken, Task> observer,
-        EventCursor cursor, bool stopOnGap, CancellationToken cancellationToken)
+        EventCursor cursor, bool stopOnGap, string suffix, Action? connected, CancellationToken cancellationToken)
     {
         using var connection = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(connection.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, connection.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(HttpMethod.Get, Route(SessionPath(session.Id)) + "/events", access,
+        using var response = await transport.SendAsync(HttpMethod.Get, Route(SessionPath(session.Id)) + "/events" + suffix, access,
             null, "text/event-stream", null, cursor.Id, connection.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, connection.Token).ConfigureAwait(false);
         if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
@@ -70,6 +71,7 @@ public sealed partial class TansrClient
         using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
         using var closeOnCancel = cancellationToken.Register(stream.Dispose);
         using var decoder = new SseDecoder(maxEventBytes);
+        connected?.Invoke();
         var bytes = new byte[8192];
         for (; ; )
         {
@@ -121,6 +123,21 @@ public sealed partial class TansrClient
                 if (name == "session.ended") return true;
             }
         }
+    }
+
+    private static string EventQuery(EventStreamOptions options)
+    {
+        if (options.Exclude is null || options.Exclude.Count == 0) return string.Empty;
+        if (options.Exclude.Count > 16) throw new ArgumentException("At most 16 event filters are allowed.", nameof(options));
+        var values = new string[options.Exclude.Count];
+        for (var i = 0; i < values.Length; i++)
+        {
+            var value = options.Exclude[i];
+            if (string.IsNullOrEmpty(value) || value[0] < 'a' || value[0] > 'z') throw new ArgumentException("Invalid event filter.", nameof(options));
+            foreach (var c in value) if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_')) throw new ArgumentException("Invalid event filter.", nameof(options));
+            values[i] = value;
+        }
+        return "?exclude=" + Uri.EscapeDataString(string.Join(",", values));
     }
 
     private static async Task NotifyAsync(Func<AgentEvent, CancellationToken, Task> observer, AgentEvent item, CancellationToken cancellationToken)

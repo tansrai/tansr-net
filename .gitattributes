@@ -4,3 +4,6 @@
 # Byte-for-byte upstream evidence: do not normalize line endings on checkout.
 contract/** -text -whitespace
 doc/compatibility/source/** -text -whitespace
+src/Tansr.Sdk/Terminal/Contract/** -text -whitespace
+src/Tansr.Sdk/Cache/Contract/** -text -whitespace
+src/Tansr.Sdk/Client/Contract/** -text -whitespace

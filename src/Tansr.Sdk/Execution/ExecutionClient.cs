@@ -6,7 +6,7 @@ using Tansr.Sdk.Protocol;
 namespace Tansr.Sdk.Execution;
 
 /// <summary>已冻结执行端点的客户端；与会话客户端共用认证和主体守卫。</summary>
-public sealed class ExecutionClient : IExecutionClient
+public sealed class ExecutionClient : IDeviceExecutionClient
 {
     private readonly TansrClient _client;
     public ExecutionClient(TansrClient client) => _client = client ?? throw new ArgumentNullException(nameof(client));

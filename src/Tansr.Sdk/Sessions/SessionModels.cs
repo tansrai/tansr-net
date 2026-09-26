@@ -9,6 +9,10 @@ public sealed class CreateSessionOptions
     public string? Model { get; set; }
     public string? Prompt { get; set; }
     public string? Profile { get; set; }
+    /// <summary>原冻结归因标签，至多 16 项；不改变核心行为。</summary>
+    public IReadOnlyDictionary<string, string>? Labels { get; set; }
+    /// <summary>仅在 Serve 认证策略允许时使用；不能代替可信主体认证。</summary>
+    public string? EndUserId { get; set; }
     public string? CapabilitiesProfile { get; set; }
     public string? ResumeSessionId { get; set; }
     public string? ForkSessionId { get; set; }
@@ -92,4 +96,6 @@ public sealed class EventStreamOptions
     public bool StopOnGap { get; set; } = true;
     /// <summary>仅重连只读观察连接，从不自动重发消息、审批或工具回执。</summary>
     public bool Reconnect { get; set; } = true;
+    /// <summary>冻结事件族过滤；控制帧和缺口帧始终保留。单轮辅助不采用过滤。</summary>
+    public IReadOnlyList<string>? Exclude { get; set; }
 }

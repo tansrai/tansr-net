@@ -1,0 +1,25 @@
+{
+  "repository": "tansr-cli",
+  "commit": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
+  "purpose": "Archive binding events independent of session SSE",
+  "files": [
+    {
+      "source": "packages/api-client/src/sdk2/event-frame.ts",
+      "target": "event-frame.ts",
+      "bytes": 14952,
+      "sha256": "0e59e163edd17aac72ab91ff14acc7d3ca8d4bffcb7955748c283839c2b5836a"
+    },
+    {
+      "source": "packages/api-client/src/sdk2/strict-event-stream.ts",
+      "target": "strict-event-stream.ts",
+      "bytes": 4729,
+      "sha256": "34bdb254711cf69e54d117475b5d0551bf983f19180084f7a5b32c5750ac7f69"
+    },
+    {
+      "source": "packages/api-client/src/sdk2/event-connection.ts",
+      "target": "event-connection.ts",
+      "bytes": 16217,
+      "sha256": "7f421cbf5854a83e2822ba85bc2560f9c0b47a8d0977afaeba6da11a366cbf09"
+    }
+  ]
+}

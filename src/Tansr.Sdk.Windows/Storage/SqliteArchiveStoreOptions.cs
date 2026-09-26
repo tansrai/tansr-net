@@ -11,7 +11,7 @@ public sealed class ArchiveStoreLimits
     public int MaxBatchBytes { get; set; } = 33554432;
 }
 
-/// <summary>既有 SDK2 同步文件族的 source 接收器；不声明缓存设备或跨组织读取支持。</summary>
+/// <summary>既有 SDK2 同步文件族的 source/cache 介质；不声明跨组织共享读取支持。</summary>
 public sealed class SqliteArchiveStoreOptions
 {
     public string Path { get; set; } = "";
@@ -19,6 +19,8 @@ public sealed class SqliteArchiveStoreOptions
     public JsonElement Identity { get; set; }
     /// <summary>原 replica 对象，包含 replicationId 及 primary/replica role。</summary>
     public JsonElement Replica { get; set; }
+    /// <summary>原持久 syncRole：source 可接收上游档案并确认 ACK，cache 仅接收原同步页。重开不能换角色。</summary>
+    public string SyncRole { get; set; } = "source";
     public ArchiveStoreLimits Limits { get; set; } = new ArchiveStoreLimits();
     public int MaxPages { get; set; } = 65536;
     public Func<JsonElement> ReadContext { get; set; } = null!;

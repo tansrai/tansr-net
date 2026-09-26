@@ -20,21 +20,35 @@ public sealed class WindowsProcessExecutorTests : IDisposable, IClassFixture<Win
     [Fact]
     public async Task DeliversUtf8AndSeparateStreamsBeforeProcessExits()
     {
-        var request = Request("unicode");
+        var releaseName = @"Local\tansr-process-output-" + Guid.NewGuid().ToString("N");
+        using var release = new EventWaitHandle(false, EventResetMode.ManualReset, releaseName);
+        var request = Request("unicode", releaseName);
         request.ChunkBytes = 1;
         request.MaxPendingChunks = 128;
         var chunks = new List<WindowsProcessOutputChunk>();
-        var first = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var streaming = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var liveStdout = new StringBuilder();
+        var liveStderr = new StringBuilder();
         var run = new WindowsProcessExecutor().ExecuteAsync(request, (chunk, _) =>
         {
             chunks.Add(chunk);
-            first.TrySetResult(true);
+            (chunk.Stream == WindowsProcessOutputStream.StandardOutput ? liveStdout : liveStderr).Append(chunk.Text);
+            if (liveStdout.ToString() == "中文🙂" && liveStderr.ToString() == "error-stream") streaming.TrySetResult(true);
             return Task.CompletedTask;
         });
 
-        await first.Task.WaitAsync(TimeSpan.FromSeconds(15));
-        Assert.False(run.IsCompleted);
-        var result = await run;
+        WindowsProcessResult result;
+        try
+        {
+            // 子进程输出后必须等待此测试确认双流已经可见，不能靠延长 sleep 维持“仍在运行”。
+            await streaming.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.False(run.IsCompleted);
+        }
+        finally
+        {
+            release.Set();
+            result = await run;
+        }
         Assert.Equal(WindowsProcessTermination.Exited, result.Termination);
         Assert.Equal(0, result.ExitCode);
         Assert.True(result.CleanupConfirmed);
@@ -359,7 +373,13 @@ public sealed class WindowsProcessTestProgram : IDisposable
                     case "unicode":
                         var output = Console.OpenStandardOutput();
                         foreach(var value in Encoding.UTF8.GetBytes("中文🙂")) { output.WriteByte(value); output.Flush(); Thread.Sleep(20); }
-                        Console.Error.Write("error-stream"); Thread.Sleep(800); Console.Write("done"); break;
+                        Console.Error.Write("error-stream"); Console.Error.Flush();
+                        if(args.Length>1) {
+                            using(var release=EventWaitHandle.OpenExisting(args[1])) {
+                                if(!release.WaitOne(15000)) { Environment.ExitCode=73; return; }
+                            }
+                        } else Thread.Sleep(800);
+                        Console.Write("done"); break;
                     case "binary":
                         var binary = Console.OpenStandardOutput();
                         foreach(var value in new byte[] { 0, 255, 240, 159, 153, 130, 128, 65 }) { binary.WriteByte(value); binary.Flush(); }

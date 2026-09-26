@@ -1,0 +1,48 @@
+{
+  "format": "tansr-terminal-candidate-lock-v1",
+  "contract": "terminal-services-v1",
+  "revision": "2026-09-26.candidate-4",
+  "sourceRepository": "tansr-cli",
+  "sourceCommitted": false,
+  "sourceBaseCommit": "b2cd6641e1886d9e74439e3b7623be57bc3247ba",
+  "status": "internal-candidate-not-frozen-not-public",
+  "files": [
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/terminal-services-v1.schema.json",
+      "source": "doc/rfc/terminal-services-v1.schema.json",
+      "bytes": 55273,
+      "sha256": "5973fde3f029f9c92794cde385e4041a150de0ace476bb2f6ff2c63c2a166dd0"
+    },
+    {
+      "snapshot": "tests/Tansr.Sdk.Tests/Terminal/Fixtures/terminal-services-v1.golden.json",
+      "source": "doc/rfc/terminal-services-v1.golden.json",
+      "bytes": 56086,
+      "sha256": "c277bbda6e73562d06c3d2d4e3508ecf3934036bb12f1ded49a0afbd16fbb317"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-wire-codec.ts.txt",
+      "source": "packages/api-client/src/terminal/wire-codec.ts",
+      "bytes": 2263,
+      "sha256": "08fae229d7bfadd5b14a46ad92aaaa432659351e3659eb3d11c88cf6e76f279b"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-output.ts.txt",
+      "source": "packages/server/src/v2/terminal-output.ts",
+      "bytes": 8177,
+      "sha256": "bdc4c4dc4f18aa22874b609f940f438a1e1455f7d5d30e5e96c4b64bc0187d57"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-capabilities.ts.txt",
+      "source": "packages/server/src/v2/terminal-capabilities.ts",
+      "bytes": 5197,
+      "sha256": "431c151a1b12f3bdce1534afac170baf0b1c8b7c525e1df524f454e4cd10fb80"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-routes.ts.txt",
+      "source": "packages/server/src/v2/terminal-routes.ts",
+      "bytes": 18918,
+      "sha256": "739d0429738f3a2ed6c73167b98b0ac3bb17810f417a0c7e1484d420eb4f4662"
+    }
+  ],
+  "sourceWorktreeSnapshot": true
+}

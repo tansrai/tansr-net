@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Transport;
@@ -22,12 +23,29 @@ internal static class SessionRequestWriter
             throw new ArgumentException("Budgets must be positive and representable.", nameof(options));
         if (options.ClientTools.HasValue && options.ClientTools.Value.ValueKind != JsonValueKind.Array)
             throw new ArgumentException("clientTools must be an array.", nameof(options));
+        if (options.Labels?.Count > 16) throw new ArgumentException("At most 16 labels are allowed.", nameof(options));
+        if (options.EndUserId is not null)
+        {
+            if (options.EndUserId.Length < 1 || options.EndUserId.Length > 128 || options.EndUserId.Any(c => c < 33 || c > 126))
+                throw new ArgumentException("Invalid endUserId.", nameof(options));
+        }
         return SessionJson.Object(w =>
         {
             SessionJson.Optional(w, "requestId", options.RequestId);
             SessionJson.Optional(w, "model", options.Model); SessionJson.Optional(w, "prompt", options.Prompt);
             SessionJson.Optional(w, "profile", options.Profile); SessionJson.Optional(w, "capabilitiesProfile", options.CapabilitiesProfile);
             SessionJson.Optional(w, "cwd", options.Cwd);
+            if (options.EndUserId is not null) { w.WriteStartObject("endUser"); w.WriteString("id", options.EndUserId); w.WriteEndObject(); }
+            if (options.Labels is not null)
+            {
+                w.WriteStartObject("labels");
+                foreach (var pair in options.Labels)
+                {
+                    if (pair.Key is null || pair.Key.Length > 64 || pair.Value is null || pair.Value.Length > 256) throw new ArgumentException("Invalid label.", nameof(options));
+                    SessionJson.Unicode(pair.Key); SessionJson.Unicode(pair.Value); w.WriteString(pair.Key, pair.Value);
+                }
+                w.WriteEndObject();
+            }
             if (options.ResumeSessionId is not null)
             { SessionJson.Segment(options.ResumeSessionId); w.WriteStartObject("resume"); w.WriteString("sessionId", options.ResumeSessionId); w.WriteEndObject(); }
             if (options.ForkSessionId is not null)
@@ -49,6 +67,26 @@ internal static class SessionRequestWriter
             if (options.ClientTools.HasValue) { w.WritePropertyName("clientTools"); options.ClientTools.Value.WriteTo(w); }
         });
     }
+
+    internal static CreateSessionOptions Copy(CreateSessionOptions? value) => value is null ? new CreateSessionOptions() : new CreateSessionOptions
+    {
+        Model = value.Model,
+        Prompt = value.Prompt,
+        Profile = value.Profile,
+        Labels = value.Labels,
+        EndUserId = value.EndUserId,
+        CapabilitiesProfile = value.CapabilitiesProfile,
+        ResumeSessionId = value.ResumeSessionId,
+        ForkSessionId = value.ForkSessionId,
+        ForkCheckpointId = value.ForkCheckpointId,
+        RequestId = value.RequestId,
+        Cwd = value.Cwd,
+        ThinkingBudget = value.ThinkingBudget,
+        MaxUsd = value.MaxUsd,
+        MaxTokens = value.MaxTokens,
+        Tools = value.Tools,
+        ClientTools = value.ClientTools
+    };
 
     internal static void Identifier(string? value, string name)
     {

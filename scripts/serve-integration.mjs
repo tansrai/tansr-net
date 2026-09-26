@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { fork, spawn, execFileSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -56,12 +56,15 @@ function sourceEvidence() {
     }
   }
   const revision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', windowsHide: true }).trim();
-  const paths = ['packages/server/test/v2-helpers.ts', 'packages/server/test/helpers.ts',
+  const paths = ['packages/server/test/v2-helpers.ts', 'packages/server/test/helpers.ts', 'packages/server/test/fake-platform-fetch.ts', 'doc/rfc/sdk2-ext-v1.schema.json',
     ...Array.from(packages.keys()).flatMap(name => [`packages/${name}/src`, `packages/${name}/package.json`])];
   const dirty = execFileSync('git', ['status', '--porcelain', '--', ...paths], { cwd: source, encoding: 'utf8', windowsHide: true }).trim();
   assert.equal(dirty, '', 'Use a clean source snapshot for reproducible Serve acceptance. Commit/choose that source separately.');
   return { revision, sourceEntrySha256: sha(sourceFile('packages/server/src/index.ts')),
     sourceFixtureSha256: sha(sourceFile('packages/server/test/v2-helpers.ts')), sourceResolutions: resolutions.length,
+    publicFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')),
+    syntheticPlatformSha256: sha(sourceFile('packages/server/test/fake-platform-fetch.ts')),
+    archiveSchemaSha256: sha(sourceFile('doc/rfc/sdk2-ext-v1.schema.json')),
     sourceResolutionSha256: createHash('sha256').update(resolutions.sort().join('\n')).digest('hex') };
 }
 
@@ -140,19 +143,27 @@ async function fixture() {
       }
     }
   });
+  const authenticate = req => {
+    if (Date.now() > expiresAt) return null;
+    if (matches(req.headers.authorization, `Bearer ${token}`)) return { endUserId: 'net-integration-user' };
+    if (matches(req.headers.authorization, `Bearer ${otherToken}`)) return { endUserId: 'net-integration-other' };
+    return null;
+  };
+  const { startPublicFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')).href);
+  const publicFixture = await startPublicFixture({ source, directory: required('TANSR_SERVE_TEST_DIRECTORY'), authenticate });
   let closing;
-  const close = () => closing ??= server.close();
+  const close = () => closing ??= (async () => { await server.close(); return await publicFixture.close(); })();
   process.on('message', async message => {
     if (message?.type !== 'stop') return;
     try {
-      await close();
+      const publicEvidence = await close();
       process.send({ type: 'closed', sessions: factory.handles.length, sends: factory.handles.reduce((n, h) => n + h.sends.length, 0),
-        interrupts: factory.handles.reduce((n, h) => n + h.interrupts, 0), requests });
+        interrupts: factory.handles.reduce((n, h) => n + h.interrupts, 0), requests, publicEvidence });
       process.disconnect();
     } catch (error) { process.stderr.write(error.message + '\n'); process.exitCode = 1; process.disconnect(); }
   });
   process.on('disconnect', () => { void close(); });
-  process.send({ type: 'ready', url: server.url });
+  process.send({ type: 'ready', url: server.url, publicUrl: publicFixture.url });
 }
 
 function waitMessage(child, type, timeoutMs = 30000) {
@@ -169,8 +180,12 @@ function waitMessage(child, type, timeoutMs = 30000) {
 async function run() {
   const evidence = sourceEvidence();
   const token = randomBytes(32).toString('base64url'), otherToken = randomBytes(32).toString('base64url');
+  const artifactRoot = resolve(repository, 'artifacts/serve-integration'); mkdirSync(artifactRoot, { recursive: true });
+  const directory = mkdtempSync(resolve(artifactRoot, 'run-'));
+  writeFileSync(resolve(directory, 'owner.json'), JSON.stringify({ task: 'NET-02-public-Serve-integration', createdAt: new Date().toISOString(),
+    purpose: 'Synthetic acceptance data and original SQLite receipts, retained for reconciliation; contains no access tokens.', ...evidence }, null, 2));
   const env = isolatedEnvironment({ TANSR_SERVE_SOURCE: source, TANSR_SERVE_SOURCE_SHA: evidence.revision,
-    TANSR_SERVE_TEST_TOKEN: token, TANSR_SERVE_TEST_OTHER_TOKEN: otherToken, TANSR_SERVE_TEST_EXPIRES: String(Date.now() + 300000) });
+    TANSR_SERVE_TEST_TOKEN: token, TANSR_SERVE_TEST_OTHER_TOKEN: otherToken, TANSR_SERVE_TEST_DIRECTORY: directory, TANSR_SERVE_TEST_EXPIRES: String(Date.now() + 300000) });
   const child = own(fork(script, ['--fixture'], { cwd: source, env, windowsHide: true, detached: process.platform !== 'win32',
     execArgv: ['--import', pathToFileURL(sourceFile('node_modules/tsx/dist/loader.mjs')).href],
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'] }));
@@ -184,9 +199,9 @@ async function run() {
       paidSampling: false, ...evidence }));
     const args = ['test', resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj'),
       '--no-build', '--no-restore', '--configuration', process.env.TANSR_INTEGRATION_CONFIGURATION ?? 'Release',
-      '--filter', 'FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSourceIntegrationTests', '--logger', 'console;verbosity=normal'];
+      '--filter', 'FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSourceIntegrationTests|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServePublicHostIntegrationTests', '--logger', 'console;verbosity=normal'];
     const test = own(spawn(process.env.TANSR_DOTNET ?? 'dotnet', args, { cwd: repository, shell: false, windowsHide: true,
-      detached: process.platform !== 'win32', env: { ...env, TANSR_SERVE_TEST_URL: url.origin }, stdio: 'inherit' }));
+      detached: process.platform !== 'win32', env: { ...env, TANSR_SERVE_TEST_URL: url.origin, TANSR_SERVE_PUBLIC_URL: ready.publicUrl }, stdio: 'inherit' }));
     exitCode = await new Promise((resolveExit, reject) => {
       const timeout = setTimeout(() => { terminateTree(test); reject(new Error('Serve integration test deadline exceeded.')); }, 120000);
       test.once('error', error => { clearTimeout(timeout); reject(error); });
@@ -204,9 +219,20 @@ async function run() {
           assert.equal(result.interrupts, 0, 'Observation cancellation unexpectedly interrupted the controlled session.');
           assert.ok(result.requests.some(r => r.path.endsWith('/events') && r.lastEventId === '0'), 'Last-Event-ID did not reach Serve.');
           assert.ok(result.requests.every(r => r.path.startsWith('/v2/')), 'SDK1 default escaped the original session family.');
+          assert.equal(result.publicEvidence.exchanges, 3, 'Real kernel/device/material flow did not run.');
+          for (const suffix of ['/initialize', '/execution-bindings', '/receipts', '/archive/records', '/archive/acks', '/material-responses'])
+            assert.ok(result.publicEvidence.routes.some(path => path.endsWith(suffix)), `Missing public product route: ${suffix}`);
         }
         console.log(JSON.stringify({ acceptance: 'Serve-route-evidence', sessions: result.sessions, sends: result.sends,
           interrupts: result.interrupts, requests: result.requests.length, passed: exitCode === 0 }));
+        const routes = result.publicEvidence.routes;
+        const routeCounts = Object.fromEntries([...new Set(routes.map(path => path.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact')))]
+          .map(path => [path, routes.filter(actual => actual.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact') === path).length]));
+        console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
+          exchanges: result.publicEvidence.exchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
+        writeFileSync(resolve(directory, 'result.json'), JSON.stringify({ source: evidence, passed: exitCode === 0,
+          legacy: { sessions: result.sessions, sends: result.sends, interrupts: result.interrupts, requests: result.requests.length },
+          public: { ...result.publicEvidence, authorizationChecksByRoute: routeCounts } }, null, 2));
       } finally { terminateTree(child); }
     } else terminateTree(child);
   }

@@ -39,6 +39,9 @@ internal sealed class AssistantWindow : Window
     private string _currentToken = "";
     private AgentSession? _session;
     private TansrClient? _client;
+    private ExampleConnection? _connection;
+    private MediaWorkspace? _media;
+    private MediaWindow? _mediaWindow;
     private SessionView? _view;
     private IDisposable? _subscription;
     private CancellationTokenSource? _lifetime;
@@ -61,10 +64,10 @@ internal sealed class AssistantWindow : Window
             Button("状态", () => ShowAsync("会话状态", _session!.GetMetadataAsync())),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())),
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
-            Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
+            Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
         top.Children.Add(new TextBlock
         {
-            Text = "已接通：会话流、图片输入、取消、审批/提问、历史与快照。动态切模/思考、完整记忆管理、本地 Serve 自动启动与媒体播放仍待对应能力接线。",
+            Text = "已接通：会话流、图片输入、取消、审批/提问、历史与快照。动态切模/思考、完整记忆管理、设备工具绑定与完整记忆管理仍需宿主可信配置。",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 7),
         });
@@ -119,21 +122,17 @@ internal sealed class AssistantWindow : Window
     private async Task ConnectAsync()
     {
         Volatile.Write(ref _currentToken, _token.Password);
-        var client = new TansrClient(new TansrClientOptions
-        {
-            BaseUri = new Uri(_endpoint.Text, UriKind.Absolute),
-            AllowInsecureLoopback = _loopback.IsChecked == true,
-            TokenProvider = _ => Task.FromResult(Volatile.Read(ref _currentToken)),
-        });
+        var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.IsChecked == true);
+        var client = connection.Client;
         AgentSession session;
-        try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.Declarations : null }); }
-        catch { client.Dispose(); throw; }
-        _client = client; _session = session; _resume.Text = session.Id; _closeFailure = null;
+        try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.GetDeclarations(connection.NativeTools) : null }); }
+        catch { await connection.CloseAsync(); throw; }
+        _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         _lifetime = new CancellationTokenSource();
         _nativeTools = new NativeToolHost(session, "Tansr.WPF", async (title, ct) =>
         {
             await Dispatcher.InvokeAsync(() => { ct.ThrowIfCancellationRequested(); Title = title; }, DispatcherPriority.Normal, ct);
-        }, code => Dispatcher.BeginInvoke(new Action(() => _status.Text = code)));
+        }, code => Dispatcher.BeginInvoke(new Action(() => _status.Text = code)), connection.NativeTools);
         _view = new SessionView(new SessionViewOptions
         {
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
@@ -153,6 +152,7 @@ internal sealed class AssistantWindow : Window
 
     private void Render(SessionViewSnapshot snapshot)
     {
+        _media?.Register(snapshot);
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.ScrollToEnd();
         var selected = (_requests.SelectedItem as RequestItem)?.Request.Id;
         var keys = snapshot.PendingRequests.Select(x => x.Id).ToArray();
@@ -161,6 +161,14 @@ internal sealed class AssistantWindow : Window
             _requests.ItemsSource = snapshot.PendingRequests.Select(x => new RequestItem(x)).ToArray();
             _requests.SelectedItem = _requests.Items.Cast<RequestItem>().FirstOrDefault(x => x.Request.Id == selected) ?? _requests.Items.Cast<RequestItem>().FirstOrDefault();
         }
+    }
+
+    private Task OpenMediaAsync()
+    {
+        if (_mediaWindow != null) { _mediaWindow.Activate(); return Task.CompletedTask; }
+        var session = _session;
+        _mediaWindow = new MediaWindow(_media!, text => { if (ReferenceEquals(_session, session)) _draft.Text += (_draft.Text.Length == 0 ? "" : Environment.NewLine) + text; }, _draft.Text) { Owner = this };
+        _mediaWindow.Closed += (_, _) => _mediaWindow = null; _mediaWindow.Show(); return Task.CompletedTask;
     }
 
     private async Task SendAsync()
@@ -249,12 +257,16 @@ internal sealed class AssistantWindow : Window
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
         _lifetime!.Cancel();
         if (_observation != null) await _observation;
-        _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose(); _lifetime.Dispose(); _client!.Dispose();
+        _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
+        _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
+        if (_connection != null) await _connection.CloseAsync(); _connection = null;
+        _lifetime?.Dispose(); _lifetime = null;
         _session = null; _client = null; _view = null; _status.Text = "会话关闭请求已确认；未删除历史。";
     }
 
     private async Task DetachAsync()
     {
+        var ownedLocalServe = _connection?.OwnsLocalServe == true;
         // 不调用 interrupt/close/delete：明确释放本机观察和宿主资源，远端状态仍须以后查询。
         _lifetime?.Cancel();
         if (_observation != null) await _observation;
@@ -262,9 +274,13 @@ internal sealed class AssistantWindow : Window
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token); }
         catch (Exception error) { cleanupFailure = ErrorText(error); }
+        _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
         _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
-        _lifetime?.Dispose(); _client?.Dispose(); _session = null; _client = null; _view = null;
-        _status.Text = "已断开本机连接，可正常退出；未关闭或删除远端会话，远端工作可能继续。" +
+        _lifetime?.Dispose(); _lifetime = null;
+        try { if (_connection != null) await _connection.CloseAsync(); }
+        catch (Exception error) { cleanupFailure = ErrorText(error); }
+        finally { _connection = null; _session = null; _client = null; _view = null; }
+        _status.Text = (ownedLocalServe ? (cleanupFailure == null ? "已断开并回收本实例启动的本地 Serve；未删除历史。" : "已断开本机连接；本地 Serve 或 MCP 收尾未确认，可退出，未删除历史。") : "已断开本机连接，可正常退出；未关闭或删除远端会话，远端工作可能继续。") +
             (_closeFailure == null ? "" : " 上次远端关闭未确认：" + _closeFailure) +
             (cleanupFailure == null ? "" : " 本机工具收尾未确认：" + cleanupFailure);
     }

@@ -1,0 +1,68 @@
+{
+  "repository": "tansr-cli",
+  "status": "private-candidate-unreleased",
+  "files": [
+    {
+      "source": "doc/rfc/sdk2-cache-v1.schema.json",
+      "target": "sdk2-cache-v1.baseline.schema.json",
+      "bytes": 70960,
+      "sha256": "a2b2c7c08bfcab934e6c184d946a62e44094dfa14546ff54be8ebbaecc20da07",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/server/src/sdk2/cache-routes.ts",
+      "target": "cache-routes.ts",
+      "bytes": 8104,
+      "sha256": "37a82418eb22f0c3072df6a1e9bb463118dd0ce3a2232f9a44ccd029145cf09a",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/server/src/sdk2/cache-link.ts",
+      "target": "cache-link.ts",
+      "bytes": 39147,
+      "sha256": "2cc8badab48bfe738dacc4ddf7dfb4b87f3de5d6507c65ace549cd0bf9c93c33",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/providers/src/twp/cache-wire.ts",
+      "target": "cache-wire.ts",
+      "bytes": 7313,
+      "sha256": "7e6b9e67d6762cf84f81968c8afbaa03483a6ad63f4703f4df8d023fb7460206",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/providers/src/twp/cache-control-json.ts",
+      "target": "cache-control-json.ts",
+      "bytes": 9525,
+      "sha256": "c806dad93830edf9cc9f54595e137bf48b7609fea56d02db2363682d89881ed6",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/providers/src/internal/cache-wire.ts",
+      "target": "internal-cache-wire.ts",
+      "bytes": 188,
+      "sha256": "a17303bd208701c1e0d72d93c7b519cc61509ba747165d993ad36ee901009946",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "packages/providers/src/twp/cache-client.ts",
+      "target": "cache-client.ts",
+      "bytes": 56339,
+      "sha256": "56d171b6511b6ed337bbd8d132dcf5d85f28883952af4e301fa0aecf87acd25e",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
+    },
+    {
+      "source": "doc/rfc/sdk2-cache-v1.schema.json",
+      "target": "sdk2-cache-v1.schema.json",
+      "bytes": 71352,
+      "sha256": "88e7941861fab1a6380b9226e3a42adb8c872efdf720dc36e92ffa42da43d818",
+      "sourceRevision": "worktree:b2cd6641e1886d9e74439e3b7623be57bc3247ba+uncommitted-cache-error-schema",
+      "sourceBaseCommit": "b2cd6641e1886d9e74439e3b7623be57bc3247ba",
+      "sourceCommitted": false
+    }
+  ],
+  "baselineCommit": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
+  "sourceRevision": "worktree:b2cd6641e1886d9e74439e3b7623be57bc3247ba+uncommitted-cache-error-schema",
+  "sourceWorkingTree": "J:/tansr/worktrees/cli-SRV-01-terminal-services",
+  "schemaSha256": "88e7941861fab1a6380b9226e3a42adb8c872efdf720dc36e92ffa42da43d818"
+}

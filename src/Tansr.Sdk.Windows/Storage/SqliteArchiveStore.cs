@@ -1,15 +1,17 @@
 using System.Globalization;
 using System.Text.Json;
 using Microsoft.Data.Sqlite;
+using Tansr.Sdk.Archive;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
 using Tansr.Sdk.Windows.Security;
 using A = Tansr.Sdk.Windows.Storage.ArchiveValidation;
+using S = Tansr.Sdk.Archive.Replication.ArchiveSyncValidation;
 
 namespace Tansr.Sdk.Windows.Storage;
 
-/// <summary>原 SDK2 source 同步文件族的本地档案介质。数据库提交完成才返回 ACK；密钥、权限和删除修订不从旧库自证。</summary>
-public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
+/// <summary>原 SDK2 source/cache 同步文件族的本地档案介质。只有 source 耐久接收才生成 ACK；密钥、权限和删除修订不从旧库自证。</summary>
+public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
 {
     public const string Format = "sdk2-archive-sync-sqlite-v1";
     private const int Reserve = 4096;
@@ -32,24 +34,40 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
     private readonly SqliteConnection _connection;
     private readonly StorageFileIdentity _parent, _file;
     private readonly JsonElement _identity;
+    private readonly JsonElement _replica;
+    private readonly string _syncRole;
     private readonly ArchiveStoreLimits _limits;
     private readonly Func<JsonElement> _context;
     private readonly Func<string> _retention;
     private readonly Action<JsonElement> _authorizeRetention;
     private readonly ArchiveBodyCipher? _cipher;
     private readonly string _metadata;
+    private readonly bool _historical;
     private bool _closed, _busy, _poisoned, _uncertain;
     private StoreState? _known;
 
     private SqliteArchiveStore(SqliteConnection connection, StorageFileIdentity parent, StorageFileIdentity file,
-        SqliteArchiveStoreOptions options, JsonElement identity, string metadata, ArchiveBodyCipher? cipher)
+        SqliteArchiveStoreOptions options, JsonElement identity, string metadata, ArchiveBodyCipher? cipher, bool historical)
     {
         _connection = connection; _parent = parent; _file = file; _identity = identity; _metadata = metadata; _cipher = cipher;
+        _replica = options.Replica.Clone(); _syncRole = options.SyncRole;
         _limits = new ArchiveStoreLimits { MaxRecords = options.Limits.MaxRecords, MaxArtifacts = options.Limits.MaxArtifacts, MaxStoredBytes = options.Limits.MaxStoredBytes, MaxBatchBytes = options.Limits.MaxBatchBytes };
         _context = options.ReadContext; _retention = options.ReadRetentionRevision; _authorizeRetention = options.AuthorizeRetention;
+        _historical = historical;
     }
 
     public static Task<SqliteArchiveStore> OpenAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
+        => OpenCore(options, false, cancellationToken);
+
+    internal static Task<SqliteArchiveStore> OpenHistoryAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken)
+        => OpenCore(options, true, cancellationToken);
+
+    internal ArchiveHistoryView CreateHistoryView(IArchiveHistoryAuthority current)
+    {
+        A.Need(_historical, "invalid_input"); return new ArchiveHistoryView(this, current, _identity, _context);
+    }
+
+    private static Task<SqliteArchiveStore> OpenCore(SqliteArchiveStoreOptions options, bool historical, CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (options == null || options.ReadContext == null || options.ReadRetentionRevision == null || options.AuthorizeRetention == null || options.Limits == null) throw new StorageException("invalid_input");
@@ -57,13 +75,15 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
         A.Need(limits.MaxRecords >= 1 && limits.MaxRecords <= 1000000 && limits.MaxArtifacts >= 1 && limits.MaxArtifacts <= 1000000 && limits.MaxStoredBytes >= 1 && limits.MaxStoredBytes <= 1073741824 && limits.MaxBatchBytes >= 1 && limits.MaxBatchBytes <= 67108864 && value.MaxPages >= 8 && value.MaxPages <= 262144 && (value.Mode == StorageOpenMode.Create || value.Mode == StorageOpenMode.Reopen), "invalid_input");
         string path = StorageFileIdentity.FullPath(value.Path); var identity = A.Identity(value.Identity); var replica = A.Copy(value.Replica);
         A.Fields(replica, "replicationId", "role"); WireJson.ValidateNamed("Id", replica.GetProperty("replicationId")); A.Need(new[] { "primary", "replica" }.Contains(A.String(replica, "role")), "invalid_input");
+        A.Need(value.SyncRole == "source" || value.SyncRole == "cache", "invalid_input");
         // 固定调用方配置后才访问文件，外部对象之后的修改不能改变库身份或配额。
         var fixedOptions = new SqliteArchiveStoreOptions
         {
             Path = path,
-            Mode = value.Mode,
+            Mode = historical ? StorageOpenMode.Reopen : value.Mode,
             Identity = identity,
             Replica = replica,
+            SyncRole = value.SyncRole,
             MaxPages = value.MaxPages,
             Limits = new ArchiveStoreLimits { MaxRecords = limits.MaxRecords, MaxArtifacts = limits.MaxArtifacts, MaxStoredBytes = limits.MaxStoredBytes, MaxBatchBytes = limits.MaxBatchBytes },
             ReadContext = value.ReadContext,
@@ -77,12 +97,13 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
             var scope = Scope(fixedOptions.ReadContext, identity); var cipher = fixedOptions.KeyProvider == null ? null : new ArchiveBodyCipher(fixedOptions.KeyProvider, identity);
             parent = StorageFileIdentity.Open(Path.GetDirectoryName(path)!, true);
             foreach (string suffix in new[] { "-wal", "-shm", "-journal" }) if (File.Exists(path + suffix))
-            { A.Need(fixedOptions.Mode != StorageOpenMode.Create, "identity_mismatch"); using var sidecar = StorageFileIdentity.Open(path + suffix, false); }
-            file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create);
+            { A.Need(fixedOptions.Mode != StorageOpenMode.Create, "identity_mismatch"); using var sidecar = StorageFileIdentity.Open(path + suffix, false, metadataOnly: historical); }
+            file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create, metadataOnly: historical);
             string metadata = Metadata(fixedOptions, parent, file, cipher);
-            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
-            var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher);
-            store.Exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
+            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = historical ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
+            var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher, historical);
+            // 历史只读连接不改 journal_mode、page_size、max_page_count 或原 metadata。
+            store.Exec(historical ? "PRAGMA busy_timeout=0; PRAGMA query_only=ON; PRAGMA foreign_keys=ON" : "PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
             if (fixedOptions.Mode == StorageOpenMode.Create)
             {
                 store.Exec("PRAGMA page_size=4096; PRAGMA journal_mode=WAL");
@@ -99,7 +120,8 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
             {
                 A.Need(store.Number("PRAGMA page_size") == 4096 && (string?)store.Scalar("PRAGMA journal_mode") == "wal" && (string?)store.Scalar("PRAGMA quick_check") == "ok");
             }
-            A.Need(store.Number("PRAGMA max_page_count=" + fixedOptions.MaxPages.ToString(CultureInfo.InvariantCulture)) == fixedOptions.MaxPages, "capacity_exceeded");
+            if (historical) A.Need(store.Number("PRAGMA page_count") <= fixedOptions.MaxPages, "capacity_exceeded");
+            else A.Need(store.Number("PRAGMA max_page_count=" + fixedOptions.MaxPages.ToString(CultureInfo.InvariantCulture)) == fixedOptions.MaxPages, "capacity_exceeded");
             store.CheckFixed(); store.Audit(); A.Need(A.Equal(scope, Scope(fixedOptions.ReadContext, identity)), "context_changed");
             return Task.FromResult(store);
         }
@@ -111,34 +133,51 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
         }
     }
 
-    public Task<JsonElement> ReceiveAsync(ArchiveReceiveInput input, CancellationToken cancellationToken = default) => Task.FromResult(Run(check =>
+    public Task<JsonElement> ReceiveAsync(ArchiveReceiveInput input, CancellationToken cancellationToken = default)
     {
-        var state = State(); A.Need(state.Pending == null, "pending_ack");
-        var batch = A.Prepare(_identity, _limits, state.Head == null ? null : A.Parse(state.Head), input);
-        string request = A.Text(batch.Ack.GetProperty("request"));
-        A.Need(Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) == 0, "receipt_mismatch");
+        ArchiveReceiveInput? fixedInput = null;
+        return Task.FromResult(Run(check =>
+        {
+            A.Need(_syncRole == "source", "invalid_input");
+            var state = State(); A.Need(state.Pending == null, "pending_ack");
+            var batch = A.Prepare(_identity, _limits, state.Head == null ? null : A.Parse(state.Head), fixedInput!);
+            CommitBatch(batch.Records, batch.References, batch.Bodies, batch.Head, batch.Ack, batch.Checkpoint, null, new HashSet<string>(StringComparer.Ordinal), check);
+            return batch.Ack;
+        }, cancellationToken, prepare: () => fixedInput = Snapshot(input)));
+    }
+
+    private void CommitBatch(JsonElement[] records, Dictionary<string, JsonElement> references, Dictionary<string, byte[]> bodies,
+        JsonElement head, JsonElement ack, JsonElement checkpoint, JsonElement? receipt, ISet<string> deleted, Action check)
+    {
+        string request = A.Text(ack.GetProperty("request"));
         Transaction(() =>
         {
-            foreach (var pair in batch.References)
+            var state = State(); A.Need(state.Pending == null, "pending_ack");
+            long previous = state.Head == null ? 0 : A.SequenceOf(A.Parse(state.Head), "sequence");
+            A.Need(previous != long.MaxValue && A.SequenceOf(records[0], "sequence") == previous + 1);
+            A.Need(Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) == 0, "receipt_mismatch");
+            foreach (var pair in references)
             {
                 var existing = Artifact(pair.Value, false);
-                if (existing != null) { A.Need(ReadBody(pair.Value).SequenceEqual(batch.Bodies[pair.Key])); continue; }
-                byte[] body = _cipher == null ? batch.Bodies[pair.Key] : _cipher.Seal(pair.Value, batch.Bodies[pair.Key]);
+                byte[] supplied = bodies.TryGetValue(pair.Key, out var suppliedBody) ? suppliedBody : Array.Empty<byte>();
+                if (existing != null) { if (supplied.Length != 0) A.Need(ReadBody(pair.Value).SequenceEqual(supplied)); continue; }
+                byte[] body = _cipher == null || supplied.Length == 0 ? supplied : _cipher.Seal(pair.Value, supplied);
                 Exec("INSERT INTO artifacts VALUES($id,$json,$body)", ("$id", pair.Key), ("$json", A.Text(pair.Value)), ("$body", body));
             }
-            foreach (var record in batch.Records)
+            foreach (var record in records)
             {
                 string id = A.String(record, "recordId");
-                A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id OR sequence=$sequence", ("$id", id), ("$sequence", A.SequenceOf(record, "sequence"))) == 0, "deleted");
+                if (deleted.Contains(id)) RequireTombstone(record);
+                else A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id OR sequence=$sequence", ("$id", id), ("$sequence", A.SequenceOf(record, "sequence"))) == 0, "deleted");
                 Exec("INSERT INTO records VALUES($sequence,$id,$json)", ("$sequence", A.SequenceOf(record, "sequence")), ("$id", id), ("$json", A.Text(record)));
                 foreach (var reference in A.References(record)) Exec("INSERT OR IGNORE INTO record_artifacts VALUES($artifact,$record)", ("$artifact", A.String(reference, "artifactId")), ("$record", id));
             }
-            Exec("INSERT INTO operations VALUES($request,$ack,NULL,zeroblob(4096))", ("$request", request), ("$ack", A.Text(batch.Ack)));
-            Exec("INSERT INTO checkpoints VALUES($request,$from,$through,$json)", ("$request", request), ("$from", A.SequenceOf(batch.Ack.GetProperty("coverage"), "fromSequence")), ("$through", A.SequenceOf(batch.Ack.GetProperty("coverage"), "throughSequence")), ("$json", A.Text(batch.Checkpoint, 1572864)));
-            Exec("UPDATE state SET head=$head,pending=$request WHERE id=1", ("$head", A.Text(batch.Head)), ("$request", request)); Reaccount();
+            string? receiptText = receipt == null ? null : A.Text(receipt.Value); A.Need(receiptText == null || A.Bytes(receiptText) <= Reserve, "receipt_mismatch");
+            Exec("INSERT INTO operations VALUES($request,$ack,$receipt,zeroblob($reserve))", ("$request", request), ("$ack", A.Text(ack)), ("$receipt", (object?)receiptText ?? DBNull.Value), ("$reserve", Reserve - (receiptText == null ? 0 : A.Bytes(receiptText))));
+            Exec("INSERT INTO checkpoints VALUES($request,$from,$through,$json)", ("$request", request), ("$from", A.SequenceOf(ack.GetProperty("coverage"), "fromSequence")), ("$through", A.SequenceOf(ack.GetProperty("coverage"), "throughSequence")), ("$json", A.Text(checkpoint, 1572864)));
+            Exec("UPDATE state SET head=$head,pending=$pending WHERE id=1", ("$head", A.Text(head)), ("$pending", receipt == null ? (object)request : DBNull.Value)); Reaccount();
         }, check);
-        return batch.Ack;
-    }, cancellationToken));
+    }
 
     public Task<JsonElement?> PendingAsync(CancellationToken cancellationToken = default) => Task.FromResult(Run<JsonElement?>(_ =>
     { var state = State(); return state.Pending == null ? null : Operation(state.Pending).Ack; }, cancellationToken));
@@ -155,10 +194,104 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
         A.Need(bytes.Length == readCount); return _cipher == null ? bytes : _cipher.OpenRange(reference, bytes, offset, count);
     }, cancellationToken));
 
+    public Task<JsonElement> ReplicaIdentityAsync(CancellationToken cancellationToken = default) => Task.FromResult(Run(_ => A.Object(writer =>
+    {
+        A.Property(writer, "replica", _replica); A.Property(writer, "receiver", _identity);
+        A.Property(writer, "limits", LimitsJson());
+    }), cancellationToken, true));
+
+    public Task<JsonElement?> ReplicaOperationAsync(JsonElement requestIdentity, CancellationToken cancellationToken = default)
+    {
+        string? request = null;
+        return Task.FromResult(Run<JsonElement?>(_ =>
+        {
+            if (Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request!)) == 0) return null;
+            var operation = Operation(request!);
+            return A.Object(writer =>
+            {
+                A.Property(writer, "ack", operation.Ack); writer.WritePropertyName("receipt");
+                if (operation.Receipt == null) writer.WriteNullValue(); else A.Parse(operation.Receipt, "MutationReceipt", Reserve).WriteTo(writer);
+            });
+        }, cancellationToken, prepare: () => request = A.Text(A.Copy(requestIdentity, "RequestIdentity", 4096))));
+    }
+
+    public Task<JsonElement?> SyncPageAsync(string? afterSequence, CancellationToken cancellationToken = default) => Task.FromResult(Run<JsonElement?>(_ =>
+    {
+        long after = afterSequence == null ? 0 : Sequence.Parse(afterSequence, false).ToInt64();
+        string? head = State().Head; long end = head == null ? 0 : A.SequenceOf(A.Parse(head), "sequence");
+        if (after == end) return null;
+        A.Need(after < end && after != long.MaxValue, "invalid_input");
+        using var command = Command("SELECT request,json FROM checkpoints WHERE from_sequence=$from AND length(CAST(request AS BLOB))<=4096 AND length(CAST(json AS BLOB))<=1572864", ("$from", after + 1));
+        using var reader = command.ExecuteReader(); A.Need(reader.Read(), "invalid_input");
+        var operation = Operation(reader.GetString(0)); A.Need(operation.Receipt != null, "pending_ack");
+        var checkpoint = A.Parse(reader.GetString(1), maximum: 1572864);
+        var tombstones = checkpoint.GetProperty("page").GetProperty("records").EnumerateArray().Where(record => Deleted(A.String(record, "recordId"))).Select(record =>
+        {
+            RequireTombstone(record);
+            return A.Object(writer => { writer.WriteString("recordId", A.String(record, "recordId")); writer.WriteString("sequence", A.String(record, "sequence")); writer.WriteString("recordDigest", A.String(record, "recordDigest")); });
+        }).ToArray();
+        return S.Page(A.Object(writer =>
+        {
+            writer.WriteString("format", "archive-sync-v1"); A.Property(writer, "identity", _identity); writer.WriteString("retentionRevision", LocalRevision());
+            A.Property(writer, "checkpoint", checkpoint); A.Property(writer, "ack", operation.Ack); A.Property(writer, "receipt", A.Parse(operation.Receipt!, "MutationReceipt", Reserve));
+            A.Array(writer, "tombstones", tombstones);
+        }), _identity);
+    }, cancellationToken));
+
+    public Task<JsonElement> ReceiveSyncAsync(ArchiveSyncReceiveInput input, CancellationToken cancellationToken = default)
+    {
+        JsonElement page = default; ArchiveReceiveInput? fixedInput = null;
+        return Task.FromResult(Run(check =>
+        {
+            A.Need(_syncRole == "cache", "invalid_input");
+            var tombstones = page.GetProperty("tombstones").EnumerateArray().ToArray();
+            var deleted = new HashSet<string>(tombstones.Select(row => A.String(row, "recordId")), StringComparer.Ordinal);
+            foreach (var record in fixedInput!.Page.GetProperty("records").EnumerateArray())
+                if (Deleted(A.String(record, "recordId"))) { A.Need(deleted.Contains(A.String(record, "recordId"))); RequireTombstone(record); }
+            string revision = A.String(page, "retentionRevision");
+            A.Need(revision == Sequence.Parse(_retention()).Value && revision == LocalRevision(), "context_changed");
+            // 同步页不能授权删除：先由可信宿主 ApplyRetention 写入精确墓碑，再允许本页省略已删正文。
+            foreach (var tombstone in tombstones) RequireTombstone(tombstone);
+            var before = State(); A.Need(before.Pending == null, "pending_ack");
+            var ack = page.GetProperty("ack"); var receipt = page.GetProperty("receipt"); string request = A.Text(ack.GetProperty("request"));
+            if (Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) != 0)
+            {
+                var old = Operation(request);
+                A.Need(A.Equal(old.Ack, ack) && old.Receipt == A.Text(receipt), "receipt_mismatch");
+                A.Need((string?)Scalar("SELECT json FROM checkpoints WHERE request=$request AND length(CAST(json AS BLOB))<=1572864", ("$request", request)) == A.Text(page.GetProperty("checkpoint"), 1572864), "receipt_mismatch");
+                return SyncReceipt(A.Object(writer => { writer.WriteString("sequence", A.String(ack.GetProperty("coverage"), "throughSequence")); writer.WriteString("recordDigest", A.String(ack.GetProperty("coverage"), "headDigest")); }), revision);
+            }
+            var batch = A.Prepare(_identity, _limits, before.Head == null ? null : A.Parse(before.Head), fixedInput, deletedRecordIds: deleted);
+            A.Need(A.Equal(batch.Ack, ack), "receipt_mismatch"); var verifiedReceipt = A.Receipt(_identity, batch.Ack, receipt);
+            CommitBatch(batch.Records, batch.References, batch.Bodies, batch.Head, batch.Ack, batch.Checkpoint, verifiedReceipt, deleted, check);
+            return SyncReceipt(batch.Head, revision);
+        }, cancellationToken, true, () =>
+        {
+            A.Need(input != null, "invalid_input"); page = S.Page(input!.Page, _identity); var checkpoint = page.GetProperty("checkpoint");
+            fixedInput = Snapshot(new ArchiveReceiveInput { Binding = checkpoint.GetProperty("binding"), Status = checkpoint.GetProperty("status"), Page = checkpoint.GetProperty("page"), Request = checkpoint.GetProperty("request"), Artifacts = input.Artifacts });
+        }));
+    }
+
+    private static JsonElement SyncReceipt(JsonElement head, string revision) => A.Object(writer =>
+    { writer.WriteString("format", "archive-sync-receipt-v1"); A.Property(writer, "head", head); writer.WriteString("retentionRevision", revision); });
+
+    private void RequireTombstone(JsonElement record)
+    {
+        A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id AND sequence=$sequence AND digest=$digest", ("$id", A.String(record, "recordId")), ("$sequence", A.SequenceOf(record, "sequence")), ("$digest", A.String(record, "recordDigest"))) == 1, "context_changed");
+    }
+
+    private ArchiveReceiveInput Snapshot(ArchiveReceiveInput input) => S.Input(input, LimitsJson());
+    private JsonElement LimitsJson() => A.Object(writer =>
+    {
+        writer.WriteNumber("maxRecords", _limits.MaxRecords); writer.WriteNumber("maxArtifacts", _limits.MaxArtifacts);
+        writer.WriteNumber("maxStoredBytes", _limits.MaxStoredBytes); writer.WriteNumber("maxBatchBytes", _limits.MaxBatchBytes);
+    });
+
     public Task ConfirmAsync(JsonElement receipt, CancellationToken cancellationToken = default)
     {
         Run<object?>(check =>
         {
+            A.Need(_syncRole == "source", "invalid_input");
             var fixedReceipt = A.Copy(receipt, "MutationReceipt", Reserve); string request = A.Text(fixedReceipt.GetProperty("request")); var operation = Operation(request);
             var verified = A.Receipt(_identity, operation.Ack, fixedReceipt); string text = A.Text(verified);
             if (operation.Receipt != null) { A.Need(operation.Receipt == text, "receipt_mismatch"); return null; }
@@ -259,7 +392,7 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
         }
     }
 
-    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, bool allowStale = false)
+    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, bool allowStale = false, Action? prepare = null)
     {
         lock (_gate)
         {
@@ -267,13 +400,15 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
             A.Need(!_closed, "closed"); A.Need(!_uncertain, "reconciliation_required"); _busy = true; _poisoned = false;
             try
             {
+                prepare?.Invoke();
                 var scope = Scope(_context, _identity); string trusted = Sequence.Parse(_retention()).Value;
                 void Check()
                 {
-                    A.Need(!_poisoned, "reentrant"); CheckFixed(); A.Need(!_poisoned, "reentrant");
+                    A.Need(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested(); CheckFixed(); A.Need(!_poisoned, "reentrant");
                     // VerifyCheck 会调用宿主供钥函数，之后必须重新核授权；不能在最后一次回调后交出旧主体正文或提交。
                     A.Need(A.Equal(scope, Scope(_context, _identity)) && trusted == Sequence.Parse(_retention()).Value, "context_changed");
-                    A.Need(!_poisoned, "reentrant"); string local = LocalRevision(); A.Need(allowStale ? Sequence.Parse(local).ToInt64() <= Sequence.Parse(trusted).ToInt64() : local == trusted, "context_changed");
+                    A.Need(!_poisoned, "reentrant"); string local = LocalRevision(); A.Need(allowStale || _historical ? Sequence.Parse(local).ToInt64() <= Sequence.Parse(trusted).ToInt64() : local == trusted, "context_changed");
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
                 Check(); if (_known != null) A.Need(_known.Equals(State())); var result = work(Check); Check(); return result;
             }
@@ -284,6 +419,7 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
 
     private void Transaction(Action work, Action check, bool refresh = true)
     {
+        A.Need(!_historical, "invalid_input");
         bool begun = false, committing = false;
         try { Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false; if (refresh) _known = State(); committing = false; }
         catch
@@ -440,7 +576,7 @@ public sealed class SqliteArchiveStore : IArchiveRetentionStore, IDisposable
     private static string Metadata(SqliteArchiveStoreOptions options, StorageFileIdentity parent, StorageFileIdentity file, ArchiveBodyCipher? cipher) => A.Text(A.Object(w =>
     {
         w.WriteString("format", cipher == null ? Format : ArchiveBodyCipher.Format); w.WriteStartObject("identity"); foreach (var property in options.Identity.EnumerateObject()) property.WriteTo(w);
-        A.Property(w, "replica", options.Replica); w.WriteString("syncRole", "source"); if (cipher != null) w.WriteString("keyId", cipher.KeyId); w.WriteEndObject();
+        A.Property(w, "replica", options.Replica); w.WriteString("syncRole", options.SyncRole); if (cipher != null) w.WriteString("keyId", cipher.KeyId); w.WriteEndObject();
         w.WriteStartObject("limits"); w.WriteNumber("maxRecords", options.Limits.MaxRecords); w.WriteNumber("maxArtifacts", options.Limits.MaxArtifacts); w.WriteNumber("maxStoredBytes", options.Limits.MaxStoredBytes); w.WriteNumber("maxBatchBytes", options.Limits.MaxBatchBytes); w.WriteEndObject();
         w.WriteNumber("maxPages", options.MaxPages); w.WriteNumber("pageSize", 4096); w.WriteStartObject("physical"); w.WriteStartObject("directory"); w.WriteString("dev", parent.Device); w.WriteString("ino", parent.Inode); w.WriteEndObject(); w.WriteStartObject("file"); w.WriteString("dev", file.Device); w.WriteString("ino", file.Inode); w.WriteEndObject(); w.WriteEndObject();
     }));
