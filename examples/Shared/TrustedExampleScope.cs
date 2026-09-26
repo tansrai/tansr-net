@@ -9,6 +9,7 @@ internal sealed class TrustedExampleScope
 {
     private readonly string path;
     private TrustedExampleScope(string path) => this.path = Path.GetFullPath(path);
+    internal static TrustedExampleScope FromPath(string path) => new(path);
     internal static TrustedExampleScope? FromEnvironment()
     {
         var path = Environment.GetEnvironmentVariable("TANSR_TRUSTED_SCOPE_FILE");

@@ -11,6 +11,42 @@ public sealed class ExecutionHostTests
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public async Task ReadyBatchesDoNotPayIdleBackoffBetweenEveryDurableReceipt()
+    {
+        const int count = 32;
+        var client = new FakeClient(); var journal = new FakeJournal(); var backend = new FakeBackend();
+        for (var i = 0; i < count; i++) client.Enqueue(ExecutionFixture.Operation(id: "chunk-" + i));
+        using var host = new ExecutionHost(client, backend, journal, Allow);
+        using var collection = new CancellationTokenSource();
+        Task? received = null;
+        var run = host.RunAsync();
+        try
+        {
+            async Task ReceiveAllAsync()
+            {
+                for (var i = 0; i < count; i++)
+                {
+                    var receipt = await client.Submissions.Reader.ReadAsync(collection.Token);
+                    Assert.Equal("chunk-" + i, receipt.GetProperty("operationId").GetString());
+                    Assert.Equal("completed", receipt.GetProperty("status").GetString());
+                }
+            }
+            // In-memory ready work needs no idle wait. The old unconditional 250 ms per batch
+            // imposed at least 7.75 seconds here and roughly 86 seconds on a 4 MiB publication.
+            received = ReceiveAllAsync();
+            await received.WaitAsync(TimeSpan.FromSeconds(4));
+            Assert.Equal(count, backend.SideEffects); Assert.Equal(count, journal.Completions.Count);
+            Assert.Equal(0, client.StatusReads);
+        }
+        finally
+        {
+            collection.Cancel();
+            if (received != null) { try { await received; } catch (OperationCanceledException) when (collection.IsCancellationRequested) { } }
+            await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline);
+        }
+    }
+
+    [Fact]
     public async Task RepeatedDeliverySubmitsTheSameReceiptWithoutRepeatingSideEffects()
     {
         var operation = ExecutionFixture.Operation();
@@ -273,6 +309,60 @@ public sealed class ExecutionHostTests
     }
 
     private static Task Allow(JsonElement _, CancellationToken cancellation) { cancellation.ThrowIfCancellationRequested(); return Task.CompletedTask; }
+
+    [Fact]
+    public async Task SeparateControllerReconcilesLostDeviceReceiptWithoutElevatingDeviceCredential()
+    {
+        var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
+        var device = new FakeClient { LoseSubmitResponse = true }; device.Enqueue(operation);
+        var controller = new FakeClient { Status = (_, _) => ExecutionFixture.Status(operation, journal.Completions.Single()) };
+        var backend = new FakeBackend();
+        using var host = new ExecutionHost(device, controller, backend, journal, Allow);
+        var run = host.RunAsync();
+        try
+        {
+            await controller.StatusObserved.Task.WaitAsync(Deadline);
+            Assert.Equal(1, device.SubmitCalls); Assert.Equal(0, device.StatusReads);
+            Assert.Equal(1, controller.StatusReads); Assert.Equal(0, controller.SubmitCalls);
+            Assert.Equal(1, backend.SideEffects); Assert.Single(journal.Completions);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+    }
+
+    [Fact]
+    public async Task ForeignObservationPrincipalCannotReadLostReceipt()
+    {
+        var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
+        var device = new FakeClient { LoseSubmitResponse = true }; device.Enqueue(operation);
+        var controller = new FakeClient { Scope = ExecutionFixture.Scope(user: "foreign") };
+        var backend = new FakeBackend();
+        using var host = new ExecutionHost(device, controller, backend, journal, Allow);
+        await Assert.ThrowsAsync<InvalidDataException>(() => host.RunAsync().WaitAsync(Deadline));
+        Assert.Equal(0, controller.StatusReads); Assert.Equal(0, device.StatusReads);
+        Assert.Equal(1, backend.SideEffects);
+        Assert.Equal("completed", journal.Completions.Single().GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task ActiveOperationMonitoringUsesControllerWithoutSendingItDeviceReceipts()
+    {
+        var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
+        var device = new FakeClient(); device.Enqueue(operation);
+        var controller = new FakeClient { Status = (_, _) => ExecutionFixture.Status(operation, null) };
+        var backend = new FakeBackend
+        {
+            Execute = async (_, _, ct) => { await Task.Delay(Timeout.InfiniteTimeSpan, ct); return ExecutionFixture.Result(); }
+        };
+        using var host = new ExecutionHost(device, controller, backend, journal, Allow);
+        var run = host.RunAsync();
+        try
+        {
+            await controller.StatusObserved.Task.WaitAsync(Deadline);
+            Assert.Equal(0, device.StatusReads); Assert.Equal(0, controller.SubmitCalls);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+        Assert.Equal("unknown", journal.Completions.Single().GetProperty("status").GetString());
+    }
     private static TaskCompletionSource<bool> Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     private sealed class FakeBackend : IExecutionBackend

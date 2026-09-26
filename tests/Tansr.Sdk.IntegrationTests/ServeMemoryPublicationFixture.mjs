@@ -1,0 +1,162 @@
+// Real Serve/kernel publication over the original execution channel. Only the model is synthetic.
+import assert from 'node:assert/strict';
+import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+export async function startMemoryPublicationFixture({ source, directory, authenticate }) {
+  await mkdir(directory, { recursive: true });
+  const load = file => import(pathToFileURL(join(source, file)).href);
+  const { createAgentSessionFactory, createServeAgentSessionStore, startServer } = await load('packages/server/src/index.ts');
+  const { openSqliteArchiveSpool, memoryPublicationKey } = await load('packages/server/src/extensions/index.ts');
+  const { getPlatformMemoryLifecycle } = await load('packages/server/src/v2/memory-lifecycle.ts');
+  const { defaultAppCapabilities } = await load('packages/sdk/src/index.ts');
+  const { createFakePlatform, FAKE_API_BASE } = await load('packages/server/test/fake-platform-fetch.ts');
+  const scope = { applicationScopeId: 'net-integration-app', endUserId: 'net-integration-user', authorizationRevision: '1' };
+  const identity = { kind: 'client-managed', domain: 'net/device-memory', sourceId: 'net-device-memory', sourceGeneration: '1',
+    applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId };
+  const deviceIdentity = { scope: { applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId },
+    sourceId: identity.sourceId, sourceGeneration: identity.sourceGeneration, domainKey: memoryPublicationKey(identity) };
+  const fact = 'NET_MEMORY_FACT_8271: the synthetic user prefers violet report headings.';
+  const topic = 'net-preference.md', index = '# Synthetic memory\n- [Report preference](net-preference.md)\n';
+  const topicText = '# Synthetic report preference\n- [2026-09-26] ' + fact + '\n';
+  const limit = { bytes: 64 * 1048576, records: 4096 };
+  const spool = await openSqliteArchiveSpool({ path: join(directory, 'serve-execution.sqlite'), mode: 'create', storeId: 'net-device-memory',
+    bindings: [{ bindingId: 'memory', applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId,
+      limits: { binding: limit, application: limit, endUser: limit } }], globalLimit: limit,
+    maxReservations: 1024, maxEntries: 4096, maxOperations: 4096, maxDatabasePages: 32768 });
+  const base = defaultAppCapabilities('desktop');
+  const fake = createFakePlatform({ features: [], bundleExtra: { app: { platform: 'desktop' }, capabilities: { ...base,
+    tools: { ...base.tools, shell: false }, execution: { version: 'bound-device-v1', boundDevice: { tools: { read: true } } } } } });
+  let enabled = true, minimumDeletionGeneration = '0', handle, virtualMemoryDir, mainCalls = 0, extractionCalls = 0;
+  let initialExtractionDone = false, recallAdopted = false, forgottenAbsent = false, closedSession = false;
+  const observations = [], routes = [], exchanges = [];
+  const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  function answer(request, text, tool) {
+    return new Response(frame('t.open', { exchangeId: `net-memory-${exchanges.length}`, model: request.model, protocol: 'twp/1' }) +
+      (tool ? frame('t.delta', { i: 0, t: 'tool_use', id: tool.id, name: tool.name, vJson: JSON.stringify(tool.args) }) :
+        frame('t.delta', { i: 0, t: 'text', v: text })) + frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }),
+    { headers: { 'content-type': 'text/event-stream' } });
+  }
+  function result(request, id) {
+    return request.thread.flatMap(message => message.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === id);
+  }
+  const fetchImpl = async (input, init) => {
+    const url = new URL(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url);
+    assert.equal(url.origin, FAKE_API_BASE, 'Only the explicit synthetic platform is permitted.');
+    if (url.pathname !== '/t1/exchange') return fake.fetchImpl(input, init);
+    const request = JSON.parse(String(init?.body)); exchanges.push({ purpose: request.meta?.purpose ?? 'main' });
+    try {
+      assert.ok(exchanges.length <= 24, 'Unexpected retry or extra model workload.');
+      if (request.meta?.purpose === 'memory') {
+        assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Edit', 'Read', 'Write']);
+        const instructions = request.thread.flatMap(message => message.blocks ?? []).filter(block => block.t === 'text').map(block => block.v).join('\n');
+        if (instructions.includes('<memory-consolidation-task>')) return answer(request, 'nothing to consolidate');
+        assert.ok(instructions.includes('<memory-extraction-task>'), 'Only the original extraction profile may write synthetic memory.');
+        extractionCalls++;
+        if (initialExtractionDone) return answer(request, 'nothing to save');
+        assert.ok(instructions.includes(fact), 'Extraction must consume the original completed turn.');
+        const match = /Auto-memory directory: ([^\r\n]+)/.exec(instructions); assert.ok(match); virtualMemoryDir = match[1];
+        const first = result(request, 'memory-index-read'), second = result(request, 'memory-topic-write'), third = result(request, 'memory-index-write');
+        if (!first) return answer(request, null, { id: 'memory-index-read', name: 'Read', args: { file_path: join(virtualMemoryDir, 'MEMORY.md') } });
+        if (!second) return answer(request, null, { id: 'memory-topic-write', name: 'Write', args: { file_path: join(virtualMemoryDir, topic), content: topicText } });
+        assert.notEqual(second.isError, true, 'The real extraction topic write was refused.');
+        if (!third) return answer(request, null, { id: 'memory-index-write', name: 'Write', args: { file_path: join(virtualMemoryDir, 'MEMORY.md'), content: index } });
+        assert.notEqual(third.isError, true, 'The real extraction index write was refused.');
+        initialExtractionDone = true; return answer(request, 'Saved synthetic preference to the authorized memory source.');
+      }
+      mainCalls++;
+      assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['SearchMemory']);
+      const lastUser = [...request.thread].reverse().find(message => message.role === 'user' &&
+        message.blocks?.some(block => block.t === 'text' && block.v.includes('NET_MEMORY_')));
+      const prompt = lastUser?.blocks.filter(block => block.t === 'text').map(block => block.v).join('\n') ?? '';
+      if (prompt.includes('NET_MEMORY_SEED')) return answer(request, 'Acknowledged the synthetic report preference.');
+      const afterDelete = prompt.includes('NET_MEMORY_AFTER_DELETE');
+      assert.ok(afterDelete || prompt.includes('NET_MEMORY_RECALL'), 'Unexpected business turn.');
+      const id = afterDelete ? 'memory-search-after-delete' : 'memory-search-recall';
+      const found = result(request, id);
+      if (!found) return answer(request, null, { id, name: 'SearchMemory', args: { query: 'NET_MEMORY_FACT_8271', kind: 'memory', limit: 5 } });
+      assert.notEqual(found.isError, true, 'Actual SearchMemory failed.');
+      if (afterDelete) {
+        assert.ok(!found.v.includes(fact), 'Forgotten source leaked through SearchMemory.'); forgottenAbsent = true;
+        return answer(request, 'NET_MEMORY_ABSENT_CONFIRMED');
+      }
+      assert.ok(found.v.includes(fact), 'The subsequent model request must consume the real SearchMemory result.');
+      recallAdopted = true; return answer(request, 'NET_MEMORY_ADOPTED: violet report headings.');
+    } catch (error) { process.stderr.write(`Synthetic memory exchange rejected: ${error.message}\n`); throw error; }
+  };
+  const store = createServeAgentSessionStore({ dir: join(directory, 'sessions'), ownership: {} });
+  const build = createAgentSessionFactory({ cwd: directory, store, platform: { apiBaseUrl: FAKE_API_BASE, appId: scope.applicationScopeId,
+    appKey: 'synthetic-no-real-key', fetchImpl, memoryPublicationFor(selected) {
+      assert.equal(selected.applicationScopeId, scope.applicationScopeId); assert.equal(selected.endUserId, scope.endUserId);
+      return { identity, mode: 'create', enabled: () => enabled, balance: () => null, minimumDeletionGeneration: () => minimumDeletionGeneration,
+        // Trusted synthetic host provenance, never supplied by the model or inferred from memory text.
+        provenance: () => ({ deletionGeneration: minimumDeletionGeneration, origins: ['synthetic:net-memory-seed'] }),
+        extraction: { inviteGate: 'off' }, recallSelector: false, onObservation: (kind, value) => observations.push({ kind, value }) };
+    } }, execution: { applicationScopeId: scope.applicationScopeId,
+    authorize: (request, user) => ({ controller: authenticate(request)?.endUserId === scope.endUserId && user === scope.endUserId,
+      ...(authenticate(request)?.endUserId === scope.endUserId && user === scope.endUserId ? { executorId: 'net-memory-pc' } : {}) }),
+    readPolicy: async () => ({ authorizationRevision: scope.authorizationRevision, tools: ['SearchMemory'] }),
+    spoolFor: () => ({ spool, bindingId: 'memory' }) } });
+  const create = build.factory.create.bind(build.factory);
+  build.factory.create = async init => { assert.equal(handle, undefined, 'One explicit memory session per fixture.'); const value = await create(init); handle = value.handle; return value; };
+  const server = await startServer({ host: '127.0.0.1', port: 0, token: 'synthetic-unused-v1', readyFrame: 'none', heartbeatMs: 0,
+    terminal: { contract: 'terminal-services-v1' }, createSession: { create() { throw new Error('Legacy v1 unused'); } },
+    v2: { createSession: build.factory, governance: { sweepIntervalMs: 0 }, authenticate(request) {
+      routes.push({ method: request.method, path: new URL(request.url, 'http://127.0.0.1').pathname }); return authenticate(request);
+    } } });
+  async function idle() {
+    assert.ok(handle); const deadline = Date.now() + 30000;
+    for (;;) {
+      const lifecycle = getPlatformMemoryLifecycle(handle); assert.ok(lifecycle);
+      const status = lifecycle.status();
+      if (handle.status() === 'idle' && !status.extractionInFlight && !status.consolidationInFlight && !status.promotionInFlight) {
+        try { await handle.owner.assertIdle(); return lifecycle; }
+        catch (error) { assert.equal(error.code, 'reconciliation_required'); }
+      }
+      assert.ok(Date.now() < deadline, 'Original memory resources did not become idle.'); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+  let lastCommand = '', pending = false, failure;
+  const timer = setInterval(async () => {
+    if (pending || failure) return; pending = true;
+    try {
+      let raw; try { raw = await readFile(join(directory, 'host-command.json'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      assert.ok(Buffer.byteLength(raw) <= 4096); const command = JSON.parse(raw);
+      if (command.id === lastCommand) return; assert.match(command.id, /^[a-z0-9-]{1,64}$/);
+      let value;
+      if (command.action === 'identity') value = deviceIdentity;
+      else if (command.action === 'idle') {
+        await idle(); value = { idle: true, initialExtractionDone, recallAdopted, forgottenAbsent };
+      } else if (command.action === 'inspect') {
+        const lifecycle = await idle(), authority = lifecycle.management; assert.ok(authority);
+        const managed = await authority.createHost(); const memory = await authority.read();
+        const files = {};
+        for (const name of ['MEMORY.md', topic, 'pending-anchors.md']) {
+          try { files[name] = (await managed.fs.readFile(join(managed.memoryDir, name))).toString('utf8'); }
+          catch (error) { if (error.code !== 'ENOENT') throw error; files[name] = null; }
+        }
+        value = { memory, files, initialExtractionDone, recallAdopted, forgottenAbsent };
+      } else if (command.action === 'enabled') { assert.equal(typeof command.enabled, 'boolean'); enabled = command.enabled; value = { enabled }; }
+      else if (command.action === 'deletion-floor') {
+        assert.match(command.generation, /^(0|[1-9][0-9]*)$/); assert.ok(BigInt(command.generation) >= BigInt(minimumDeletionGeneration));
+        minimumDeletionGeneration = command.generation; value = { minimumDeletionGeneration };
+      } else if (command.action === 'close-session') {
+        // Closing owns cancellation/draining even after a failed assertion; polling must still be alive.
+        assert.ok(handle); handle.close(); const settled = await handle.settleResources?.({ timeoutMs: 10000 });
+        assert.ok(settled?.every(item => item.status === 'completed')); closedSession = true; value = { closedSession };
+      } else throw new Error('Unknown trusted memory fixture command.');
+      lastCommand = command.id; const temporary = join(directory, 'host-response.tmp');
+      await writeFile(temporary, JSON.stringify({ id: command.id, value })); await rename(temporary, join(directory, 'host-response.json'));
+    } catch (error) { failure = error; process.stderr.write(`Memory fixture command rejected: ${error.message}\n`); }
+    finally { pending = false; }
+  }, 20); timer.unref();
+  let closing;
+  return { url: server.url, scope, identity: deviceIdentity,
+    close: () => closing ??= (async () => {
+      clearInterval(timer); while (pending) await new Promise(resolve => setTimeout(resolve, 10));
+      await server.close(); await build.flush(); spool.close(); if (failure) throw failure;
+      return { model: 'controlled-synthetic-platform', realKernel: true, mainCalls, extractionCalls, initialExtractionDone,
+        recallAdopted, forgottenAbsent, closedSession, observations, routes };
+    })() };
+}

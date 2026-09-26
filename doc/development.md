@@ -233,3 +233,32 @@ SDK 核心包462595字节，SHA256 `51abcca685b14da2256929ab55922d70f8983c58ba98
 最终源码提交、格式、两包消费、主线收编与归档校验见本批 `closure-manifest.json`；阶段已通过结果不等于已发布。NET 仓没有 remote，不声明远端推送或 NuGet 发布。
 
 本批最终产品提交 `2b8b269cef9fb1f71735e0e0966824772ee22733`；两包程序集信息版本均指向此提交。格式 verify-no-changes exit0，两包 `pack` exit0，隔离本地源下 net48/CLR4、net10 Windows 和 win-x64 NativeAOT 实际执行均通过，见 `format-verify.log`、`pack-core.log`、`pack-windows.log`、`package-consumption.log`。SDK 核心包465131字节，SHA256 `ddfe6d2cee794851da99bbdba5d490307f7029400e3af70541771feac42cd86a`；Windows包275907字节，SHA256 `f4afe81ff75e4d0573f1730073ac30cb582f9fcb9897a28d0425f67f41201f6b`。包消费证明兼容加载、原工具和AOT入口，新增来源方法的实际行为由83项元信息回归与真实Serve链证明，不把包内其他入口的烟测冒充新API真实调用。
+
+## 20260926-NET-05-device-memory：设备自动记忆介质与原执行链
+
+沿原 NET-04，并补原 NET-03/05 所需装配；不增卡。起点 `317c083f0fac231cb8858c4585441a589e392dc7`，分支 `lane/net/NET-04-device-memory`。证据目录 `J:/tansr/archive/20260926-NET-05-device-memory`。实现写区完成后冻结，统一锁定恢复、构建及核心/Windows/真实 Serve/包消费；最终命令与结果在下文回填。
+
+- `SqliteMemoryPublicationStore` 复用原 Node `terminal-memory-publication-sqlite-v1` 三表格式，提供完整六动作、分块 UTF-8 正文、CAS 与不可变原 transfer 终态。身份、物理文件、固定容量及源代际在重开时复核；提交未知保持待对账，不能误作确定失败或空库重建。现有历史/档案库不迁移、不改格式。
+- `WindowsMemoryPublicationHost` 把原保留 profile 接入原 Windows backend、DeviceSessionHost 与耐久执行日志。执行前后核原 scope、session、binding、source 及摘要。副作用后撤权、取消或回执不明进入 unknown；新 owner 恢复只授予可信 query，不授予旧 transfer 写权。
+- Console、WPF、WinForms 共用显式设备记忆配置：原会话、可信来源、分离控制/设备凭据、create/reopen 及容量。设备只追加原保留工具，初始化省略 RequestedTools 以保留原会话收窄结果。Serve 的普通 CLI 启动仍无自动 `memoryPublicationFor` 配置；必须由可信宿主接线，见[接入边界](device-memory.md)。
+- 执行宿主状态观察改用 controller；设备登记、领取与回执继续使用 device。原四参数构造保持兼容，查询前后核两票据主体一致。实际调度不再为每个非空批次支付250毫秒空闲退避；仍逐操作耐久认领/结算，只有空批次退避，不增加执行并发。
+
+原32个连续就绪操作在4秒内结算的用例先实际失败（旧逻辑至少等待31次250毫秒），去除非空批次退避后和分票回归共30/30通过。首轮 Host 编译暴露新 Store 的 Equal helper 缺失，作者补齐后进入统一构建；没有把未运行测试登记通过。存储静态复核还修正 SQLITE_FULL 已自动回滚后的重复 ROLLBACK 误判，以及失败打开后的 owner 资源清理恢复；相应用例进入本批集中池。
+
+真实链固定为真实 Serve/kernel 的合成模型提取 Read/Write、设备出版、SearchMemory 后续轮采用、pin 已提交 HTTP 失回原键查询、forget 及同会话后续检索、撤权零派工和同 owner 重开。它不是付费供应商测试，也不等于备份回放/跨连接维护全矩阵已验；后者仍归原 NET-A14/16。Node/C# 使用同一个物理 SQLite 文件双向接棒，来源14文件固定到 `42224634aa06d83f6bd8179935a072cc406bde5a`；运行 HEAD 另记，不能用无关提交移动代替字节漂移。
+
+本批仍按原完整 DoD 结算：**工程完整关闭0/6，剩6；完整验收2/24（A03/A06），剩22，8.3%；16组完整业务对照0/16。** 局部实现和测试数量不折算完成百分比。NET 仓无 remote，未发布 NuGet；部署、签名和远端CI不是本批事实。
+
+### 集中验收回执
+
+| 验证 | 结果及证据（相对本批archive） |
+|---|---|
+| 锁定恢复、Release全解决方案 | exit0，0警告0错误；`restore-locked.log`、`build.log` |
+| 核心完整池 | 661/661，0失败/跳过；`core.log`、`results/core.trx` |
+| Windows完整池 | 333项执行，329通过、4条新夹具失败、0跳过；真实MCP单文件候选及默认锁恢复exit0；`windows-r1/manifest.json`、`windows-r1/results/windows.trx` |
+| Windows受影响复验 | Host及原Node互通两个类18/18通过，覆盖上述4红，未重复启动其余315项；`memory-host-interop.log`、`results/memory-host-interop.trx` |
+| 原合同及能力映射 | 原SDK2五文件与主线一致；680映射、629已枚举出口、16组，完整业务对照仍0；`contract.log`、`parity.log` |
+
+Windows四条失败只修测试：原执行账本按 canonical JSON 保存，回读的字段次序与首次内存 receipt 不同，现比较完整规范化对象；Node进程的UTF-8输出原被系统CP936解码，现为三条标准流显式固定严格UTF-8。原全部字段、digest、中文、分裂UTF-8和不重执行断言保留。54项新Store断言在333池一次通过。两个池有重叠，不能按329+18虚增测试总数，也不把首轮333全部登记为通过；`suite-summary.json`记录原始计数。
+
+联验准备发现并交Serve单写者修复原内部缺口：forget耐久提交后，旧MemoryHost固定删除代际，导致同会话原命令查询/下轮准备也被stale_generation阻断。不能在C#自动新建会话或重试写回规避。修复应保持旧任务失效，在合法安全点从原可信authority取得新host；真实链最终回执须包含此行为。

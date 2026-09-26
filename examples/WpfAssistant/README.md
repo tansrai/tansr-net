@@ -1,5 +1,7 @@
 # WPF 原生示例
 
+“启动设备记忆宿主”读取用户选择的受信配置，为其中明确的既有会话运行原生 MemoryPublication 设备；“设备记忆状态”显示真实 SQLite 容量，“停止设备”等待本机收尾。该设备可独立于普通聊天连接，原 SDK1 clientTools/MCP 不变。Serve 前提、来源身份、双票据、create/reopen 和远端未排空边界见 [设备记忆宿主](../Shared/device-memory.md)；不能仅凭本地Serve EXE配置就声称已启用自动记忆。
+
 本示例目标为 `net10.0-windows`，通过公开 `TansrClient` / `AgentSession` 消费已存在的 Serve 合同。应用进程不依赖 Node；模型、核心治理和持久会话仍由独立运行的 Serve 提供。
 
 ```powershell

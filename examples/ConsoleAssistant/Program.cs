@@ -33,6 +33,7 @@ internal static class Program
         {
             Console.WriteLine("Tansr 原生控制台\n环境：TANSR_SERVE_URL、TANSR_SESSION_TOKEN；可选 TANSR_ALLOW_HTTP_LOOPBACK=1、TANSR_RESUME_SESSION、TANSR_MODEL。\n命令：普通文字发送；/history /meta /compact /checkpoint /checkpoints /cancel /requests /allow <requestId> /deny <requestId> /answer <requestId> <答案JSON数组> /quit。\n无界面 --once <prompt> 会拒绝审批、以明确的无人值守说明回答提问，等待终态后关闭。Ctrl+C / SIGTERM 中断当前工作并有界收尾。票据不写入文件或日志。");
             Console.WriteLine("草稿：/draft <全文>、/draft-file <UTF8文件>、/draft、/send-draft；同轮：/insert <全文>、/insert-draft、/input-status、/input-retry（原键）；离线：--offline、/offline。多会话：--worker <jobs.jsonl> [--concurrency 1..8]。提示词来源与策略：/prompt（显式只读）。");
+            Console.WriteLine("Windows设备自动记忆：--device-memory <可信配置JSON>；独立controller/device票据，持续领取原操作直到Ctrl+C或/stop，不关闭远端会话。见 examples/Shared/device-memory.md。");
             return 0;
         }
         if (args.Length == 1 && args[0] == "--offline")
@@ -44,6 +45,15 @@ internal static class Program
         ConsoleCancelEventHandler cancel = (_, e) => { e.Cancel = true; stop.Cancel(); };
         Console.CancelKeyPress += cancel;
         using var term = !OperatingSystem.IsWindows() ? PosixSignalRegistration.Create(PosixSignal.SIGTERM, context => { context.Cancel = true; stop.Cancel(); }) : null;
+        if (args.Length > 0 && args[0] == "--device-memory")
+        {
+            try
+            {
+                if (args.Length != 2) throw new InvalidOperationException("device_memory_requires_configuration_file");
+                return await RunMemoryDeviceAsync(args[1], stop.Token);
+            }
+            finally { Console.CancelKeyPress -= cancel; }
+        }
         if (args.Length > 0 && args[0] == "--worker")
         {
             try
@@ -189,6 +199,53 @@ internal static class Program
             if (connection != null) { try { await connection.CloseAsync(); } catch (Exception error) { Write("local_serve_cleanup_unconfirmed=" + ErrorCode(error)); } }
             Console.CancelKeyPress -= cancel;
         }
+    }
+
+    private static async Task<int> RunMemoryDeviceAsync(string path, CancellationToken stop)
+    {
+        NativeMemoryDeviceHost? host = null;
+        var exitCode = 0;
+        using var lifetime = new CancellationTokenSource();
+        using var inputStop = CancellationTokenSource.CreateLinkedTokenSource(stop);
+        try
+        {
+            using (stop.Register(lifetime.Cancel)) host = await NativeMemoryDeviceHost.StartAsync(path, lifetime.Token);
+            Write(await host.ReadStatusAsync());
+            Write("设备已就绪。先让控制端完成记忆工作，再输入/status或/stop；Ctrl+C只停止本机设备，不证明远端已排空。重开需显式reopen，不能自动换库或复用transfer ID。");
+            var stopSignal = Task.Delay(Timeout.InfiniteTimeSpan, inputStop.Token);
+            while (true)
+            {
+                // Console.In 的同步适配器可能在 ReadLineAsync 返回任务前阻塞；只保留一个后台读，
+                // 让取消/设备失败始终能触发本机资源收尾。退出进程无需等用户补一个换行。
+                var read = Task.Run(() => Console.ReadLine());
+                var finished = await Task.WhenAny(read, host.Completion, stopSignal);
+                if (finished == host.Completion) { await host.Completion; Write("device_poll_stopped；不代表远端记忆已完成。"); exitCode = 2; break; }
+                if (finished == stopSignal) { exitCode = 130; break; }
+                var command = await read;
+                if (command == "/stop") break;
+                if (command == null)
+                {
+                    Write("stdin_closed；设备继续领取，Ctrl+C/SIGTERM显式停止。");
+                    var end = await Task.WhenAny(host.Completion, stopSignal);
+                    if (end == host.Completion) { await host.Completion; exitCode = 2; } else exitCode = 130;
+                    break;
+                }
+                if (command == "/status") Write(await host.ReadStatusAsync(stop));
+                else Write("此进程只托管MemoryPublication设备；/status查询本机容量，/stop显式停止。会话/记忆命令从控制入口发起。");
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { exitCode = 130; }
+        catch (Exception error) { Write("device_memory_failed=" + ErrorCode(error)); exitCode = 1; }
+        finally
+        {
+            inputStop.Cancel();
+            if (host != null)
+            {
+                try { await host.StopAsync(); Write("device_memory_stopped；只确认本机执行与存储句柄已收尾，未发送会话close/delete，未证明远端记忆已排空。"); }
+                catch (Exception error) { Write("device_memory_cleanup_unconfirmed=" + ErrorCode(error)); if (exitCode == 0) exitCode = 2; }
+            }
+        }
+        return exitCode;
     }
 
     private static async Task ObserveAsync(AgentSession session, SessionView view, NativeToolHost tools, bool unattended,

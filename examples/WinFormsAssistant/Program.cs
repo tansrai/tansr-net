@@ -55,6 +55,7 @@ internal sealed class AssistantForm : Form
     private ExampleSessionControls? _controls;
     private string? _localSaveFailure;
     private int _draftRevision;
+    private NativeMemoryDeviceHost? _memoryDevice;
     private string? _closeFailure;
     private bool _busy, _closing, _closed;
 
@@ -75,6 +76,7 @@ internal sealed class AssistantForm : Form
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
         top.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(1020, 0), Text = "真实入口：会话流、图片、取消、审批/提问、历史与快照。动态切模/思考、完整记忆、设备工具绑定仍需宿主可信配置。" });
         top.Controls.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync), Button("提示词来源", ShowApplicationPromptAsync)));
+        top.Controls.Add(Row(Button("启动设备记忆宿主", StartMemoryDeviceAsync, false), Button("设备记忆状态", MemoryDeviceStatusAsync, false), Button("停止设备（不保证远端排空）", StopMemoryDeviceAsync, false)));
         top.Controls.Add(Row(Button("本机离线回看", ShowLocalAsync, false), Button("恢复本机草稿", RestoreLocalDraftAsync, false),
             Button("保存本机草稿", () => { SaveLocal(); _status.Text = "草稿和呈现已保存在本机用户目录（明文，不含票据）。"; return Task.CompletedTask; }, false)));
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 200 };
@@ -222,6 +224,27 @@ internal sealed class AssistantForm : Form
     private async Task QueryInputAsync() => _status.Text = await _inputEditor!.QueryAsync();
     private async Task RetryInputAsync() => _status.Text = await _inputEditor!.RetryOriginalAsync();
     private Task OpenControlsAsync() { new SessionControlsForm(_controls) { Owner = this }.Show(this); return Task.CompletedTask; }
+    private async Task StartMemoryDeviceAsync()
+    {
+        if (_memoryDevice != null) throw new InvalidOperationException("memory_device_already_started");
+        using var picker = new OpenFileDialog { Title = "选择宿主受信设备记忆配置", Filter = "受信配置|*.json" };
+        if (picker.ShowDialog(this) != DialogResult.OK) return;
+        _memoryDevice = await NativeMemoryDeviceHost.StartAsync(picker.FileName);
+        _ = ObserveMemoryDeviceAsync(_memoryDevice);
+        _status.Text = await _memoryDevice.ReadStatusAsync();
+    }
+    private async Task ObserveMemoryDeviceAsync(NativeMemoryDeviceHost host)
+    {
+        try { await host.Completion; }
+        catch (Exception error) { if (ReferenceEquals(_memoryDevice, host) && !IsDisposed) _status.Text = "设备记忆领取失败；保留原库对账：" + ErrorText(error); }
+    }
+    private async Task MemoryDeviceStatusAsync() => _status.Text = _memoryDevice == null ? "设备记忆宿主尚未启动；需受信Serve装配及配置。" : await _memoryDevice.ReadStatusAsync();
+    private async Task StopMemoryDeviceAsync()
+    {
+        var host = _memoryDevice; if (host == null) return;
+        try { await host.StopAsync(); _status.Text = "本机设备与存储已收尾；没有关闭远端会话，也不证明远端记忆已排空。"; }
+        finally { _memoryDevice = null; }
+    }
     private void RenderRequest()
     {
         foreach (var child in _questions.Controls.Cast<Control>().ToArray()) child.Dispose(); _questions.Controls.Clear(); _questionEditors.Clear();
@@ -314,6 +337,7 @@ internal sealed class AssistantForm : Form
     private async void OnClosing(object? sender, FormClosingEventArgs e)
     {
         if (_closed) return; e.Cancel = true; if (_closing) return;
+        if (_memoryDevice != null) { _status.Text = "设备仍领取记忆操作。请先在控制端核对记忆工作，再显式停止设备后退出；窗口关闭不冒充远端排空。"; return; }
         if (_busy) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
         _closing = true;
         try { await CloseConnectionAsync(); _saveTimer.Stop(); _saveTimer.Dispose(); _closed = true; Close(); }

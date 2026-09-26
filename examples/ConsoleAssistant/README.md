@@ -1,5 +1,7 @@
 # 原生控制台与无界面宿主
 
+新增独立 Windows 设备自动记忆入口：`--device-memory <可信配置JSON>`，以公开 SQLite publication store、原 Windows 后端及 DeviceSessionHost 持续消费既有会话的 MemoryPublication 操作。配置、双角色票据、Serve 可信装配、create/reopen、容量与显式停止见 [设备记忆宿主](../Shared/device-memory.md)。它不替代普通聊天/MCP模式，不关闭远端会话；`tansr serve` CLI 尚未默认装配该服务。
+
 目标为跨平台 `net10.0` 与原生Windows `net10.0-windows`；依赖公开 .NET SDK 与 Serve，无 Node 客户端依赖。运行前通过运行环境注入：
 
 - `TANSR_SERVE_URL`：Serve HTTPS 地址。

@@ -9,6 +9,7 @@ namespace Tansr.Sdk.Execution;
 public sealed class ExecutionHost : IDisposable
 {
     private readonly IExecutionClient _client;
+    private readonly IExecutionClient _observationClient;
     private readonly IExecutionBackend _backend;
     private readonly IExecutorJournal _journal;
     private readonly Func<JsonElement, CancellationToken, Task> _authorize;
@@ -22,8 +23,14 @@ public sealed class ExecutionHost : IDisposable
 
     public ExecutionHost(IExecutionClient client, IExecutionBackend backend, IExecutorJournal journal,
         Func<JsonElement, CancellationToken, Task> authorize)
+        : this(client, client, backend, journal, authorize) { }
+
+    /// <summary>设备票据用于派工和回执；独立控制票据仅查询原执行状态，不提升设备票据权限。</summary>
+    public ExecutionHost(IExecutionClient client, IExecutionClient observationClient, IExecutionBackend backend,
+        IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
+        _observationClient = observationClient ?? throw new ArgumentNullException(nameof(observationClient));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
         _authorize = authorize ?? throw new ArgumentNullException(nameof(authorize));
@@ -107,12 +114,14 @@ public sealed class ExecutionHost : IDisposable
                     catch when (!token.IsCancellationRequested)
                     {
                         // 提交回包丢失只能查原键；已执行操作不可改ID或重做。
-                        var state = await _client.GetStatusAsync(ExecutionJson.Text(operation, "sessionId"), ExecutionJson.Text(operation, "operationId"), token).ConfigureAwait(false);
+                        var state = await ReadStatusAsync(operation, token).ConfigureAwait(false);
                         ExecutionJson.Check(ExecutionJson.Equal(state.GetProperty("operation"), operation) &&
                             state.GetProperty("receipt").ValueKind != JsonValueKind.Null && ExecutionJson.Equal(state.GetProperty("receipt"), receipt));
                     }
                 }
-                await Task.Delay(250, token).ConfigureAwait(false);
+                // Back off only when idle. A ready chunk/receipt chain must not pay this delay
+                // for every acknowledged operation; authorization and journaling remain serial.
+                if (batch.GetProperty("operations").GetArrayLength() == 0) await Task.Delay(250, token).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -239,6 +248,19 @@ public sealed class ExecutionHost : IDisposable
         return receipt;
     }
 
+    private async Task<JsonElement> ReadStatusAsync(JsonElement operation, CancellationToken cancellationToken)
+    {
+        var current = _client.ReadScope();
+        var original = operation.GetProperty("scope");
+        ExecutionJson.Check(ExecutionJson.Equal(current, _observationClient.ReadScope()) &&
+            ExecutionJson.Text(current, "applicationScopeId") == ExecutionJson.Text(original, "applicationScopeId") &&
+            ExecutionJson.Text(current, "endUserId") == ExecutionJson.Text(original, "endUserId"));
+        var result = await _observationClient.GetStatusAsync(ExecutionJson.Text(operation, "sessionId"),
+            ExecutionJson.Text(operation, "operationId"), cancellationToken).ConfigureAwait(false);
+        ExecutionJson.Check(ExecutionJson.Equal(current, _client.ReadScope()) && ExecutionJson.Equal(current, _observationClient.ReadScope()));
+        return result;
+    }
+
     private async Task MonitorOperationAsync(JsonElement operation, CancellationTokenSource execution, CancellationToken observation)
     {
         try
@@ -253,7 +275,7 @@ public sealed class ExecutionHost : IDisposable
                 ExecutionJson.Check(ExecutionJson.Equal(_client.ReadScope(), operation.GetProperty("scope")) &&
                     ExecutionJson.Text(connection, "connectionId") == ExecutionJson.Text(target, "connectionId") &&
                     ExecutionJson.Text(connection, "connectionRevision") == ExecutionJson.Text(target, "connectionRevision"));
-                var state = await _client.GetStatusAsync(ExecutionJson.Text(operation, "sessionId"), ExecutionJson.Text(operation, "operationId"), observation).ConfigureAwait(false);
+                var state = await ReadStatusAsync(operation, observation).ConfigureAwait(false);
                 ExecutionJson.Check(ExecutionJson.Equal(state.GetProperty("operation"), operation) &&
                     ExecutionJson.Text(state, "status") == "pending" && state.GetProperty("receipt").ValueKind == JsonValueKind.Null);
             }

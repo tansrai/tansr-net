@@ -1,5 +1,7 @@
 # WinForms 原生示例
 
+“启动设备记忆宿主”读取用户选择的受信配置，为其中明确的既有会话运行原生 MemoryPublication 设备；“设备记忆状态”显示真实 SQLite 容量，“停止设备”等待本机收尾。该设备可独立于普通聊天连接，原 SDK1 clientTools/MCP 不变。Serve 前提、来源身份、双票据、create/reopen 和远端未排空边界见 [设备记忆宿主](../Shared/device-memory.md)；不能仅凭本地Serve EXE配置就声称已启用自动记忆。
+
 目标为 .NET Framework 4.8，直接消费 `Tansr.Sdk` / `Tansr.Sdk.Windows` 公共 API，无 Node 客户端代理。需要 Windows 与 .NET Framework 4.8；构建引用程序集不能替代运行时。
 
 ```powershell

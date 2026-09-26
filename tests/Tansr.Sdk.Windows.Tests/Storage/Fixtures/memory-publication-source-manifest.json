@@ -1,0 +1,87 @@
+{
+  "format": "tansr-node-memory-publication-source-v1",
+  "sourceRepository": "tansr-cli",
+  "sourceCommit": "42224634aa06d83f6bd8179935a072cc406bde5a",
+  "sourceCommitted": true,
+  "candidateRevision": "2026-09-26.candidate-7",
+  "storageFormat": "terminal-memory-publication-sqlite-v1",
+  "entry": "packages/api-client/src/terminal/memory-publication-sqlite.ts",
+  "schemaSha256": "8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896",
+  "ddl": [
+    "CREATE TABLE metadata (id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL) STRICT",
+    "CREATE TABLE publication (id INTEGER PRIMARY KEY CHECK(id=1), etag TEXT NOT NULL, body BLOB NOT NULL) STRICT",
+    "CREATE TABLE transfers (id TEXT PRIMARY KEY, owner TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL, received INTEGER NOT NULL, body BLOB, etag TEXT) STRICT"
+  ],
+  "files": [
+    {
+      "path": "packages/api-client/src/terminal/memory-publication-sqlite.ts",
+      "bytes": 18173,
+      "sha256": "fbcabfe5b74416f2005d279d6c2450ff593f7ba8d66260ce3dde7edd01fcfb19"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/sqlite-owned.ts",
+      "bytes": 11481,
+      "sha256": "60d7e880f5fd9a2f63b289feef2860233fcd268d65a052c1e171bfc0a0e34a08"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/wire-codec.ts",
+      "bytes": 11276,
+      "sha256": "cff40a5f14ca9e9e8e3588b9a490d55afc0086ddb9930e445c21478df9d9355b"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/wire-schema-generated.ts",
+      "bytes": 81821,
+      "sha256": "db6034bcb30c54f4f7d6bc0919cb8adb18103f200dcee90c3461f5f62c3ee92b"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/receiver-types.ts",
+      "bytes": 7660,
+      "sha256": "cf8a04ab55b1ded4c185ad7593b92234fd20edc2db0c28b2d287ea75e60ba6df"
+    },
+    {
+      "path": "packages/api-client/src/terminal/wire-codec.ts",
+      "bytes": 2263,
+      "sha256": "08fae229d7bfadd5b14a46ad92aaaa432659351e3659eb3d11c88cf6e76f279b"
+    },
+    {
+      "path": "packages/api-client/src/terminal/wire-schema-generated.ts",
+      "bytes": 64401,
+      "sha256": "160c09c5f031effacc4339658990fb7995320198b740f6022017b9f31ff479f7"
+    },
+    {
+      "path": "packages/api-client/src/terminal/wire-types-generated.ts",
+      "bytes": 19170,
+      "sha256": "23bcc4197722798f4cb1ee4fdfd7fda720f855f608a9b813c511bb412d17de3a"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/wire-types-generated.ts",
+      "bytes": 19019,
+      "sha256": "519f5c0b3c3d6226288194cff4f7e7f4b716f1894610703f22c7511ffcaf5052"
+    },
+    {
+      "path": "packages/api-client/src/sdk2/archive-recovery-types-generated.ts",
+      "bytes": 2433,
+      "sha256": "9d034b002297c328af3dea2ce5bb47d8d5601dd140ad4a56e0637c1835a5f522"
+    },
+    {
+      "path": "packages/api-client/test/terminal-memory-publication.test.ts",
+      "bytes": 16375,
+      "sha256": "355a41be58aea784919b524e162f416a1300ddd8efa0e7a092f046e69bc44a93"
+    },
+    {
+      "path": "packages/api-client/package.json",
+      "bytes": 1737,
+      "sha256": "643756f9ff6295db6575d35eba6bd8ddffb586530b01eb359a5f7135cceab68a"
+    },
+    {
+      "path": "doc/rfc/terminal-services-v1.schema.json",
+      "bytes": 70442,
+      "sha256": "8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896"
+    },
+    {
+      "path": "doc/rfc/sdk2-ext-v1.schema.json",
+      "bytes": 108205,
+      "sha256": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605"
+    }
+  ]
+}

@@ -11,6 +11,10 @@ $recoverySource = (Resolve-Path -LiteralPath $RecoveryCliRoot).Path
 if (-not (Test-Path -LiteralPath (Join-Path $cliSource 'node_modules/tsx/dist/loader.mjs') -PathType Leaf)) {
     throw 'CLI 源码目录缺少已安装的 tsx；先按其锁文件准备依赖。原 Node 双向消费不能跳过。'
 }
+if (-not (Test-Path -LiteralPath (Join-Path $recoverySource 'node_modules/tsx/dist/loader.mjs') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $recoverySource 'packages/api-client/src/terminal/memory-publication-sqlite.ts') -PathType Leaf)) {
+    throw 'RecoveryCliRoot 必须提供已固定的原恢复/设备记忆 publication 源码与 tsx；原 Node 双向消费不能跳过。'
+}
 $target = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $target) { throw '验收输出目录已存在，请指定新的具名目录；脚本不会覆盖旧候选。' }
 $null = Get-Command dotnet -ErrorAction Stop

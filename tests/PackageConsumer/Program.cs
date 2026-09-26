@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Tansr.Sdk.Client;
@@ -9,6 +10,7 @@ using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
 using Tansr.Sdk.Windows.Security;
+using Tansr.Sdk.Windows.Storage;
 
 internal static class Program
 {
@@ -36,6 +38,7 @@ internal static class Program
             }
             var control = WireJson.Parse(Encoding.UTF8.GetBytes("{\"sequence\":\"9223372036854775807\"}"));
             if (WireJson.CanonicalString(control) != "{\"sequence\":\"9223372036854775807\"}") throw new Exception("wire");
+            await ConsumeMemoryPublication(root);
             using (var workspace = new WindowsWorkspace(root))
             {
                 var backend = new WindowsExecutorBackend("package-consumer", new[] { new WindowsExecutorWorkspace("workspace", "1", workspace) });
@@ -59,6 +62,67 @@ internal static class Program
         {
             if (!root.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("cleanup_scope");
             Directory.Delete(root, true);
+        }
+    }
+
+    private static async Task ConsumeMemoryPublication(string root)
+    {
+        var scope = WireJson.Parse(Encoding.UTF8.GetBytes("{\"applicationScopeId\":\"package-app\",\"endUserId\":\"package-user\",\"authorizationRevision\":\"1\"}"));
+        var identity = WireJson.Parse(Encoding.UTF8.GetBytes("{\"scope\":{\"applicationScopeId\":\"package-app\",\"endUserId\":\"package-user\"},\"sourceId\":\"package-source\",\"sourceGeneration\":\"1\",\"domainKey\":\"package-domain\"}"));
+        var owner = WireJson.CanonicalString(WireJson.Parse(Encoding.UTF8.GetBytes("{\"scope\":" + scope.GetRawText() + ",\"sessionId\":\"package-session\",\"binding\":{\"bindingId\":\"package-binding\",\"revision\":\"1\",\"target\":{\"executorId\":\"package-executor\",\"connectionId\":\"package-connection\",\"connectionRevision\":\"1\",\"workspaceId\":\"package-workspace\",\"workspaceRevision\":\"1\"}}}")));
+        var options = new SqliteMemoryPublicationOptions
+        {
+            EnablePreview = true, Path = Path.Combine(root, "memory.sqlite"), Mode = StorageOpenMode.Create,
+            Identity = identity, ReadContext = () => scope, MaxTransfers = 2
+        };
+        var body = Encoding.UTF8.GetBytes("包消费记忆 😀");
+        var digest = WireJson.Sha256(body);
+        var commit = MemoryRequest("commit", writer => writer.WriteString("transferId", "package-transfer"));
+        using (var store = await SqliteMemoryPublicationStore.OpenAsync(options))
+        {
+            var host = new WindowsMemoryPublicationHost(store, enablePreview: true);
+            var tool = host.CreateTool();
+            if (!store.AtomicDurablePublication || WireJson.CanonicalString(host.Identity) != WireJson.CanonicalString(identity) ||
+                tool.Name != "TansrTerminalMemoryPublication" || tool.DefinitionDigest.Length != 64) throw new Exception("memory_host");
+            var head = await store.ExecuteAsync(MemoryRequest("head"), owner);
+            if (head.GetProperty("publication").ValueKind != JsonValueKind.Null) throw new Exception("memory_empty");
+            await store.ExecuteAsync(MemoryRequest("begin", writer =>
+            {
+                writer.WriteString("transferId", "package-transfer"); writer.WriteNull("expectedEtag");
+                writer.WriteNumber("byteLength", body.Length); writer.WriteString("sha256", digest);
+            }), owner);
+            await store.ExecuteAsync(MemoryRequest("chunk", writer =>
+            {
+                writer.WriteString("transferId", "package-transfer"); writer.WriteNumber("offset", 0); writer.WriteNumber("byteLength", body.Length);
+                writer.WriteString("base64", Convert.ToBase64String(body)); writer.WriteString("payloadDigest", digest);
+            }), owner);
+            var receipt = await store.ExecuteAsync(commit, owner);
+            if (receipt.GetProperty("transfer").GetProperty("status").GetString() != "committed") throw new Exception("memory_commit");
+            await store.CloseAsync();
+        }
+        options.Mode = StorageOpenMode.Reopen;
+        using (var store = await SqliteMemoryPublicationStore.OpenAsync(options))
+        {
+            var receipt = await store.ExecuteAsync(commit, owner);
+            if (receipt.GetProperty("transfer").GetProperty("etag").GetString() != digest) throw new Exception("memory_reopen");
+            var read = await store.ExecuteAsync(MemoryRequest("read", writer =>
+            { writer.WriteString("etag", digest); writer.WriteNumber("offset", 0); writer.WriteNumber("length", body.Length); }), owner);
+            if (Encoding.UTF8.GetString(WireJson.DecodeBase64(read.GetProperty("base64").GetString()!)) != Encoding.UTF8.GetString(body) ||
+                !read.GetProperty("complete").GetBoolean()) throw new Exception("memory_read");
+        }
+    }
+
+    private static JsonElement MemoryRequest(string action, Action<Utf8JsonWriter>? fields = null)
+    {
+        using (var memory = new MemoryStream())
+        {
+            using (var writer = new Utf8JsonWriter(memory))
+            {
+                writer.WriteStartObject(); writer.WriteString("contract", "terminal-services-v1"); writer.WriteString("action", action);
+                writer.WriteString("sourceId", "package-source"); writer.WriteString("sourceGeneration", "1"); writer.WriteString("domainKey", "package-domain");
+                if (fields != null) fields(writer); writer.WriteEndObject();
+            }
+            return WireJson.Parse(memory.ToArray());
         }
     }
 }

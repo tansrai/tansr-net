@@ -13,7 +13,9 @@ public sealed class DeviceSessionOptions
     public string WorkspaceId { get; set; } = string.Empty;
     public IReadOnlyList<string>? RequestedTools { get; set; }
     public TimeSpan ConnectionTimeout { get; set; } = TimeSpan.FromSeconds(30);
-    /// <summary>可信宿主在设备绑定后、允许发送前装配可选协议服务。失败保持未就绪，不自动重试控制写入。</summary>
+    /// <summary>可信宿主在设备绑定后、允许发送前装配可选协议绑定。失败保持未就绪，不自动重试控制写入。</summary>
+    /// <remarks>此回调结束后才开始设备 polling；只做能力协商/绑定。需要设备执行的记忆读取或命令
+    /// 必须在 StartAsync 成功之后调用，否则服务等待设备而回调等待服务会形成循环。</remarks>
     public Func<JsonElement, CancellationToken, Task>? AfterBindingAsync { get; set; }
 }
 
@@ -68,7 +70,7 @@ public sealed class DeviceSessionHost : IDisposable
             throw new ArgumentOutOfRangeException(nameof(options));
         WireJson.ValidateNamed("SessionInitializeRequest", Initialization());
         if (authorize == null) throw new ArgumentNullException(nameof(authorize));
-        _execution = new ExecutionHost(deviceClient, backend, journal, async (operation, ct) =>
+        _execution = new ExecutionHost(deviceClient, controllerClient, backend, journal, async (operation, ct) =>
         {
             GuardBoundOperation(operation);
             await authorize(operation, ct).ConfigureAwait(false);
