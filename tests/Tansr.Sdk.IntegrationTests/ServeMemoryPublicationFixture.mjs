@@ -169,7 +169,17 @@ export async function startMemoryPublicationFixture({ source, directory, authent
         minimumDeletionGeneration = command.generation; value = { minimumDeletionGeneration };
       } else if (command.action === 'close-session') {
         // Closing owns cancellation/draining even after a failed assertion; polling must still be alive.
-        assert.ok(handle); handle.close(); const settled = await handle.settleResources?.({ timeoutMs: 10000 });
+        assert.ok(handle); assert.equal(typeof handle.settleResources, 'function');
+        const lifecycle = getPlatformMemoryLifecycle(handle); assert.ok(lifecycle);
+        handle.close();
+        let closeTimer;
+        try {
+          // The public handle resolves void after cleanup; only the lifecycle returns settlement rows.
+          await Promise.race([handle.settleResources(), new Promise((_, reject) => {
+            closeTimer = setTimeout(() => reject(new Error('Original Serve handle cleanup timed out.')), 10000);
+          })]);
+        } finally { clearTimeout(closeTimer); }
+        const settled = await lifecycle.settleResources({ timeoutMs: 0 });
         diagnostic('session.close.settled', { results: settled });
         assert.ok(settled?.every(item => item.status === 'completed')); closedSession = true; value = { closedSession };
       } else throw new Error('Unknown trusted memory fixture command.');
