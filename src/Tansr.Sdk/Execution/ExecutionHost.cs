@@ -13,6 +13,7 @@ public sealed class ExecutionHost : IDisposable
     private readonly IExecutionBackend _backend;
     private readonly IExecutorJournal _journal;
     private readonly Func<JsonElement, CancellationToken, Task> _authorize;
+    private readonly Func<int, CancellationToken, Task> _idleDelay;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
     private readonly JsonElement _registration;
@@ -28,12 +29,17 @@ public sealed class ExecutionHost : IDisposable
     /// <summary>设备票据用于派工和回执；独立控制票据仅查询原执行状态，不提升设备票据权限。</summary>
     public ExecutionHost(IExecutionClient client, IExecutionClient observationClient, IExecutionBackend backend,
         IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize)
+        : this(client, observationClient, backend, journal, authorize, Task.Delay) { }
+
+    internal ExecutionHost(IExecutionClient client, IExecutionClient observationClient, IExecutionBackend backend,
+        IExecutorJournal journal, Func<JsonElement, CancellationToken, Task> authorize, Func<int, CancellationToken, Task> idleDelay)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client));
         _observationClient = observationClient ?? throw new ArgumentNullException(nameof(observationClient));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
         _authorize = authorize ?? throw new ArgumentNullException(nameof(authorize));
+        _idleDelay = idleDelay ?? throw new ArgumentNullException(nameof(idleDelay));
         _registration = backend.Registration.Clone();
         WireJson.ValidateNamed("ExecutorRegistrationRequest", _registration);
         var operations = _registration.GetProperty("operations").EnumerateArray().Select(x => x.GetString()).ToArray();
@@ -91,6 +97,7 @@ public sealed class ExecutionHost : IDisposable
             lock (_gate) _connection = registered.Clone();
             heartbeat = RenewAsync(lifetime, error => heartbeatFailure = error);
             if (onConnected != null) await onConnected(registered.Clone(), token).ConfigureAwait(false);
+            var idleDelayMs = 250;
             while (true)
             {
                 token.ThrowIfCancellationRequested();
@@ -119,9 +126,14 @@ public sealed class ExecutionHost : IDisposable
                             state.GetProperty("receipt").ValueKind != JsonValueKind.Null && ExecutionJson.Equal(state.GetProperty("receipt"), receipt));
                     }
                 }
-                // Back off only when idle. A ready chunk/receipt chain must not pay this delay
-                // for every acknowledged operation; authorization and journaling remain serial.
-                if (batch.GetProperty("operations").GetArrayLength() == 0) await Task.Delay(250, token).ConfigureAwait(false);
+                // The next serial operation may still be preparing after its predecessor's receipt.
+                // Stay briefly responsive after settled work; sustained idle keeps the original cap.
+                if (batch.GetProperty("operations").GetArrayLength() == 0)
+                {
+                    await _idleDelay(idleDelayMs, token).ConfigureAwait(false);
+                    idleDelayMs = Math.Min(250, idleDelayMs * 2);
+                }
+                else idleDelayMs = 25;
             }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)

@@ -2,12 +2,14 @@
 // synthetic; HTTP, SDK/kernel loop, permissions, execution spool and archive host are real source.
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export async function startPublicFixture({ source, directory, authenticate, candidate = false }) {
   await mkdir(directory, { recursive: true });
+  const commandDirectory = join(directory, 'host-commands'), responseDirectory = join(directory, 'host-responses');
+  await mkdir(commandDirectory); await mkdir(responseDirectory);
   const load = path => import(pathToFileURL(join(source, path)).href);
   const extensions = await load('packages/server/src/extensions/index.ts');
   const { createServeArchiveHost, openSqliteArchiveSpool } = extensions;
@@ -125,15 +127,19 @@ export async function startPublicFixture({ source, directory, authenticate, cand
   } catch (error) { await host.dispose(); spool.close(); throw error; }
   // A bounded test-only file IPC drives trusted host lifecycle, not a new product endpoint.
   // This never proxies SSE/body delivery; .NET consumes actual Serve routes independently.
-  let lastCommand = '', pending = false, failure;
+  const processedCommands = new Set();
+  let pending = false, failure;
   const timer = setInterval(async () => {
     if (pending || failure) return; pending = true;
     try {
-      let raw;
-      try { raw = await readFile(join(directory, 'host-command.json'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      const files = (await readdir(commandDirectory)).filter(name => name.endsWith('.json')).sort();
+      assert.ok(files.length <= 64, 'Trusted fixture command count exceeded.');
+      const filename = files.find(name => !processedCommands.has(name)); if (!filename) return;
+      assert.match(filename, /^[a-z0-9-]{1,64}\.json$/);
+      const raw = await readFile(join(commandDirectory, filename), 'utf8');
       assert.ok(Buffer.byteLength(raw) <= 4096); const command = JSON.parse(raw);
-      if (command.id === lastCommand) return;
       assert.match(command.id, /^[a-z0-9-]{1,64}$/); assert.equal(typeof command.sessionId, 'string');
+      assert.equal(filename, `${command.id}.json`); processedCommands.add(filename);
       const subject = { endUserId: scope.endUserId, sessionId: command.sessionId }; let value;
       if (command.action === 'materials') {
         assert.ok(Array.isArray(command.recordIds) && command.recordIds.length > 0 && command.recordIds.length <= 8);
@@ -152,9 +158,9 @@ export async function startPublicFixture({ source, directory, authenticate, cand
       } else if (candidate && command.action === 'release-recovery-store') {
         assert.equal(barrier?.sessionId, command.sessionId); assert.equal(barrier.entered, true); barrier.release(); value = { released: true };
       } else throw new Error('Unknown trusted fixture command.');
-      lastCommand = command.id;
-      const temporary = join(directory, 'host-response.tmp');
-      await writeFile(temporary, JSON.stringify({ id: command.id, value })); await rename(temporary, join(directory, 'host-response.json'));
+      const temporary = join(responseDirectory, `${command.id}.tmp`);
+      await writeFile(temporary, JSON.stringify({ id: command.id, value }), { flag: 'wx' });
+      await rename(temporary, join(responseDirectory, `${command.id}.json`));
     } catch (error) { failure = error; process.stderr.write(`Public fixture command failed: ${error.message}\n`); }
     finally { pending = false; }
   }, 30);

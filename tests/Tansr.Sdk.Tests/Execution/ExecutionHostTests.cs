@@ -10,6 +10,50 @@ public sealed class ExecutionHostTests
 {
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ImmediateEmptyPollBetweenSerialOperationsKeepsReceiptsAndCancelsIdleWait(bool stopAtIdleCap)
+    {
+        var batches = new Queue<JsonElement>();
+        batches.Enqueue(ExecutionFixture.Batch());
+        batches.Enqueue(ExecutionFixture.Batch(ExecutionFixture.Operation("serial-1")));
+        batches.Enqueue(ExecutionFixture.Batch());
+        batches.Enqueue(ExecutionFixture.Batch(ExecutionFixture.Operation("serial-2")));
+        for (var i = 0; i < 6; i++) batches.Enqueue(ExecutionFixture.Batch());
+        if (!stopAtIdleCap)
+        {
+            batches.Enqueue(ExecutionFixture.Batch(ExecutionFixture.Operation("serial-3")));
+            batches.Enqueue(ExecutionFixture.Batch());
+        }
+        var client = new FakeClient { Poll = _ => Task.FromResult(batches.Dequeue()) };
+        var journal = new FakeJournal(); var backend = new FakeBackend();
+        var delays = new List<int>(); var waiting = Signal();
+        async Task Delay(int milliseconds, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); delays.Add(milliseconds);
+            if (batches.Count != 0) return;
+            waiting.TrySetResult(true);
+            await Task.Delay(Timeout.InfiniteTimeSpan, token);
+        }
+        using var host = new ExecutionHost(client, client, backend, journal, Allow, Delay);
+        var run = host.RunAsync();
+        try
+        {
+            await waiting.Task.WaitAsync(Deadline);
+            var expected = stopAtIdleCap ? new[] { "serial-1", "serial-2" } : new[] { "serial-1", "serial-2", "serial-3" };
+            Assert.Equal(expected, journal.Completions.Select(receipt => receipt.GetProperty("operationId").GetString()));
+            Assert.All(journal.Completions, receipt => Assert.Equal("completed", receipt.GetProperty("status").GetString()));
+            Assert.Equal(expected.Length, backend.SideEffects); Assert.Equal(expected.Length, client.SubmitCalls);
+            var expectedDelays = new[] { 250, 25, 25, 50, 100, 200, 250, 250 };
+            Assert.Equal(stopAtIdleCap ? expectedDelays : expectedDelays.Append(25), delays);
+            var pollsAtStop = client.PollCalls;
+            await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline);
+            Assert.Equal(pollsAtStop, client.PollCalls); Assert.Empty(batches);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); }
+    }
+
     [Fact]
     public async Task ReadyBatchesDoNotPayIdleBackoffBetweenEveryDurableReceipt()
     {
@@ -386,14 +430,19 @@ public sealed class ExecutionHostTests
         public TaskCompletionSource<bool> StatusObserved { get; } = Signal();
         public JsonElement Scope = ExecutionFixture.Scope();
         public Func<string, string, JsonElement>? Status;
+        public Func<CancellationToken, Task<JsonElement>>? Poll;
         public bool LoseSubmitResponse;
         public bool RejectForeignSubmit;
-        public int SubmitCalls, StatusReads;
+        public int SubmitCalls, StatusReads, PollCalls;
         public void Enqueue(JsonElement operation) => _batches.Writer.TryWrite(ExecutionFixture.Batch(operation));
         public JsonElement ReadScope() => Scope.Clone();
         public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken cancellationToken) => Task.FromResult(ExecutionFixture.Connection());
         public Task<JsonElement> HeartbeatAsync(JsonElement connection, CancellationToken cancellationToken) => Task.FromResult(ExecutionFixture.Connection());
-        public async Task<JsonElement> PollAsync(JsonElement connection, CancellationToken cancellationToken) => await _batches.Reader.ReadAsync(cancellationToken);
+        public async Task<JsonElement> PollAsync(JsonElement connection, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref PollCalls);
+            return Poll == null ? await _batches.Reader.ReadAsync(cancellationToken) : await Poll(cancellationToken);
+        }
         public Task<JsonElement> SubmitAsync(JsonElement receipt, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref SubmitCalls);

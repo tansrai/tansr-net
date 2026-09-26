@@ -1,11 +1,21 @@
 // Real Serve/kernel publication over the original execution channel. Only the model is synthetic.
 import assert from 'node:assert/strict';
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, rename, readdir } from 'node:fs/promises';
+import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 export async function startMemoryPublicationFixture({ source, directory, authenticate }) {
   await mkdir(directory, { recursive: true });
+  const commandDirectory = join(directory, 'host-commands'), responseDirectory = join(directory, 'host-responses');
+  await mkdir(commandDirectory); await mkdir(responseDirectory);
+  const started = Date.now(); let diagnosticCount = 0, lastDiagnosticStage = 'fixture.start';
+  const diagnostic = (stage, details = {}) => {
+    assert.ok(++diagnosticCount <= 4096, 'Synthetic diagnostic record limit exceeded.');
+    lastDiagnosticStage = stage;
+    appendFileSync(join(directory, 'serve-stages.jsonl'), JSON.stringify({ at: new Date().toISOString(), elapsedMs: Date.now() - started, stage, ...details }) + '\n');
+  };
+  diagnostic('fixture.start');
   const load = file => import(pathToFileURL(join(source, file)).href);
   const { createAgentSessionFactory, createServeAgentSessionStore, startServer } = await load('packages/server/src/index.ts');
   const { openSqliteArchiveSpool, memoryPublicationKey } = await load('packages/server/src/extensions/index.ts');
@@ -46,6 +56,8 @@ export async function startMemoryPublicationFixture({ source, directory, authent
     assert.equal(url.origin, FAKE_API_BASE, 'Only the explicit synthetic platform is permitted.');
     if (url.pathname !== '/t1/exchange') return fake.fetchImpl(input, init);
     const request = JSON.parse(String(init?.body)); exchanges.push({ purpose: request.meta?.purpose ?? 'main' });
+    diagnostic('model.request', { call: exchanges.length, purpose: request.meta?.purpose ?? 'main',
+      toolResults: request.thread.flatMap(message => message.blocks ?? []).filter(block => block.t === 'tool_result').map(block => ({ id: block.toolUseId, failed: block.isError === true })) });
     try {
       assert.ok(exchanges.length <= 24, 'Unexpected retry or extra model workload.');
       if (request.meta?.purpose === 'memory') {
@@ -59,11 +71,11 @@ export async function startMemoryPublicationFixture({ source, directory, authent
         const match = /Auto-memory directory: ([^\r\n]+)/.exec(instructions); assert.ok(match); virtualMemoryDir = match[1];
         const first = result(request, 'memory-index-read'), second = result(request, 'memory-topic-write'), third = result(request, 'memory-index-write');
         if (!first) return answer(request, null, { id: 'memory-index-read', name: 'Read', args: { file_path: join(virtualMemoryDir, 'MEMORY.md') } });
-        if (!second) return answer(request, null, { id: 'memory-topic-write', name: 'Write', args: { file_path: join(virtualMemoryDir, topic), content: topicText } });
+        if (!second) return answer(request, null, { id: 'memory-topic-write', name: 'Write', args: { file_path: join(virtualMemoryDir, topic), contents: topicText } });
         assert.notEqual(second.isError, true, 'The real extraction topic write was refused.');
-        if (!third) return answer(request, null, { id: 'memory-index-write', name: 'Write', args: { file_path: join(virtualMemoryDir, 'MEMORY.md'), content: index } });
+        if (!third) return answer(request, null, { id: 'memory-index-write', name: 'Write', args: { file_path: join(virtualMemoryDir, 'MEMORY.md'), contents: index } });
         assert.notEqual(third.isError, true, 'The real extraction index write was refused.');
-        initialExtractionDone = true; return answer(request, 'Saved synthetic preference to the authorized memory source.');
+        initialExtractionDone = true; diagnostic('extraction.writes.accepted'); return answer(request, 'Saved synthetic preference to the authorized memory source.');
       }
       mainCalls++;
       assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['SearchMemory']);
@@ -82,7 +94,7 @@ export async function startMemoryPublicationFixture({ source, directory, authent
         return answer(request, 'NET_MEMORY_ABSENT_CONFIRMED');
       }
       assert.ok(found.v.includes(fact), 'The subsequent model request must consume the real SearchMemory result.');
-      recallAdopted = true; return answer(request, 'NET_MEMORY_ADOPTED: violet report headings.');
+      recallAdopted = true; diagnostic('recall.result.adopted'); return answer(request, 'NET_MEMORY_ADOPTED: violet report headings.');
     } catch (error) { process.stderr.write(`Synthetic memory exchange rejected: ${error.message}\n`); throw error; }
   };
   const store = createServeAgentSessionStore({ dir: join(directory, 'sessions'), ownership: {} });
@@ -117,24 +129,38 @@ export async function startMemoryPublicationFixture({ source, directory, authent
       assert.ok(Date.now() < deadline, 'Original memory resources did not become idle.'); await new Promise(resolve => setTimeout(resolve, 10));
     }
   }
-  let lastCommand = '', pending = false, failure;
+  const processedCommands = new Set();
+  let pending = false, failure;
   const timer = setInterval(async () => {
-    if (pending || failure) return; pending = true;
+    if (pending) return; pending = true;
+    let activeCommand;
     try {
-      let raw; try { raw = await readFile(join(directory, 'host-command.json'), 'utf8'); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      const files = (await readdir(commandDirectory)).filter(name => name.endsWith('.json')).sort();
+      assert.ok(files.length <= 64, 'Trusted fixture command count exceeded.');
+      // The first failed assertion stops business commands but never prevents original-session cleanup.
+      const filename = files.find(name => !processedCommands.has(name) && (!failure ||
+        name === 'close-memory-after-failure.json' || name === 'close-memory-session.json')); if (!filename) return;
+      assert.match(filename, /^[a-z0-9-]{1,64}\.json$/);
+      const raw = await readFile(join(commandDirectory, filename), 'utf8');
       assert.ok(Buffer.byteLength(raw) <= 4096); const command = JSON.parse(raw);
-      if (command.id === lastCommand) return; assert.match(command.id, /^[a-z0-9-]{1,64}$/);
+      assert.match(command.id, /^[a-z0-9-]{1,64}$/); assert.equal(filename, `${command.id}.json`); processedCommands.add(filename);
+      activeCommand = command;
+      if (failure) assert.equal(command.action, 'close-session');
+      diagnostic('command.begin', { id: command.id, action: command.action });
       let value;
       if (command.action === 'identity') value = deviceIdentity;
       else if (command.action === 'idle') {
         await idle(); value = { idle: true, initialExtractionDone, recallAdopted, forgottenAbsent };
       } else if (command.action === 'inspect') {
         const lifecycle = await idle(), authority = lifecycle.management; assert.ok(authority);
-        const managed = await authority.createHost(); const memory = await authority.read();
+        diagnostic('inspect.idle', { id: command.id });
+        const managed = await authority.createHost(); diagnostic('inspect.host.created', { id: command.id });
+        const memory = await authority.read(); diagnostic('inspect.state.read', { id: command.id });
         const files = {};
         for (const name of ['MEMORY.md', topic, 'pending-anchors.md']) {
           try { files[name] = (await managed.fs.readFile(join(managed.memoryDir, name))).toString('utf8'); }
           catch (error) { if (error.code !== 'ENOENT') throw error; files[name] = null; }
+          diagnostic('inspect.file.read', { id: command.id, name, present: files[name] !== null });
         }
         value = { memory, files, initialExtractionDone, recallAdopted, forgottenAbsent };
       } else if (command.action === 'enabled') { assert.equal(typeof command.enabled, 'boolean'); enabled = command.enabled; value = { enabled }; }
@@ -144,11 +170,32 @@ export async function startMemoryPublicationFixture({ source, directory, authent
       } else if (command.action === 'close-session') {
         // Closing owns cancellation/draining even after a failed assertion; polling must still be alive.
         assert.ok(handle); handle.close(); const settled = await handle.settleResources?.({ timeoutMs: 10000 });
+        diagnostic('session.close.settled', { results: settled });
         assert.ok(settled?.every(item => item.status === 'completed')); closedSession = true; value = { closedSession };
       } else throw new Error('Unknown trusted memory fixture command.');
-      lastCommand = command.id; const temporary = join(directory, 'host-response.tmp');
-      await writeFile(temporary, JSON.stringify({ id: command.id, value })); await rename(temporary, join(directory, 'host-response.json'));
-    } catch (error) { failure = error; process.stderr.write(`Memory fixture command rejected: ${error.message}\n`); }
+      const temporary = join(responseDirectory, `${command.id}.tmp`);
+      await writeFile(temporary, JSON.stringify({ id: command.id, value }), { flag: 'wx' });
+      await rename(temporary, join(responseDirectory, `${command.id}.json`));
+      diagnostic('command.completed', { id: command.id, action: command.action });
+    } catch (error) {
+      const report = { type: String(error?.name ?? 'Error').slice(0, 128),
+        message: String(error?.message ?? 'Synthetic fixture command failed.').slice(0, 2048),
+        stage: `${activeCommand?.action ?? 'ipc'}:${lastDiagnosticStage}`.slice(0, 256) };
+      try {
+        if (!failure) {
+          failure = error;
+          const temporary = join(directory, 'host-failure.tmp');
+          const bytes = JSON.stringify(report); assert.ok(Buffer.byteLength(bytes) <= 16384);
+          await writeFile(temporary, bytes, { flag: 'wx' }); await rename(temporary, join(directory, 'host-failure.json'));
+        }
+        if (activeCommand?.action === 'close-session') {
+          const temporary = join(responseDirectory, `${activeCommand.id}.failure.tmp`);
+          await writeFile(temporary, JSON.stringify({ id: activeCommand.id, failure: report }), { flag: 'wx' });
+          await rename(temporary, join(responseDirectory, `${activeCommand.id}.json`));
+        }
+      } catch (persistenceError) { process.stderr.write(`Memory fixture failure persistence rejected: ${persistenceError.name}\n`); }
+      process.stderr.write(`Memory fixture command rejected: ${report.message}\n`);
+    }
     finally { pending = false; }
   }, 20); timer.unref();
   let closing;

@@ -222,17 +222,20 @@ public sealed partial class ServePublicHostIntegrationTests(ITestOutputHelper ou
     private static async Task<JsonElement> HostCommandAsync(object command, CancellationToken cancellationToken)
     {
         var directory = Required("TANSR_SERVE_TEST_DIRECTORY"); var value = Json(command); var id = value.GetProperty("id").GetString();
-        var temporary = Path.Combine(directory, "host-command.tmp");
-        await File.WriteAllBytesAsync(temporary, WireJson.EncodeControl(value), cancellationToken);
-        File.Move(temporary, Path.Combine(directory, "host-command.json"), true);
+        Assert.Matches("^[a-z0-9-]{1,64}$", id!);
+        var temporary = Path.Combine(directory, "host-commands", id + ".tmp");
+        await using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
+            await file.WriteAsync(WireJson.EncodeControl(value), cancellationToken);
+        File.Move(temporary, Path.Combine(directory, "host-commands", id + ".json"));
         for (; ; )
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var path = Path.Combine(directory, "host-response.json");
+            var path = Path.Combine(directory, "host-responses", id + ".json");
             if (File.Exists(path))
             {
                 using var response = JsonDocument.Parse(await File.ReadAllBytesAsync(path, cancellationToken));
-                if (response.RootElement.GetProperty("id").GetString() == id) return response.RootElement.GetProperty("value").Clone();
+                Assert.Equal(id, response.RootElement.GetProperty("id").GetString());
+                return response.RootElement.GetProperty("value").Clone();
             }
             await Task.Delay(30, cancellationToken);
         }

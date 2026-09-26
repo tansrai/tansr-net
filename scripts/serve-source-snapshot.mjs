@@ -8,6 +8,13 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+function sourceCommitted(source) {
+  return execFileSync('git', ['status', '--porcelain', '--',
+    ':(glob)packages/*/src/**', ':(glob)packages/*/test/**', ':(glob)packages/*/package.json',
+    'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'doc/rfc/sdk2-ext-v1.schema.json',
+    'doc/rfc/terminal-services-v1.schema.json', 'doc/rfc/sdk2-archive-recovery-v1.schema.json'],
+  { cwd: source, encoding: 'utf8', windowsHide: true }).trim() === '';
+}
 function inventory(source) {
   const paths = [];
   function visit(relative) {
@@ -39,12 +46,13 @@ function approvedSchemas(files) {
 }
 export function verifyServeSourceSnapshot(source, filename) {
   const bytes = readFileSync(filename), value = JSON.parse(bytes);
-  assert.equal(value.format, 'tansr-serve-source-snapshot-v1'); assert.equal(value.sourceCommitted, false);
+  assert.equal(value.format, 'tansr-serve-source-snapshot-v1'); assert.equal(typeof value.sourceCommitted, 'boolean');
   assert.equal(realpathSync(source), value.sourceRoot);
   assert.equal(execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', windowsHide: true }).trim(), value.sourceBaseCommit);
   const current = inventory(source); approvedSchemas(current);
   assert.deepEqual(current, value.files, 'Active Serve source changed since its explicit snapshot; freeze a new reviewed snapshot, never refresh it during a run.');
-  return { sourceSnapshotSha256: hash(bytes), sourceCommitted: false, sourceBaseCommit: value.sourceBaseCommit,
+  if (value.sourceCommitted) assert.equal(sourceCommitted(source), true, 'Committed Serve source has uncommitted changes.');
+  return { sourceSnapshotSha256: hash(bytes), sourceCommitted: value.sourceCommitted, sourceBaseCommit: value.sourceBaseCommit,
     candidateRevision: '2026-09-26.candidate-7', sourceSnapshotFiles: current.length };
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
@@ -52,7 +60,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.equal(process.argv[2], '--write'); assert.ok(process.env.TANSR_SERVE_SOURCE, 'TANSR_SERVE_SOURCE is required.');
   const source = realpathSync(process.env.TANSR_SERVE_SOURCE), files = inventory(source); approvedSchemas(files);
   const value = { format: 'tansr-serve-source-snapshot-v1', task: process.env.TANSR_SERVE_EVIDENCE_TASK ?? 'NET-Serve-integration', createdAt: new Date().toISOString(),
-    sourceRoot: source, sourceCommitted: false, sourceBaseCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', windowsHide: true }).trim(), files };
+    sourceRoot: source, sourceCommitted: sourceCommitted(source), sourceBaseCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', windowsHide: true }).trim(), files };
   writeFileSync(resolve(process.argv[3]), JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify(verifyServeSourceSnapshot(source, resolve(process.argv[3]))));
 }

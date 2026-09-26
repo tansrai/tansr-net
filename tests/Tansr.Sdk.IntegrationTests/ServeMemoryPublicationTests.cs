@@ -32,6 +32,17 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
         var origin = new Uri(Required("TANSR_SERVE_MEMORY_URL")); Assert.Equal("127.0.0.1", origin.Host);
         var directory = Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "memory-publication");
         var deviceDirectory = Path.Combine(directory, "dotnet-device"); Directory.CreateDirectory(deviceDirectory);
+        var diagnosticsGate = new object(); var started = System.Diagnostics.Stopwatch.StartNew(); var diagnosticCount = 0;
+        void Diagnostic(string stage, object? details = null)
+        {
+            lock (diagnosticsGate)
+            {
+                Assert.True(++diagnosticCount <= 4096, "Synthetic diagnostic record limit exceeded.");
+                File.AppendAllText(Path.Combine(directory, "dotnet-stages.jsonl"), JsonSerializer.Serialize(new
+                { at = DateTimeOffset.UtcNow, elapsedMs = started.ElapsedMilliseconds, stage, details }) + "\n");
+            }
+        }
+        Diagnostic("fixture.start");
         var work = Path.Combine(deviceDirectory, "workspace"); Directory.CreateDirectory(work);
         var identity = await CommandAsync(new { id = "memory-identity", action = "identity" }, ct);
         var path = Path.Combine(deviceDirectory, "memory.sqlite");
@@ -61,16 +72,45 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
         }, http);
         var control = new TerminalSessionControl(client, enablePreview: true);
         var session = await client.CreateSessionAsync(new CreateSessionOptions { Tools = ["SearchMemory"] }, ct);
+        Diagnostic("session.created", new { sessionId = session.Id });
+        var approvals = new HashSet<string>(StringComparer.Ordinal);
+        async Task ObserveAsync(AgentEvent item, ConcurrentQueue<AgentEvent>? events, CancellationToken token)
+        {
+            events?.Enqueue(item); Diagnostic("session.event", new { item.Name, item.Id });
+            if (item.Name != "server.permission.request") return;
+            var request = item.Data.GetProperty("payload");
+            Assert.Equal(session.Id, item.Data.GetProperty("sessionId").GetString());
+            Assert.Equal("SearchMemory", request.GetProperty("name").GetString());
+            Assert.Equal("ask", request.GetProperty("attribution").GetProperty("decision").GetString());
+            Assert.True(request.GetProperty("expiresAt").GetInt64() > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            var requestId = request.GetProperty("requestId").GetString()!; var digest = request.GetProperty("digest").GetString()!;
+            Assert.False(string.IsNullOrEmpty(requestId)); Assert.False(string.IsNullOrEmpty(digest)); Assert.True(approvals.Add(requestId));
+            Diagnostic("permission.allow", new { name = "SearchMemory", requestId, digest });
+            await session.PermissionAsync(requestId, digest, true, token);
+            Diagnostic("permission.accepted", new { requestId });
+        }
         using var workspace = new WindowsWorkspace(work);
         using var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
         {
+            // This is full-lifecycle acceptance, not the separate capacity-refusal case. The original
+            // journal permanently reserves 262144 bytes per receipt; explicitly plan the whole chain.
             Path = Path.Combine(deviceDirectory, "execution.sqlite"),
             Mode = StorageOpenMode.Create,
             ExecutorId = "net-memory-pc",
             ApplicationScopeId = "net-integration-app",
             EndUserId = "net-integration-user",
-            ReadContext = () => Scope
+            ReadContext = () => Scope,
+            MaxOperations = 1024,
+            MaxStoredBytes = 512L * 1024 * 1024,
+            MaxPages = 131072
         }, ct);
+        Diagnostic("execution.journal.capacity", new
+        {
+            maxOperations = 1024,
+            maxStoredBytes = 512L * 1024 * 1024,
+            maxPages = 131072,
+            reason = "Fixed full-lifecycle receipt reservation; product defaults and capacity rejection tests unchanged."
+        });
         var memoryHost = new WindowsMemoryPublicationHost(publication, enablePreview: true);
         var backend = new WindowsExecutorBackend("net-memory-pc", [new WindowsExecutorWorkspace("work", "1", workspace)], [memoryHost.CreateTool()]);
         var operations = new ConcurrentQueue<JsonElement>();
@@ -80,6 +120,11 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
                 Assert.Equal("MemoryPublication", operation.GetProperty("toolName").GetString());
                 Assert.Equal("tool.invoke", operation.GetProperty("request").GetProperty("operation").GetString());
                 Assert.Equal("TansrTerminalMemoryPublication", operation.GetProperty("request").GetProperty("args").GetProperty("name").GetString());
+                Diagnostic("execution.authorized", new
+                {
+                    operationId = operation.GetProperty("operationId").GetString(),
+                    action = PublicationRequest(operation).GetProperty("action").GetString()
+                });
                 operations.Enqueue(operation.Clone()); return Task.CompletedTask;
             });
         JsonElement? savedCommit = null; string? savedOwner = null; JsonElement? pinReceipt = null;
@@ -87,25 +132,30 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
         try
         {
             Assert.Empty(operations); await host.StartAsync(ct); Assert.Empty(operations);
+            Diagnostic("device.ready");
             var initial = await control.ReadMemoryAsync(session.Id, ct);
+            Diagnostic("memory.initial-read");
             Assert.Equal("client-managed", initial.GetProperty("memory").GetProperty("identity").GetProperty("kind").GetString());
             await CommandAsync(new { id = "initial-idle", action = "idle" }, ct);
             var first = await session.SendAndObserveAsync("NET_MEMORY_SEED. This is a durable synthetic user preference: " + Fact,
-                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, cancellationToken: ct);
+                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, token) => ObserveAsync(item, null, token), ct);
             Assert.False(first.WasAborted);
+            Diagnostic("seed.completed");
             var afterExtraction = await CommandAsync(new { id = "after-extraction", action = "inspect" }, ct);
             Assert.True(afterExtraction.GetProperty("initialExtractionDone").GetBoolean());
             Assert.Contains(Fact, afterExtraction.GetProperty("files").GetProperty("net-preference.md").GetString());
             Assert.Contains("net-preference.md", afterExtraction.GetProperty("files").GetProperty("MEMORY.md").GetString());
             Assert.Contains(operations, operation => PublicationRequest(operation).GetProperty("action").GetString() == "commit");
+            Diagnostic("extraction.verified");
 
             var recallEvents = new ConcurrentQueue<AgentEvent>();
             var recalled = await session.SendAndObserveAsync("NET_MEMORY_RECALL. Search the stored report preference and apply it.",
-                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, _) => { recallEvents.Enqueue(item); return Task.CompletedTask; }, ct);
+                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, token) => ObserveAsync(item, recallEvents, token), ct);
             Assert.False(recalled.WasAborted);
             Assert.Contains(recallEvents, item => item.Data.GetRawText().Contains("NET_MEMORY_ADOPTED: violet report headings.", StringComparison.Ordinal));
             var afterRecall = await CommandAsync(new { id = "after-recall", action = "inspect" }, ct);
             Assert.True(afterRecall.GetProperty("recallAdopted").GetBoolean());
+            Diagnostic("recall.verified");
 
             var state = await control.ReadMemoryAsync(session.Id, ct);
             var pin = control.CreateMemoryOperation(session.Id, state, "pin-request", "pin-operation", Json(new { kind = "pin", text = "NET_PIN_449: review synthetic preferences." }));
@@ -132,11 +182,12 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
             await CommandAsync(new { id = "confirm-deletion-floor", action = "deletion-floor", generation = "1" }, ct);
             var absentEvents = new ConcurrentQueue<AgentEvent>();
             await session.SendAndObserveAsync("NET_MEMORY_AFTER_DELETE. Search for the deleted report preference without reconstructing it from the conversation.",
-                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, _) => { absentEvents.Enqueue(item); return Task.CompletedTask; }, ct);
+                new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, token) => ObserveAsync(item, absentEvents, token), ct);
             Assert.Contains(absentEvents, item => item.Data.GetRawText().Contains("NET_MEMORY_ABSENT_CONFIRMED", StringComparison.Ordinal));
             var absence = await CommandAsync(new { id = "after-delete-search", action = "inspect" }, ct);
             Assert.True(absence.GetProperty("forgottenAbsent").GetBoolean());
             Assert.Equal(JsonValueKind.Null, absence.GetProperty("files").GetProperty("net-preference.md").ValueKind);
+            Assert.Equal(2, approvals.Count); Diagnostic("forget.verified");
 
             var beforeRevoke = operations.Count;
             await CommandAsync(new { id = "revoke-memory", action = "enabled", enabled = false }, ct);
@@ -149,20 +200,28 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
             var committed = operations.Last(operation => PublicationRequest(operation).GetProperty("action").GetString() == "commit");
             savedCommit = PublicationRequest(committed); savedOwner = Owner(committed);
         }
-        catch (Exception error) { primaryError = error; throw; }
+        catch (Exception error) { primaryError = error; Diagnostic("test.failed", new { type = error.GetType().Name, code = (error as TansrProtocolException)?.Code }); throw; }
         finally
         {
             Exception? cleanupError = null;
             if (!sessionClosed)
             {
+                Diagnostic("cleanup.close.begin");
                 // The original execution poll remains active while Serve cancels and drains its owned resources.
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-                try { await CommandAsync(new { id = "close-memory-after-failure", action = "close-session" }, cleanup.Token); }
-                catch (Exception error) { cleanupError = error; output.WriteLine("Original Serve cleanup failed: " + error.GetType().Name); }
+                try { await CommandAsync(new { id = "close-memory-after-failure", action = "close-session" }, cleanup.Token, allowOriginalFailure: true); }
+                catch (Exception error) { cleanupError = error; Diagnostic("cleanup.close.failed", new { type = error.GetType().Name }); output.WriteLine("Original Serve cleanup failed: " + error.GetType().Name); }
             }
             try { await host.StopAsync(); }
             catch (Exception error) { cleanupError ??= error; output.WriteLine("Device host cleanup failed: " + error.GetType().Name); }
+            Diagnostic("execution.journal.consumption", new
+            {
+                authorizedOperations = operations.Select(item => item.GetProperty("operationId").GetString()).Distinct(StringComparer.Ordinal).Count(),
+                physicalBytes = new[] { "execution.sqlite", "execution.sqlite-wal", "execution.sqlite-shm" }
+                    .Select(name => new FileInfo(Path.Combine(deviceDirectory, name))).Where(file => file.Exists).Sum(file => file.Length)
+            });
             if (primaryError is null && cleanupError is not null) throw cleanupError;
+            Diagnostic("cleanup.device.stopped");
         }
 
         await publication.CloseAsync(ct);
@@ -196,21 +255,37 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
         }
         return WireJson.Parse(buffer.ToArray());
     }
-    private static async Task<JsonElement> CommandAsync(object command, CancellationToken cancellationToken)
+    private static async Task<JsonElement> CommandAsync(object command, CancellationToken cancellationToken, bool allowOriginalFailure = false)
     {
         var directory = Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "memory-publication"); var value = Json(command); var id = value.GetProperty("id").GetString();
-        var temporary = Path.Combine(directory, "host-command.tmp");
-        await File.WriteAllBytesAsync(temporary, WireJson.EncodeControl(value), cancellationToken);
-        File.Move(temporary, Path.Combine(directory, "host-command.json"), true);
+        Assert.Matches("^[a-z0-9-]{1,64}$", id!);
+        if (allowOriginalFailure) Assert.Equal("close-session", value.GetProperty("action").GetString());
+        var temporary = Path.Combine(directory, "host-commands", id + ".tmp");
+        await using (var file = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous))
+            await file.WriteAsync(WireJson.EncodeControl(value), cancellationToken);
+        File.Move(temporary, Path.Combine(directory, "host-commands", id + ".json"));
         for (; ; )
         {
-            cancellationToken.ThrowIfCancellationRequested(); var path = Path.Combine(directory, "host-response.json");
+            cancellationToken.ThrowIfCancellationRequested(); var path = Path.Combine(directory, "host-responses", id + ".json");
+            var failurePath = Path.Combine(directory, "host-failure.json");
+            if (!allowOriginalFailure && File.Exists(failurePath))
+            {
+                Assert.InRange(new FileInfo(failurePath).Length, 1, 16384);
+                using var failed = JsonDocument.Parse(await File.ReadAllBytesAsync(failurePath, cancellationToken));
+                throw FixtureFailure(failed.RootElement);
+            }
             if (File.Exists(path))
             {
                 using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(path, cancellationToken));
-                if (document.RootElement.GetProperty("id").GetString() == id) return document.RootElement.GetProperty("value").Clone();
+                Assert.Equal(id, document.RootElement.GetProperty("id").GetString());
+                if (document.RootElement.TryGetProperty("failure", out var failed)) throw FixtureFailure(failed);
+                return document.RootElement.GetProperty("value").Clone();
             }
             await Task.Delay(20, cancellationToken);
         }
     }
+
+    private static InvalidOperationException FixtureFailure(JsonElement failure) => new(
+        "Synthetic Serve fixture failed at " + failure.GetProperty("stage").GetString() + " [" +
+        failure.GetProperty("type").GetString() + "]: " + failure.GetProperty("message").GetString());
 }

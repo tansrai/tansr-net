@@ -1,6 +1,6 @@
 # NETSDK 实施记录
 
-日期：2026-09-26。状态：前三批本地集成与候选包消费已通过；新增 `20260926-NET-04-prompt-observation` 继续原 NET-02/05 的提示词来源接线，验收事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。下文保留既有批次事实。
+日期：2026-09-26。状态：前四批本地增量已收编；当前 `20260926-NET-05-device-memory` 接入设备自动记忆介质、原执行链和原生示例，并修正 net48 原生资产消费。该批真实 Serve 复验仍在处理，最终事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。当前完整工程0/6、验收2/24（A03/A06）；下文保留既有批次事实，不将历史快照当作当前进度。
 
 ## 责任、源码和边界
 
@@ -266,3 +266,19 @@ Windows四条失败只修测试：原执行账本按 canonical JSON 保存，回
 独立net48消费新增真实记忆IO后暴露旧打包缺口：SQLite初始化失败。原生包未缺字节，根目录DLL哈希与NuGet原包x86一致；当前SDK10.0.301在默认.NET Framework可执行项目先隐式推断win-x86，依赖按此复制单个x86 DLL，随后ResolveReferences把默认PlatformTarget恢复AnyCPU，实际CLR4为64位。上游SQLite的无RID双目录分支此时又因隐式RID而没有启用。修复须在包的buildTransitive中限定这个推断组合，使用已解析原依赖的x86/x64分目录，不覆盖用户RID/PlatformTarget、不切成32位求绿。原失败包、inner异常、PE/原依赖哈希和MSBuild前后属性留在本批archive；首次失败不计消费通过。
 
 上述修复已加入 `buildTransitive/net48/Tansr.Sdk.Windows.targets`，WinForms项目引用也导入同一文件；保持依赖锁不变，只从实际已解析的原生资产定位同包两架构目录。定向诊断中默认CLR4/publish实际记忆链通过；显式x64仍为win-x64/x64，新增补目录item为空；WinForms也解析出正确runtime路径。正式新包自动导入与独立消费由后续回执单独证明，不用诊断的手动Import代替NuGet行为。
+
+第二轮包检查又定位到构建目标未入包：原 `None Update` 在单目标inner build存在，但多目标outer build没有对应实例。改为显式Remove/Include后，outer/inner/_GetPackageFiles均只有一个打包项。保留 `packages-native-layout` 的原失败包与消费日志，第三轮从 `packages-final` 和全新独立消费目录验证，禁止在缓存中手工补文件后冒称NuGet已修。
+
+最终两包产品提交 `799ebc4a8ecf39cef168c3836f2d850ba2fa0c99`；全解决方案重建仍0警告0错误。新Windows nupkg实际包含与源码一致的buildTransitive目标，全新消费工程由NuGet自动导入，net48实际CLR4.0.30319.42000与.NET10.0.9的Windows消费均完成新记忆创建、分块提交、关闭/重开/原终态/中文读取以及原文件/进程消费；win-x64 NativeAOT实际运行也通过（验证核心协议，不冒充Windows存储AOT）。见 `build-native-layout.log`、`native-layout-package-final.json`、`package-consumption-final.log`、`consumers-final/`。格式前次verify通过，最终增量另核；未重复启动未变的核心和现代Windows池。
+
+最终SDK核心包466349字节，SHA256 `ada5a63439d56038f1a8761211e3dec1f015a027a09fae96af56a9a596071582`；Windows包295634字节，SHA256 `fb88041dbec9c8958a361c08d42c3489e991e0ca11547e3520c8f2ecd9e4db6f`，见 `candidate-artifacts-final.json`。版本仍是隔离本地候选0.1.0-preview.1，不代表已经上架。
+
+### 真实记忆联验的修正记录
+
+`serve-integration-r1.log` 在读取 Git 状态时因本机提交内存不足退出，未进入测试；关闭本任务闲置的 MSBuild 编译服务后继续，未关闭用户应用。r2执行5项，旧传输3项通过、两条公开链因 Windows 拒绝覆盖正在读取的测试命令文件而失败。测试 IPC 改为每条命令独立且不可覆盖的原子文件，保留原业务断言。
+
+r3执行5项、4通过1失败：新记忆链已通过真实提取/写入，但 SearchMemory 等待用户审批，测试只记录事件、没有调用原 PermissionAsync，最终 stream_idle_timeout。现仅批准属于原会话、工具名 SearchMemory、未过期且原 requestId/digest 有效的两次请求，权限引擎不变。持久执行库当时169个操作均为 completed，不能把该失败称为客户端丢回执或 Serve 死锁；见 `serve-r3-operation-diagnosis.json`。
+
+r4补回审批后保留110秒总期限、40秒业务轮、30秒流空闲及原30秒提取排空断言。实际提取写入成功，但分块链每次短暂空轮询后等待250毫秒，提取资源未在30秒内排空；4项旧链已通过，新链未产生通过结论，最终runner退出1。测试辅助程序对首个错误缺少即时失败响应也拖延收尾；本次补有界失败文件与独立关闭通道。正在修正真实执行宿主的空轮询退避，产品变化与后续完整回执单独记录，不抹去这些原红。
+
+执行宿主现保持原HTTP轮询合同与逐条耐久执行，在收到并结算非空批次后，从25毫秒短等待逐步退避至原250毫秒上限；启动和持续空闲仍为250毫秒。它不并发工具、不自动重试HTTP错误、不改变旧请求或回执。脚本化的即时空批测试补上了原阻塞Channel替身的盲点，覆盖短等待/封顶等待中取消、顺序和一次副作用。完整记忆联验显式规划1024操作、512MiB逻辑字节和131072页；原默认64MiB只容纳约255份262KiB永久回执，不能承诺覆盖整组多次提取/检查/删除链。测试不自动扩容或清账，产品默认与容量负例不变。
