@@ -85,7 +85,10 @@ export async function startSessionControlsFixture({ source, directory, authentic
     };
     const store = createServeAgentSessionStore({ dir: join(root, 'sessions'), ownership: {} });
     const build = createAgentSessionFactory({ cwd: root, store, configuration: {},
-      platform: { apiBaseUrl: FAKE_API_BASE, appId: 'net-integration-app', appKey: 'synthetic-only', fetchImpl, maxOutputTokens: 128,
+      // Keep enough declared output capacity for the real kernel's minimum 1024-token
+      // thinking budget. A 128 cap legitimately squeezes thinking off before TWP encoding.
+      // The synthetic upstream still returns only the fixed short text above; no paid call.
+      platform: { apiBaseUrl: FAKE_API_BASE, appId: 'net-integration-app', appKey: 'synthetic-only', fetchImpl, maxOutputTokens: 8192,
         ...(name === 'absent' ? {} : { system: name === 'empty' ? [] : [{ text: 'NET_HOST_S' }] }), systemAppend: [{ text: 'NET_APPEND_A' }] } });
     const factory = { ...build.factory, async create(init) {
       const result = await build.factory.create(init); handles.set(result.handle.sessionId, { handle: result.handle, profile: name }); return result;

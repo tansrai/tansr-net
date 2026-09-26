@@ -96,7 +96,7 @@ public sealed class ServeSessionControlsTests
             var history = (await session.GetHistoryAsync(ct)).GetRawText(); Assert.Contains(Inserted, DecodeJsonStrings(history));
             Assert.DoesNotContain("NET_WRONG_REPLACEMENT", history); Assert.DoesNotContain("NET_REJECTED_DRAFT", history); Assert.DoesNotContain("NET_LATE_DRAFT", history);
             Assert.Single(seen, item => item.Name == "turn.started"); Assert.Single(seen, item => item.Name == "turn.completed");
-            Assert.DoesNotContain(seen, item => item.Name is "turn.aborted" or "turn.error");
+            Assert.DoesNotContain(seen, item => item.Name == "turn.aborted" || IsFatalError(item));
             await observe.StopAsync();
 
             // Explicit interruption is separate from the observation disconnect above.
@@ -134,7 +134,9 @@ public sealed class ServeSessionControlsTests
             await CommandAsync(new { action = "settle", sessionId = session.Id }, ct);
             var history = await session.GetHistoryAsync(ct); var original = await control.ReadConfigurationAsync(session.Id, ct);
             Assert.Equal(0, original.GetProperty("configuration").GetProperty("revision").GetInt64());
-            var change = control.CreateConfigurationOperation(session.Id, "config-original", 0, Json(new { model = "controls-large", thinking = new { budget = 64 } }));
+            // The real kernel minimum is 1024. Smaller configured values can be valid
+            // control requests but are deliberately disabled by its output budget clamp.
+            var change = control.CreateConfigurationOperation(session.Id, "config-original", 0, Json(new { model = "controls-large", thinking = new { budget = 1024 } }));
             var lost = await Assert.ThrowsAsync<TansrProtocolException>(() => control.ApplyConfigurationAsync(change, ct)); Assert.Equal("network_error", lost.Code);
             Assert.Equal(1, loss.LostResponseCount);
             using var resumedClient = new TansrClient(Options()); var recoveredControl = new TerminalSessionControl(resumedClient, enablePreview: true);
@@ -147,6 +149,7 @@ public sealed class ServeSessionControlsTests
             Assert.Equal(WireJson.CanonicalString(history.GetProperty("messages")), WireJson.CanonicalString(afterConfiguration.GetProperty("messages")));
             Assert.True(afterConfiguration.GetProperty("lastSeq").GetInt64() >= history.GetProperty("lastSeq").GetInt64());
             var current = replay.GetProperty("configuration"); Assert.Equal(1, current.GetProperty("revision").GetInt64());
+            Assert.Equal(1024, current.GetProperty("thinking").GetProperty("budget").GetInt32());
             Assert.Equal(65536, (await session.ReadMetadataAsync(ct)).Context!.Value.GetProperty("selected").GetProperty("contextWindowTokens").GetInt32());
             foreach (var (id, revision, changes, code) in new[]
             {
@@ -226,6 +229,8 @@ public sealed class ServeSessionControlsTests
     }
 
     private static SessionInputTarget Target(JsonElement capabilities) => new(capabilities.GetProperty("target").GetProperty("historyEpoch").GetString()!, capabilities.GetProperty("target").GetProperty("turnId").GetString()!);
+    private static bool IsFatalError(AgentEvent item) => item.Name == "turn.error" &&
+        (!item.Data.TryGetProperty("recoverable", out var recoverable) || recoverable.ValueKind != JsonValueKind.True);
     private static string[] UserTexts(JsonElement request) => Texts(request, "user");
     private static string[] SystemTexts(JsonElement request) => Texts(request, "system");
     private static string[] Texts(JsonElement request, string role) => request.GetProperty("thread").EnumerateArray().Where(item => item.GetProperty("role").GetString() == role)
@@ -283,7 +288,8 @@ public sealed class ServeSessionControlsTests
                     await session.ObserveAsync((item, _) =>
                     {
                         events.Enqueue(item);
-                        if (item.Name is "turn.completed" or "turn.aborted" or "turn.error") terminal.TrySetResult(item);
+                        if (item.Name is "turn.completed" or "turn.aborted") terminal.TrySetResult(item);
+                        else if (IsFatalError(item)) terminal.TrySetException(new InvalidOperationException("The real original turn reported a non-recoverable error."));
                         return Task.CompletedTask;
                     }, new EventStreamOptions { LastEventId = lastSequence.ToString(CultureInfo.InvariantCulture), Reconnect = false }, stop.Token);
                 }

@@ -19,7 +19,7 @@ const required = name => {
 };
 const source = realpathSync(required('TANSR_SERVE_SOURCE'));
 const suite = process.env.TANSR_SERVE_TEST_SUITE ?? 'all';
-assert.ok(['all', 'controls', 'execution', 'new'].includes(suite), 'Unknown named integration suite.');
+assert.ok(['all', 'controls', 'execution', 'new', 'memory'].includes(suite), 'Unknown named integration suite.');
 assert.ok(suite === 'all' || process.env.TANSR_SERVE_SOURCE_SNAPSHOT, 'Named candidate suites require the pinned source snapshot.');
 const sourceFile = path => resolve(source, path);
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -236,6 +236,7 @@ async function run() {
       (ready.controlsUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests' : '') +
       (ready.executionUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests' : '');
     const filter = suite === 'all' ? allFilter : [
+      ...(suite === 'memory' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests'] : []),
       ...(suite === 'controls' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests'] : []),
       ...(suite === 'execution' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests'] : [])].join('|');
     const args = ['test', resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj'),
@@ -266,13 +267,13 @@ async function run() {
           assert.equal(result.publicEvidence.mainExchanges, process.env.TANSR_SERVE_SOURCE_SNAPSHOT ? 4 : 3, 'Real kernel/device/material flow did not run.');
           for (const suffix of ['/initialize', '/execution-bindings', '/receipts', '/archive/records', '/archive/acks', '/material-responses'])
             assert.ok(result.publicEvidence.routes.some(path => path.endsWith(suffix)), `Missing public product route: ${suffix}`);
-          if (process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
-            assert.equal(result.memoryEvidence?.realKernel, true, 'Memory publication did not use the real kernel.');
-            for (const flag of ['initialExtractionDone', 'recallAdopted', 'forgottenAbsent', 'closedSession'])
-              assert.equal(result.memoryEvidence[flag], true, `Memory publication evidence missing: ${flag}`);
-            assert.equal(result.memoryEvidence.mainCalls, 5, 'Seed/recall/deleted-source recall did not follow their original model loops.');
-            assert.ok(result.memoryEvidence.routes.some(route => route.method === 'POST' && route.path.endsWith('/memory/commands')));
-          }
+        }
+        if (exitCode === 0 && (suite === 'all' || suite === 'memory') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
+          assert.equal(result.memoryEvidence?.realKernel, true, 'Memory publication did not use the real kernel.');
+          for (const flag of ['initialExtractionDone', 'recallAdopted', 'forgottenAbsent', 'closedSession'])
+            assert.equal(result.memoryEvidence[flag], true, `Memory publication evidence missing: ${flag}`);
+          assert.equal(result.memoryEvidence.mainCalls, 5, 'Seed/recall/deleted-source recall did not follow their original model loops.');
+          assert.ok(result.memoryEvidence.routes.some(route => route.method === 'POST' && route.path.endsWith('/memory/commands')));
         }
         if (exitCode === 0 && (suite === 'all' || suite === 'execution' || suite === 'new') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
           assert.equal(result.executionEvidence?.realKernel, true);
@@ -292,7 +293,7 @@ async function run() {
         if (suite === 'all') console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
           exchanges: result.publicEvidence.exchanges, mainExchanges: result.publicEvidence.mainExchanges,
           memoryExchanges: result.publicEvidence.memoryExchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
-        if (suite === 'all' && result.memoryEvidence) console.log(JSON.stringify({ acceptance: 'public-Serve-device-memory-publication',
+        if ((suite === 'all' || suite === 'memory') && result.memoryEvidence) console.log(JSON.stringify({ acceptance: 'public-Serve-device-memory-publication',
           realKernel: result.memoryEvidence.realKernel, mainCalls: result.memoryEvidence.mainCalls,
           extractionCalls: result.memoryEvidence.extractionCalls, initialExtractionDone: result.memoryEvidence.initialExtractionDone,
           recallAdopted: result.memoryEvidence.recallAdopted, forgottenAbsent: result.memoryEvidence.forgottenAbsent,
