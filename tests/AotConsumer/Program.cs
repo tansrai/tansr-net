@@ -10,7 +10,8 @@ using var view = new SessionView();
 view.AppendUserMessage("AOT 原生消费 😀");
 using var client = new TansrClient(new TansrClientOptions
 {
-    BaseUri = new Uri("https://example.invalid"), TokenProvider = _ => Task.FromResult("synthetic-no-request"), ExecutionScopeProvider = () => scope,
+    BaseUri = new Uri("https://example.invalid"), TokenProvider = _ => Task.FromResult("synthetic-no-request"),
+    PrincipalProvider = () => "synthetic-package-principal", ExecutionScopeProvider = () => scope,
 });
 var preview = new TerminalSessionControl(client, enablePreview: true);
 var change = WireJson.Parse(Encoding.UTF8.GetBytes("{\"thinking\":{\"budget\":2048}}"));

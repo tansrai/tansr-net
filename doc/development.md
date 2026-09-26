@@ -162,7 +162,7 @@ SDK核心候选包 SHA256 `298eb0ac0278b71b0b38edfc85230a71477851173f0c14ae1b909
 | 原卡 | 本批实装差量 | 保留边界 |
 |---|---|---|
 | NET-01 | 固定 terminal candidate-7、独立 ACK recovery schema/金样/DDL，以及原 SDK2 共用定义机械核对；原五份合同正文不改 | 上游工作树增量仍需最终主线源码锁定；公开入口属于显式 preview，不是稳定发行会签 |
-| NET-02 | 同一客户端认证及 scope 下的配置 CAS、记忆指令/原操作查账；原键请求对象、显式恢复/重放；控制与设备分凭据的公开输出绑定、SSE视图及捕获接线 | 候选只支持 model/thinking；任务/费用预算、脱敏有效 system 来源、配置原键只读查账仍为 Serve 原卡缺口；不虚构字段 |
+| NET-02 | 同一客户端认证及 scope 下的配置 CAS、记忆指令/原操作查账；原键请求对象、显式恢复/重放；控制与设备分凭据的公开输出绑定、SSE视图及捕获接线 | 新配置候选支持 model/thinking；原创建预算及动态 systemFor 继续有效。应用提示词 policy/source 观察尚待原 P05 接线；不把新增预算来源 API 或配置专用只读查账路由追加为原 DoD 阻塞，配置原键完整 POST 是显式幂等恢复 |
 | NET-03 | 原 Windows 执行器扩展后台启动/查询/取消/输出读取/产物删除，真实 started witness、Job收尾、固定文件句柄、输出帽与未知 runtime 语义；保留前台原执行行为 | 旧 runtime 不可凭 PID 接管；unknown/totalBytes:null 不能称成功；完整 hooks/插件/子代理与跨端对照仍待完成 |
 | NET-04 | 原 SQLite Store 显式明文 sync recovery 创建/重开/迁移，耐久恢复意图、完整容量预留、不可变账本、COMMIT未知重开与原回执；独立 HTTP/coordinator、双副本恢复和 Node 互通 | terminal普通族、加密/cache/history恢复未覆盖；原文件和加密能力保留；记忆管理命令不等于完整终端自动出版生命周期 |
 | NET-05 | WPF/WinForms/Console 同轮插入、原输入对账、本机草稿/离线呈现、preview配置/记忆；Console 1–8并发多会话worker，逐会话接纳/终局/清理 | 本机UI历史不作为可信模型供材；真实媒体录音/解码、当前授权约束下的档案装配和完整16组对照仍保留 |
@@ -177,4 +177,40 @@ SDK核心候选包 SHA256 `298eb0ac0278b71b0b38edfc85230a71477851173f0c14ae1b909
 - 首轮核心测试新夹具误用了异常基类精确断言或非法的协商 Limits；按原错误合同和原限制修夹具，没有放宽产品约束。原红日志保留。
 - 真实 Serve 联验发现公开 archive 工厂漏透 `terminalCapabilities`，导致有效配置/记忆安装事实在发现层丢失，C# 正确拒绝 `unsupported_capability`。已交 Serve 单写者补实时 getter；不在测试夹具伪造支持，不做消费者降级。最终验证结果另记。
 
-完整工程卡仍按原完整 DoD 统计：**已完整完成0/6，剩余6，本批新增关闭0，进度0%**。完整验收：**已完整完成0/24，剩余24，本批新增关闭0，进度0%**。这是完整闭环比例，不是代码完成比例；上表明确本批实际产品差量和剩余条件。
+完整工程卡仍按原完整 DoD 统计：**已完整完成0/6，剩余6，本批新增关闭0，进度0%**。依原断言独立结算，**NET-A03、NET-A06 已通过；验收2/24，剩余22，本批新增关闭2，进度8.3%**。这是完整闭环比例，不是代码完成比例；不得把其他卡的发行或真实 UI 控件门追加给这两项原断言。
+
+### 本批最终本地回执
+
+产品提交为 `b33be4b76dda10ba86ae12fe704edcd646476342`，后续收编提交仅修正联验/消费夹具与回填文档，不改变已打包的产品源。以下证据均相对 `J:/tansr/archive/20260926-NET-03-native-services`；局部重叠结果不再累加。
+
+| 验证 | 实际结果 | 证据 |
+|---|---|---|
+| 依赖锁、Release 全解决方案构建 | locked restore exit0；原依赖锁不变；0警告0错误 | `windows-final/manifest.json`、`build-candidate.log` |
+| 全仓格式 | 产品候选及最终夹具 verify-no-changes exit0 | `format-verify.log`、`format-closure.log` |
+| 核心集中池 | 627/627，0失败、取消、跳过 | `core-accepted.log`、`results/core-accepted.trx`、`suite-summary.json` |
+| Windows 集中池 | 252/252，0失败、取消、跳过；含真实 Node 旧明文/密文与新恢复库双向互通、后台进程、原生 MCP 消费 | `windows-final/manifest.json`、`windows-final/results/windows.trx` |
+| 真实 Serve 公开链 | 4/4，0失败/跳过，12.9071秒；主任务4次与独立无写记忆提取2次合成模型交换，无付费调用 | `serve-integration-7.log`、`serve-integration-evidence.json` |
+| 真实链同源证明 | 3018个运行源码文件前后相同，35个 workspace source 解析；基点 `b2cd6641e1886d9e74439e3b7623be57bc3247ba` 加未提交候选 | `serve-source-snapshot-3.json`，SHA256 `f62f28ca2b2ae26980cd4badb3ac48c420ec4aa888e81fb07ce55cfe010fcc18` |
+| 两个本地候选包 | 均为 `0.1.0-preview.1`；程序集产品版本指向 `b33be4b`，未上传 NuGet | `pack-core.log`、`pack-windows.log`、`candidate-artifacts.json` |
+| 独立包消费 | 隔离 NuGet 源下 net48 实际 CLR4、现代 Windows 与 win-x64 NativeAOT 可执行文件均运行通过 | `package-consumption-accepted.log`、`consumers-accepted/` |
+
+本次关闭的原断言按实际证据映射如下，不另生成任务卡：
+
+| 原断言 | 已验证的原条件 | 同批证据 |
+|---|---|---|
+| NET-A03 | TS/C#原始同源向量逐字节编解码；UTF-8/边界数字/null与缺失/重复和未知关键字段/深度及长度/篡改摘要拒绝；原定义、候选定义与指纹核对 | `WireJsonTests`、`TerminalCandidateContractTests`、`EmbeddedCandidateContractTests`，均在 `results/core-accepted.trx` 通过；候选离线校验 `candidate-final-audit.json` |
+| NET-A06 | 实际 HTTP Stream 每字节 SSE、UTF-8半字/CRLF/多行data、游标重连/重复/缺口、多观察者、慢UI有界、关闭消费；正文/思考stream/final/off、重放不双计 | `SessionEventTests`、`SessionViewTests`，均在 `results/core-accepted.trx` 通过；真实 Serve HTTP/SSE `serve-integration-7.log` |
+
+固定16组完整Electron业务对照仍为0/16，六张父卡均为实施中。A01完整行为映射、A07完整动态控制与提示词、A09流式同命令基准、A12扩展组合、A14完整自动记忆、A17/18真实两框架UI等原条件不因上述两条通过而关闭；未齐证据不等于代码均未实现。
+
+真实链覆盖公开 `DeviceSessionHost` 的 Windows Read、配置更新及原键重放、记忆 pin/原键查询、原密文档案 ACK 成功但丢响应后的重开查账、跨用户原 ACK 查询403、原档案 SSE 按需供材及核心 consumed；另外以真实 store 提交屏障形成旧 ACK 的409，再验证恢复请求已提交但丢响应、新格式 SQLite 重开后继续原恢复键、跨用户 rebase403。没有伪造 ACK 回执、重做原工具或重新生成请求号。Serve archive 工厂漏透能力的缺陷由 Serve 单写者修复，本轮真实链已验证该修正。
+
+SDK 核心包462595字节，SHA256 `51abcca685b14da2256929ab55922d70f8983c58ba98d1512205b6ffeabc6d09`；Windows 包275221字节，SHA256 `3dacae41a57c3540367c77c9fa71507bf21232823180383ab55a15065189fafe`。原 SDK2 五份稳定合同保持不变；终端候选明确锁定 `2026-09-26.candidate-7`，schema SHA256 `8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896`；ACK 恢复 schema SHA256 `f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4`。它们是显式 opt-in 预览，来源未提交的事实继续保留。
+
+候选镜像离线20项校验通过；与当时活跃 Serve 源码的严格字节比对保留3处已解释差异：两份 TypeScript 参考文件换行规范化，一份 RFC 增补原 DDL 的 SHA 说明。schema/金样均不变，原镜像未被静默改写；运行源码另由成功联验的完整 snapshot 固定，见 `candidate-final-audit.json`。该比对 exit1 保留为来源差异，不能写成在线镜像门全绿。
+
+早期红例和来源漂移门拒绝均保留：联验夹具错把只申请 Read 的工具面当成 Read+SearchMemory、漏给恢复会话做平台 initialize、外来主体先查能力而未抵达目标 ACK 路由，以及没有单独响应真实自动记忆任务；均按实际协议修夹具，未放宽权限、15秒空闲限制或产品重试。包消费夹具遗漏明确 PrincipalProvider，补回合成主体后以原包重验，不重打已验产品包。
+
+本批源码收编到本地 NET `main`；准确最终提交及归档文件校验记入本批 `closure-manifest.json`。NET 仓尚未配置 Git remote，因此没有远端推送、GitHub CI、正式签名或发布事实。保留活动隔离树供后续原卡开发，不清除未知文件或其他会话工作树。
+
+下一批继续原卡剩余项：消费 Serve 提示词来源观察与完整终端记忆出版链，补可信宿主的 hooks/插件/子代理装配与故障边界，完成两种原生 UI 的真实媒体及同场景对照，然后按原24项验收结算。原 NETSDK 方案/计划/验收单的跨仓状态由 Serve 文档单写者同步本回执；不得把旧节“未开始”当成当前实现事实，也不得把本批局部通过当作原完整 DoD 已关闭。

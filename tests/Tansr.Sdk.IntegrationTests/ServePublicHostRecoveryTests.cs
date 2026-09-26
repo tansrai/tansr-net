@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Archive;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Execution;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Storage;
@@ -47,7 +48,6 @@ public sealed partial class ServePublicHostIntegrationTests
     private static async Task VerifyForeignAckQueryRejectedAsync(Uri origin, JsonElement acknowledgement, CancellationToken ct)
     {
         using var other = new TansrClient(Options(origin, true)); var archive = new ArchiveClient(other);
-        await archive.GetCapabilitiesAsync(ct);
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => archive.GetOperationAsync(Json(new
         {
             protocol = "sdk2-ext-v1",
@@ -58,11 +58,12 @@ public sealed partial class ServePublicHostIntegrationTests
         Assert.Equal(403, error.StatusCode);
     }
 
-    private static async Task VerifyRebaseRecoveryAsync(Uri origin, string directory, CancellationToken ct)
+    private static async Task VerifyRebaseRecoveryAsync(Uri origin, string directory, JsonElement platform, CancellationToken ct)
     {
         using var lost = new LostResponseHandler("/archive/ack-rebases"); using var http = new HttpClient(lost);
         using var client = new TansrClient(Options(origin), http); var archive = new ArchiveClient(client);
         var session = await client.CreateSessionAsync(new CreateSessionOptions { Tools = [] }, ct);
+        await new ExecutionClient(client).InitializeAsync(Json(new { protocol = "sdk2-ext-v1", sessionId = session.Id, platform, requestedTools = Array.Empty<string>() }), ct);
         await HostCommandAsync(new { id = "arm-recovery", action = "arm-recovery-store", sessionId = session.Id }, ct);
         await session.SendAsync("Produce recovery original answer once.", ct);
         await HostCommandAsync(new { id = "entered-recovery", action = "await-recovery-store", sessionId = session.Id }, ct);
@@ -135,7 +136,7 @@ public sealed partial class ServePublicHostIntegrationTests
             var request = Json(new { operationEpoch = original.GetProperty("request").GetProperty("operationEpoch").GetString(), requestId = "net-fixed-recovery-request" });
             using (var foreign = new TansrClient(Options(origin, true)))
             {
-                var other = new ArchiveClient(foreign); await other.GetCapabilitiesAsync(ct);
+                var other = new ArchiveClient(foreign);
                 var denied = await Assert.ThrowsAsync<TansrHttpException>(() => other.RebaseAckAsync(Json(new { protocol = "sdk2-ext-v1", bindingId, previous = original, request }), ct));
                 Assert.Equal(403, denied.StatusCode);
             }

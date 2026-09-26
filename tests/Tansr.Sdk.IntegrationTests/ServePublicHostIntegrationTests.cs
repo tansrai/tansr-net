@@ -211,7 +211,7 @@ public sealed partial class ServePublicHostIntegrationTests(ITestOutputHelper ou
         }
         finally { await host.StopAsync(); }
         await session.CloseAsync(ct);
-        if (candidate) await VerifyRebaseRecoveryAsync(origin, directory, ct);
+        if (candidate) await VerifyRebaseRecoveryAsync(origin, directory, backend.Registration.GetProperty("platform"), ct);
     }
 
     private static async Task<JsonElement> HostCommandAsync(object command, CancellationToken cancellationToken)

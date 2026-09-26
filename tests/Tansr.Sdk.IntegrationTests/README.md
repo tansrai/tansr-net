@@ -11,6 +11,19 @@ node scripts/serve-integration.mjs
 
 脚本硬性要求已安装依赖的干净 CLI 源码、源码导出与 tsx loader，记录当前 Git SHA、入口/夹具/schema SHA256，拒绝旧 `dist`。它仅监听随机回环端口，用五分钟有效的随机合成令牌；令牌不输出、不落文件。高阶链临时数据保留于忽略目录 `artifacts/serve-integration/run-*`，包括真实执行/档案 SQLite 和 DPAPI 加密密钥，便于失败查账。`dotnet test` 使用 `--no-build --no-restore` 与专用类过滤器。`TANSR_DOTNET` 可指定 dotnet 可执行文件，`TANSR_INTEGRATION_CONFIGURATION` 可显式选择已编译配置。
 
+经作者会签指纹的未提交候选采用独立显式入口，不改变默认干净源码门：
+
+```powershell
+$env:TANSR_SERVE_SOURCE = 'J:/tansr/worktrees/cli-SRV-01-terminal-services'
+node scripts/serve-source-snapshot.mjs --write '<本次归档目录>/serve-source-snapshot.json'
+$env:TANSR_SERVE_SOURCE_SNAPSHOT = '<本次归档目录>/serve-source-snapshot.json'
+node scripts/serve-integration.mjs
+```
+
+快照写入新文件并固定原 base commit、`sourceCommitted: false`、三份已会签 schema 和所有运行源码依赖。脚本在运行前后逐文件核对；任一漂移使本次验收失败，不能在运行中刷新快照。当前终端合同是 `2026-09-26.candidate-7`，仍为显式 preview；来源区间通过不表示整个 Serve 开发树已经最终冻结。
+
 未设置必要环境直接失败，不静默跳过。SDK1 独立测试覆盖默认族的 create/send、真实在线非 ASCII SSE、取消观察不 interrupt、原游标重连、历史及分页、窗口缺口和身份隔离。高阶产品链覆盖公开 DeviceSessionHost 自动初始化/注册/绑定、原审批、Windows 真实 Read、原执行回执、真实轮终局、ArchiveClient 发现既有绑定、ArchiveTransferSession 拉页/正文、DPAPI/AES-GCM SQLite 耐久 ACK 和重开，再通过原档案 SSE 将真实材料请求交给 MaterialSource/SQLite 响应箱，上传后由原核心下一轮消费。材料请求/入队由受控文件 IPC 调用可信宿主生命周期；IPC 不传输材料正文、不代理 SSE，也不是新增产品 HTTP 路由。
+
+候选分支还通过公开 TerminalSessionControl 检查配置修改/重放及记忆 pin/原键查询。原 ACK 的真实成功 HTTP 响应被夹具丢弃后，重开原密文存储并查询原键；跨用户检查直接到目标 ACK 查询。另一独立的明文 source 数据库显式采用新恢复 DDL，以真实提交屏障制造旧 ACK 409，再验证 rebase 成功丢响应、重开、同键重放及跨用户拒绝；原密文档案没有迁移或降级。主场景严格固定 4 次合成模型请求；受信后台记忆请求须匹配 `meta.purpose`、精确工具集合和任务标记，单独有界计数，并返回原指令允许的无写结束。
 
 测试会继续接收第二轮档案；如果该步暴露原修订冲突，保留原 ACK 并使联验失败，不能以延时、改键重投或绕开产品协调器遮掩。传输测试不能证明真实外部模型、跨进程 Serve 冷恢复或完整 SDK 行为等价。端口和子进程退出时收口，工程卡与完整验收项仍须统一审阅。

@@ -23,6 +23,7 @@ internal static class Program
             {
                 BaseUri = new Uri("https://example.invalid"),
                 TokenProvider = _ => Task.FromResult("synthetic-no-request"),
+                PrincipalProvider = () => "synthetic-package-principal",
                 ExecutionScopeProvider = () => WireJson.Parse(Encoding.UTF8.GetBytes("{\"applicationScopeId\":\"app\",\"endUserId\":\"user\",\"authorizationRevision\":\"1\"}")),
             }))
             {

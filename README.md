@@ -66,11 +66,13 @@ dotnet test tests/Tansr.Sdk.Tests -c Release --no-build
 dotnet format Tansr.Sdk.slnx --verify-no-changes --no-restore
 ```
 
-Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI 源码。`test-windows.ps1` 要求新的输出目录，先发布 `net10.0-windows / win-x64` 自包含单文件 Console 示例，通过独立 `NuGetLockFilePath` 隔离发布所需的 RID 锁文件，核对正式锁文件未变，再恢复默认解决方案锁定资产并构建、运行一个 Windows 测试池。脚本设置并在退出时恢复 `TANSR_TEST_MCP_EXE`、`TANSR_TEST_CLI_ROOT`，保存候选摘要、日志、TRX 和 manifest。请把示例输出目录换成每次新的任务归档目录；CLI 目录须先按其锁文件安装依赖，测试会检查原协议版本。
+Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI 源码。`test-windows.ps1` 要求新的输出目录，先发布 `net10.0-windows / win-x64` 自包含单文件 Console 示例，通过独立 `NuGetLockFilePath` 隔离发布所需的 RID 锁文件，核对正式锁文件未变，再恢复默认解决方案锁定资产并构建、运行一个 Windows 测试池。脚本设置并在退出时恢复 `TANSR_TEST_MCP_EXE`、`TANSR_TEST_CLI_ROOT`、`TANSR_TEST_RECOVERY_CLI_ROOT`，保存候选摘要、日志、TRX 和 manifest。请把示例输出目录换成每次新的任务归档目录；CLI 目录须先按其锁文件安装依赖，测试会检查原协议版本。
 
 已经由集中构建准备候选时，可显式设置 `TANSR_TEST_MCP_EXE` 为已批准的自包含单文件 `ConsoleAssistant.exe` 绝对路径、`TANSR_TEST_CLI_ROOT` 为原 CLI 源码路径，再运行原 Windows `dotnet test` 命令，避免重复发布。缺少 MCP 候选会失败，不默认记为通过；普通 apphost 的 EXE 哈希不能证明旁边的 DLL 也已获批准。此消费门通过真实 HTTP/SSE 夹具驱动共享 C# 工具宿主及原生 MCP 进程，不等于真实 Serve 模型循环或媒体内容验收已完成。
 
 真实 Serve 路由联验另由 `scripts/serve-integration.mjs` 驱动，要求明确指定 Serve 源码路径；使用受控会话夹具而非付费模型。`scripts/check-contract.ps1` 与 `scripts/check-parity.mjs` 检查上游合同和入口变化，`scripts/test-packages.ps1` 从独立本地源消费包。未完成固定24项完整验收前，不标记正式功能齐套。
+
+`RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。本批完整 Windows 门要求 0 跳过。
 
 ## English
 

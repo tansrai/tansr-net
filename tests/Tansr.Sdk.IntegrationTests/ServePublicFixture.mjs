@@ -26,6 +26,8 @@ export async function startPublicFixture({ source, directory, authenticate, cand
   const capabilities = { ...defaults, execution: { version: 'bound-device-v1', boundDevice: { tools: { read: true } } } };
   const fake = createFakePlatform({ features: [], bundleExtra: { capabilities, app: { platform: 'desktop' } } });
   const exchanges = [], routes = [];
+  let mainExchanges = 0;
+  const memoryExchanges = { extraction: 0, consolidation: 0 }, memoryRequests = new Set();
   let memoryStore, memory, memoryHost;
   if (candidate) {
     memoryStore = await extensions.createSqliteMemoryPublicationStore(join(directory, 'managed-memory.sqlite'));
@@ -40,15 +42,42 @@ export async function startPublicFixture({ source, directory, authenticate, cand
     if (url.pathname !== '/t1/exchange') return fake.fetchImpl(input, init);
     const request = JSON.parse(String(init?.body)); exchanges.push(request);
     const recoveryTurn = JSON.stringify(request.thread).includes('Produce recovery original answer once.');
-    assert.deepEqual(request.tools.map(tool => tool.name).sort(), recoveryTurn ? [] : candidate ? ['Read', 'SearchMemory'] : ['Read']);
-    assert.ok(exchanges.length <= (candidate ? 4 : 3), 'Unexpected model sampling/retry.');
-    if (exchanges.length > 1 && !recoveryTurn) assert.ok(JSON.stringify(request.thread).includes(expectedText), 'The real kernel must consume the .NET device result.');
-    const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-    const tool = exchanges.length === 1;
-    return new Response(frame('t.open', { exchangeId: `net-synthetic-${exchanges.length}`, model: request.model, protocol: 'twp/1' }) +
-      (tool ? frame('t.delta', { i: 0, t: 'tool_use', id: 'net-device-read', name: 'Read', vJson: JSON.stringify({ file_path: '/workspace/work/note.txt' }) }) :
-        frame('t.delta', { i: 0, t: 'text', v: recoveryTurn ? 'NET_RECOVERY_ORIGINAL' : exchanges.length === 2 ? expectedText : 'Original material returned through .NET.' })) +
-      frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+    try {
+      const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+      const textResponse = text => new Response(frame('t.open', { exchangeId: `net-synthetic-${exchanges.length}`, model: request.model, protocol: 'twp/1' }) +
+        frame('t.delta', { i: 0, t: 'text', v: text }) + frame('t.close', { stop: 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+      if (request.meta?.purpose === 'memory') {
+        assert.equal(candidate, true);
+        assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Edit', 'Read', 'Write']);
+        const last = request.thread.at(-1); assert.equal(last?.role, 'user');
+        const instruction = (last.blocks ?? []).filter(block => block.t === 'text').map(block => block.v).join('\n');
+        const kind = instruction.includes('<memory-extraction-task>') && instruction.includes('</memory-extraction-task>') ? 'extraction' :
+          instruction.includes('<memory-consolidation-task>') && instruction.includes('</memory-consolidation-task>') ? 'consolidation' : null;
+        assert.ok(kind, 'Only the explicit trusted memory extraction/consolidation profiles are controlled.');
+        const fingerprint = JSON.stringify({ kind, thread: request.thread, tools: request.tools });
+        assert.ok(!memoryRequests.has(fingerprint), 'Unexpected duplicate memory model request/retry.'); memoryRequests.add(fingerprint);
+        assert.ok(++memoryExchanges[kind] <= (kind === 'extraction' ? 3 : 1), 'Unexpected background memory sampling.');
+        // Both actual kernel instructions explicitly allow this no-write terminal response.
+        return textResponse(kind === 'extraction' ? 'nothing to save' : 'nothing to consolidate');
+      }
+      ++mainExchanges;
+      // The public device host explicitly narrows RequestedTools to Read. Memory management is
+      // still available through its trusted source, but SearchMemory must not enter this turn.
+      // TWP omits tools entirely for the recovery session's explicit empty tool set.
+      assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), recoveryTurn ? [] : ['Read']);
+      assert.ok(mainExchanges <= (candidate ? 4 : 3), 'Unexpected model sampling/retry.');
+      if (mainExchanges > 1 && !recoveryTurn) assert.ok(JSON.stringify(request.thread).includes(expectedText), 'The real kernel must consume the .NET device result.');
+      const tool = mainExchanges === 1;
+      return new Response(frame('t.open', { exchangeId: `net-synthetic-${exchanges.length}`, model: request.model, protocol: 'twp/1' }) +
+        (tool ? frame('t.delta', { i: 0, t: 'tool_use', id: 'net-device-read', name: 'Read', vJson: JSON.stringify({ file_path: '/workspace/work/note.txt' }) }) :
+          frame('t.delta', { i: 0, t: 'text', v: recoveryTurn ? 'NET_RECOVERY_ORIGINAL' : mainExchanges === 2 ? expectedText : 'Original material returned through .NET.' })) +
+        frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+    } catch (error) {
+      // Surface synthetic-boundary failures before the real provider's normal retry policy can
+      // make the downstream symptom an idle timeout. Never print credentials or request bodies.
+      process.stderr.write(`Controlled upstream rejected synthetic exchange ${exchanges.length}: ${error.message}\n`);
+      throw error;
+    }
   };
   const cap = { bytes: 64 * 1048576, records: 4096 }, total = { bytes: 256 * 1048576, records: 16384 }, issuedAtMs = Date.now() - 1000;
   const sessionStore = createServeAgentSessionStore({ dir: join(directory, 'sessions'), ...(candidate ? { ownership: {} } : {}) });
@@ -127,7 +156,7 @@ export async function startPublicFixture({ source, directory, authenticate, cand
       clearInterval(timer); while (pending) await new Promise(resolve => setTimeout(resolve, 10));
       await server.close(); await server.settleResources?.(); await host.dispose(); spool.close(); memoryStore?.close();
       if (failure) throw failure;
-      return { model: 'controlled-synthetic-platform', exchanges: exchanges.length, routes, realKernel: true };
+      return { model: 'controlled-synthetic-platform', exchanges: exchanges.length, mainExchanges, memoryExchanges, routes, realKernel: true };
     }
   };
 }

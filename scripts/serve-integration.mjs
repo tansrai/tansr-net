@@ -226,7 +226,7 @@ async function run() {
           assert.equal(result.interrupts, 0, 'Observation cancellation unexpectedly interrupted the controlled session.');
           assert.ok(result.requests.some(r => r.path.endsWith('/events') && r.lastEventId === '0'), 'Last-Event-ID did not reach Serve.');
           assert.ok(result.requests.every(r => r.path.startsWith('/v2/')), 'SDK1 default escaped the original session family.');
-          assert.equal(result.publicEvidence.exchanges, process.env.TANSR_SERVE_SOURCE_SNAPSHOT ? 4 : 3, 'Real kernel/device/material flow did not run.');
+          assert.equal(result.publicEvidence.mainExchanges, process.env.TANSR_SERVE_SOURCE_SNAPSHOT ? 4 : 3, 'Real kernel/device/material flow did not run.');
           for (const suffix of ['/initialize', '/execution-bindings', '/receipts', '/archive/records', '/archive/acks', '/material-responses'])
             assert.ok(result.publicEvidence.routes.some(path => path.endsWith(suffix)), `Missing public product route: ${suffix}`);
         }
@@ -236,7 +236,8 @@ async function run() {
         const routeCounts = Object.fromEntries([...new Set(routes.map(path => path.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact')))]
           .map(path => [path, routes.filter(actual => actual.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact') === path).length]));
         console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
-          exchanges: result.publicEvidence.exchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
+          exchanges: result.publicEvidence.exchanges, mainExchanges: result.publicEvidence.mainExchanges,
+          memoryExchanges: result.publicEvidence.memoryExchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
         if (process.env.TANSR_SERVE_SOURCE_SNAPSHOT) verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT);
         writeFileSync(resolve(directory, 'result.json'), JSON.stringify({ source: evidence, passed: exitCode === 0,
           legacy: { sessions: result.sessions, sends: result.sends, interrupts: result.interrupts, requests: result.requests.length },
