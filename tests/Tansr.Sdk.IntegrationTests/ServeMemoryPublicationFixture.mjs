@@ -40,6 +40,7 @@ export async function startMemoryPublicationFixture({ source, directory, authent
     tools: { ...base.tools, shell: false }, execution: { version: 'bound-device-v1', boundDevice: { tools: { read: true } } } } } });
   let enabled = true, minimumDeletionGeneration = '0', handle, virtualMemoryDir, mainCalls = 0, extractionCalls = 0;
   let initialExtractionDone = false, recallAdopted = false, forgottenAbsent = false, closedSession = false;
+  let oldWriter, lateWriteRejected = false, backupReplayRejected = false;
   const observations = [], routes = [], exchanges = [];
   const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   function answer(request, text, tool) {
@@ -163,6 +164,21 @@ export async function startMemoryPublicationFixture({ source, directory, authent
           diagnostic('inspect.file.read', { id: command.id, name, present: files[name] !== null });
         }
         value = { memory, files, initialExtractionDone, recallAdopted, forgottenAbsent };
+      } else if (command.action === 'capture-writer') {
+        const lifecycle = await idle(), generation = minimumDeletionGeneration;
+        oldWriter = await lifecycle.management.createHost({ provenance: () => ({ deletionGeneration: generation, origins: ['synthetic:net-memory-seed'] }) });
+        const originalBody = await oldWriter.fs.readFile(join(oldWriter.memoryDir, topic));
+        await oldWriter.fs.writeFile(join(oldWriter.memoryDir, topic), originalBody);
+        value = { captured: true, writeAcceptedBeforeDeletion: true };
+      } else if (command.action === 'late-write') {
+        assert.ok(oldWriter, 'The old writer must have been captured before deletion.');
+        await assert.rejects(async () => oldWriter.fs.writeFile(join(oldWriter.memoryDir, topic), Buffer.from(topicText)), { code: 'stale_generation' });
+        lateWriteRejected = true;
+        const lifecycle = await idle();
+        const backup = await lifecycle.management.createHost({ provenance: () => ({ deletionGeneration: minimumDeletionGeneration,
+          origins: ['memory/' + topic] }) });
+        await assert.rejects(async () => backup.fs.writeFile(join(backup.memoryDir, 'backup-alias.md'), Buffer.from(topicText)), { code: 'stale_generation' });
+        backupReplayRejected = true; value = { lateWriteRejected, backupReplayRejected };
       } else if (command.action === 'enabled') { assert.equal(typeof command.enabled, 'boolean'); enabled = command.enabled; value = { enabled }; }
       else if (command.action === 'deletion-floor') {
         assert.match(command.generation, /^(0|[1-9][0-9]*)$/); assert.ok(BigInt(command.generation) >= BigInt(minimumDeletionGeneration));
@@ -214,6 +230,6 @@ export async function startMemoryPublicationFixture({ source, directory, authent
       clearInterval(timer); while (pending) await new Promise(resolve => setTimeout(resolve, 10));
       await server.close(); await build.flush(); spool.close(); if (failure) throw failure;
       return { model: 'controlled-synthetic-platform', realKernel: true, mainCalls, extractionCalls, initialExtractionDone,
-        recallAdopted, forgottenAbsent, closedSession, observations, routes };
+        recallAdopted, forgottenAbsent, lateWriteRejected, backupReplayRejected, closedSession, observations, routes };
     })() };
 }

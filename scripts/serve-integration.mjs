@@ -19,7 +19,7 @@ const required = name => {
 };
 const source = realpathSync(required('TANSR_SERVE_SOURCE'));
 const suite = process.env.TANSR_SERVE_TEST_SUITE ?? 'all';
-assert.ok(['all', 'controls', 'execution', 'new', 'memory'].includes(suite), 'Unknown named integration suite.');
+assert.ok(['all', 'controls', 'execution', 'new', 'memory', 'session-api', 'extensions', 'cache', 'files'].includes(suite), 'Unknown named integration suite.');
 assert.ok(suite === 'all' || process.env.TANSR_SERVE_SOURCE_SNAPSHOT, 'Named candidate suites require the pinned source snapshot.');
 const sourceFile = path => resolve(source, path);
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -71,6 +71,10 @@ function sourceEvidence() {
     publicFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')),
     memoryPublicationFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeMemoryPublicationFixture.mjs')),
     sessionControlsFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeSessionControlsFixture.mjs')),
+    sessionApiFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeSessionApiFixture.mjs')),
+    extensionsFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeTrustedExtensionsFixture.mjs')),
+    cacheFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeCacheContinuityFixture.mjs')),
+    fileOperationsFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeFileOperationsFixture.mjs')),
     executionPipelineFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeExecutionPipelineFixture.mjs')),
     syntheticPlatformSha256: sha(sourceFile('packages/server/test/fake-platform-fetch.ts')),
     archiveSchemaSha256: sha(sourceFile('doc/rfc/sdk2-ext-v1.schema.json')),
@@ -159,7 +163,7 @@ async function fixture() {
     return null;
   };
   const { startPublicFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')).href);
-  let publicFixture, memoryFixture, controlsFixture, executionFixture;
+  let publicFixture, memoryFixture, controlsFixture, executionFixture, sandboxFixture, sessionApiFixture, extensionsFixture, cacheFixture, fileOperationsFixture;
   try {
     publicFixture = await startPublicFixture({ source, directory: required('TANSR_SERVE_TEST_DIRECTORY'), authenticate,
       candidate: Boolean(process.env.TANSR_SERVE_SOURCE_SNAPSHOT) });
@@ -173,18 +177,32 @@ async function fixture() {
       const { startExecutionPipelineFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeExecutionPipelineFixture.mjs')).href);
       executionFixture = await startExecutionPipelineFixture({ source,
         directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'execution-pipeline'), authenticate });
+      sandboxFixture = await startExecutionPipelineFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'sandbox-pipeline'), authenticate, shellSandbox: true });
+      const { startSessionApiFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeSessionApiFixture.mjs')).href);
+      sessionApiFixture = await startSessionApiFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'session-api'), authenticate });
+      const { startTrustedExtensionsFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeTrustedExtensionsFixture.mjs')).href);
+      extensionsFixture = await startTrustedExtensionsFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'trusted-extensions'), authenticate });
+      const { startCacheContinuityFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeCacheContinuityFixture.mjs')).href);
+      cacheFixture = await startCacheContinuityFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'cache-continuity'), authenticate });
+      const { startFileOperationsFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServeFileOperationsFixture.mjs')).href);
+      fileOperationsFixture = await startFileOperationsFixture({ source,
+        directory: resolve(required('TANSR_SERVE_TEST_DIRECTORY'), 'file-operations'), authenticate });
     }
   } catch (error) {
-    await Promise.allSettled([server.close(), publicFixture?.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close()]);
+    await Promise.allSettled([server.close(), publicFixture?.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close(), sessionApiFixture?.close(), extensionsFixture?.close(), cacheFixture?.close(), fileOperationsFixture?.close(), sandboxFixture?.close()]);
     throw error;
   }
   let closing;
   const close = () => closing ??= (async () => {
     await server.close();
-    const results = await Promise.allSettled([publicFixture.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close()]);
+    const results = await Promise.allSettled([publicFixture.close(), memoryFixture?.close(), controlsFixture?.close(), executionFixture?.close(), sessionApiFixture?.close(), extensionsFixture?.close(), cacheFixture?.close(), fileOperationsFixture?.close(), sandboxFixture?.close()]);
     for (const result of results) if (result.status === 'rejected') throw result.reason;
     return { publicEvidence: results[0].value, memoryEvidence: results[1].value,
-      controlsEvidence: results[2].value, executionEvidence: results[3].value };
+      controlsEvidence: results[2].value, executionEvidence: results[3].value, sessionApiEvidence: results[4].value, extensionsEvidence: results[5].value, cacheEvidence: results[6].value, fileOperationsEvidence: results[7].value, sandboxEvidence: results[8].value };
   })();
   process.on('message', async message => {
     if (message?.type !== 'stop') return;
@@ -197,7 +215,7 @@ async function fixture() {
   });
   process.on('disconnect', () => { void close(); });
   process.send({ type: 'ready', url: server.url, publicUrl: publicFixture.url, memoryUrl: memoryFixture?.url,
-    controlsUrl: controlsFixture?.url, executionUrl: executionFixture?.url });
+    controlsUrl: controlsFixture?.url, executionUrl: executionFixture?.url, sessionApiUrl: sessionApiFixture?.url, extensionsUrl: extensionsFixture?.url, cacheUrl: cacheFixture?.url, filesUrl: fileOperationsFixture?.url, sandboxUrl: sandboxFixture?.url });
 }
 
 function waitMessage(child, type, timeoutMs = 30000) {
@@ -234,9 +252,17 @@ async function run() {
     const allFilter = 'FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSourceIntegrationTests|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServePublicHostIntegrationTests' +
       (ready.memoryUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests' : '') +
       (ready.controlsUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests' : '') +
-      (ready.executionUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests' : '');
+      (ready.executionUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests' : '') +
+      (ready.sessionApiUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionApiTests' : '') +
+      (ready.extensionsUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests' : '') +
+      (ready.cacheUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeCacheContinuityTests' : '') +
+      (ready.filesUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests' : '');
     const filter = suite === 'all' ? allFilter : [
       ...(suite === 'memory' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests'] : []),
+      ...(suite === 'session-api' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionApiTests'] : []),
+      ...(suite === 'extensions' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests'] : []),
+      ...(suite === 'cache' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeCacheContinuityTests'] : []),
+      ...(suite === 'files' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests'] : []),
       ...(suite === 'controls' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests'] : []),
       ...(suite === 'execution' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests'] : [])].join('|');
     const args = ['test', resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj'),
@@ -246,7 +272,12 @@ async function run() {
       detached: process.platform !== 'win32', env: { ...env, TANSR_SERVE_TEST_URL: url.origin, TANSR_SERVE_PUBLIC_URL: ready.publicUrl,
         ...(ready.memoryUrl ? { TANSR_SERVE_MEMORY_URL: ready.memoryUrl } : {}),
         ...(ready.controlsUrl ? { TANSR_SERVE_CONTROLS_URL: ready.controlsUrl } : {}),
-        ...(ready.executionUrl ? { TANSR_SERVE_EXECUTION_URL: ready.executionUrl } : {}) }, stdio: 'inherit' }));
+        ...(ready.executionUrl ? { TANSR_SERVE_EXECUTION_URL: ready.executionUrl } : {}),
+        ...(ready.sandboxUrl ? { TANSR_SERVE_SANDBOX_URL: ready.sandboxUrl } : {}),
+        ...(ready.sessionApiUrl ? { TANSR_SERVE_SESSION_API_URL: ready.sessionApiUrl } : {}),
+        ...(ready.extensionsUrl ? { TANSR_SERVE_TRUSTED_URL: ready.extensionsUrl } : {}),
+        ...(ready.cacheUrl ? { TANSR_SERVE_CACHE_URL: ready.cacheUrl } : {}),
+        ...(ready.filesUrl ? { TANSR_SERVE_FILES_URL: ready.filesUrl } : {}) }, stdio: 'inherit' }));
     exitCode = await new Promise((resolveExit, reject) => {
       const timeout = setTimeout(() => { terminateTree(test); reject(new Error('Serve integration test deadline exceeded.')); }, 120000);
       test.once('error', error => { clearTimeout(timeout); reject(error); });
@@ -280,6 +311,14 @@ async function run() {
           assert.equal(result.executionEvidence.realExecutionSpool, true);
           assert.equal(result.executionEvidence.operations.length, 3, 'All three original native commands must run exactly once.');
           assert.ok(result.executionEvidence.acceptedBlocks > 2, 'Real Serve received no meaningful incremental output.');
+          assert.equal(result.sandboxEvidence?.realKernel, true);
+          assert.equal(result.sandboxEvidence.realExecutionSpool, true);
+          assert.deepEqual(result.sandboxEvidence.modelCalls, {
+            SHELLSANDBOX_normal: 2, SHELLSANDBOX_approved: 3, SHELLSANDBOX_denied: 3,
+            SHELLSANDBOX_required: 3, SHELLSANDBOX_none: 3
+          }, 'Sandbox outcomes must return to their original model loops.');
+          assert.equal(result.sandboxEvidence.operations.length, 8, 'Sandbox operations must retain the original retry and denial boundaries.');
+          assert.ok(result.sandboxEvidence.acceptedBlocks > 0, 'Sandbox full output never reached the original output window.');
         }
         if (exitCode === 0 && (suite === 'all' || suite === 'controls' || suite === 'new') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
           assert.ok(result.controlsEvidence?.exchanges > 0, 'No actual session control model exchange ran.');
@@ -311,6 +350,11 @@ async function run() {
           public: { ...result.publicEvidence, authorizationChecksByRoute: routeCounts },
           ...(result.controlsEvidence ? { sessionControls: result.controlsEvidence } : {}),
           ...(result.executionEvidence ? { executionPipeline: result.executionEvidence } : {}),
+          ...(result.sandboxEvidence ? { sandboxPipeline: result.sandboxEvidence } : {}),
+          ...(result.sessionApiEvidence ? { sessionApi: result.sessionApiEvidence } : {}),
+          ...(result.extensionsEvidence ? { trustedExtensions: result.extensionsEvidence } : {}),
+          ...(result.cacheEvidence ? { cacheContinuity: result.cacheEvidence } : {}),
+          ...(result.fileOperationsEvidence ? { fileOperations: result.fileOperationsEvidence } : {}),
           ...(result.memoryEvidence ? { memoryPublication: result.memoryEvidence } : {}) }, null, 2));
       } finally { terminateTree(child); }
     } else terminateTree(child);

@@ -5,21 +5,24 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Storage;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
+using Tansr.Sdk.Windows.Storage;
 using Tansr.Sdk.Windows.Tests.Execution;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
 
-public sealed class WindowsBackgroundHostTests : IClassFixture<WindowsProcessTestProgram>, IDisposable
+public sealed class WindowsBackgroundHostTests : IClassFixture<WindowsProcessTestProgram>, IClassFixture<WindowsBackgroundHostProgram>, IDisposable
 {
     private readonly string directory = Path.Combine(Path.GetTempPath(), "tansr-background-" + Guid.NewGuid().ToString("N"));
     private readonly WindowsWorkspace workspace;
     private readonly WindowsProcessTestProgram program;
+    private readonly WindowsBackgroundHostProgram hostProgram;
     private readonly List<WindowsBackgroundHost> hosts = [];
-    public WindowsBackgroundHostTests(WindowsProcessTestProgram program)
+    public WindowsBackgroundHostTests(WindowsProcessTestProgram program, WindowsBackgroundHostProgram hostProgram)
     {
-        this.program = program; Directory.CreateDirectory(directory);
+        this.program = program; this.hostProgram = hostProgram; Directory.CreateDirectory(directory);
         var security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false);
         var current = WindowsIdentity.GetCurrent().User!; security.SetOwner(current);
         security.AddAccessRule(new FileSystemAccessRule(current, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
@@ -122,6 +125,84 @@ public sealed class WindowsBackgroundHostTests : IClassFixture<WindowsProcessTes
         var state = (await Call(backend, Request("query", value.GetProperty("task")), "query")).GetProperty("task");
         Assert.Equal("running", state.GetProperty("state").GetString());
         await host.CloseAsync();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ActualHostExitReclaimsItsTreeAndArtifactButDoesNotRegrantPendingExecution(bool crash)
+    {
+        var operation = Operation(Launch("tree-pipeline"), "host-exit");
+        var operationFile = Path.Combine(directory, "operation.json"); await File.WriteAllTextAsync(operationFile, operation.GetRawText());
+        var sentinel = Path.Combine(directory, "unowned.txt"); await File.WriteAllTextAsync(sentinel, "keep");
+        var journalOptions = new SqliteExecutorJournalOptions
+        {
+            Path = Path.Combine(directory, "journal.sqlite"),
+            Mode = StorageOpenMode.Create,
+            ApplicationScopeId = "app",
+            EndUserId = "user",
+            ExecutorId = "executor",
+            ReadContext = () => operation.GetProperty("scope")
+        };
+        using (var original = await SqliteExecutorJournal.OpenAsync(journalOptions))
+            Assert.Equal(ExecutorJournalClaimStatus.Claimed, (await original.ClaimAsync(operation)).Status);
+        var start = new ProcessStartInfo(hostProgram.Executable)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = new UTF8Encoding(false),
+            StandardErrorEncoding = new UTF8Encoding(false)
+        };
+        start.ArgumentList.Add(program.Executable); start.ArgumentList.Add(directory); start.ArgumentList.Add(operationFile);
+        using var process = Process.Start(start)!; var error = process.StandardError.ReadToEndAsync();
+        Process? root = null, child = null;
+        try
+        {
+            var line = await process.StandardOutput.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            if (line == null) throw new InvalidOperationException("Native background host failed before launch: " + await error);
+            var launched = Parse(JsonDocument.Parse(line).RootElement);
+            Assert.Equal("running", launched.GetProperty("task").GetProperty("state").GetString());
+            int childPid = 0;
+            await Until(async () =>
+            {
+                var failed = Path.Combine(directory, "fixture-error.txt");
+                if (File.Exists(failed)) throw new InvalidOperationException(await File.ReadAllTextAsync(failed));
+                try { return int.TryParse(await File.ReadAllTextAsync(Path.Combine(directory, "child-pid.txt")), out childPid); }
+                catch (IOException) { return false; }
+            });
+            var originalPid = int.Parse((await File.ReadAllLinesAsync(Path.Combine(directory, "launches.txt")))[0], System.Globalization.CultureInfo.InvariantCulture);
+            root = Process.GetProcessById(originalPid);
+            // Child identity is recorded independently by the real fixture, before the parent can be killed.
+            child = Process.GetProcessById(childPid);
+            Assert.False(root.HasExited); Assert.False(child.HasExited);
+            Assert.Single(Directory.GetFiles(directory, ".tansr-sdk-background-*"));
+            if (crash) process.Kill(); // Intentionally only kill the host: descendants must be reclaimed by its real Windows Job.
+            else { await process.StandardInput.WriteLineAsync("close"); await process.StandardInput.FlushAsync(); }
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+            Assert.True(root.WaitForExit(10000)); Assert.True(child.WaitForExit(10000));
+            Assert.Empty(Directory.GetFiles(directory, ".tansr-sdk-background-*"));
+            Assert.Equal("keep", await File.ReadAllTextAsync(sentinel));
+            Assert.Single(await File.ReadAllLinesAsync(Path.Combine(directory, "launches.txt")));
+            if (!crash) Assert.True(process.ExitCode == 0, await error);
+            journalOptions.Mode = StorageOpenMode.Reopen;
+            using var reopened = await SqliteExecutorJournal.OpenAsync(journalOptions);
+            Assert.Equal(ExecutorJournalClaimStatus.Pending, (await reopened.ClaimAsync(operation)).Status);
+            var (next, replacement) = Host();
+            var old = (await Call(replacement, Request("query", launched.GetProperty("task")), "query-after-exit")).GetProperty("task");
+            Assert.Equal("unknown", old.GetProperty("state").GetString()); Assert.Equal(JsonValueKind.Null, old.GetProperty("totalBytes").ValueKind);
+            await Assert.ThrowsAsync<ExecutionRejectedException>(() => Call(replacement, Request("cancel", launched.GetProperty("task")), "cancel-after-exit"));
+            await next.CloseAsync();
+        }
+        finally
+        {
+            if (!process.HasExited) { process.Kill(); await process.WaitForExitAsync(); }
+            if (root != null) Assert.True(root.WaitForExit(10000));
+            if (child != null) Assert.True(child.WaitForExit(10000));
+            root?.Dispose(); child?.Dispose();
+        }
     }
 
     private (WindowsBackgroundHost, WindowsExecutorBackend) Host(int maximumBytes = 8192, int maximumTasks = 16, int chunkBytes = 4096)

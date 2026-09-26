@@ -17,7 +17,8 @@ public sealed class MediaTests
     public void StructuredMediaMatchesPrecedenceAndNeverTreatsPathsOrErrorsAsClientFiles()
     {
         Assert.Null(MediaArtifactParser.Parse(Json("{\"model\":\"m\",\"images\":[],\"videos\":[{\"url\":\"https://cdn.example/v.mp4\"}]}")));
-        Assert.Null(MediaArtifactParser.Parse(Json("{\"model\":\"m\",\"images\":[{\"path\":\"C:/secret\"}]}")));
+        var pathOnly = MediaArtifactParser.Parse(Json("{\"model\":\"m\",\"images\":[{\"path\":\"C:/secret\"}],\"videos\":[{\"url\":\"https://cdn.example/v.mp4\"}]}"));
+        Assert.Equal(MediaKind.Image, pathOnly!.Kind); Assert.Empty(pathOnly.Resources);
         Assert.Null(MediaArtifactParser.Parse(Json("{\"model\":\"m\",\"errorCode\":\"denied\",\"audio\":{\"b64\":\"AQID\",\"mime\":\"audio/wav\"}}")));
         Assert.Equal(MediaKind.Transcript, MediaArtifactParser.Parse(Json("{\"model\":\"m\",\"text\":\"\"}"))!.Kind);
         var both = Json("{\"model\":\"m\",\"audio\":{\"b64\":\"AQID\",\"url\":\"https://untrusted.invalid/audio\",\"mime\":\"audio/wav\"}}");

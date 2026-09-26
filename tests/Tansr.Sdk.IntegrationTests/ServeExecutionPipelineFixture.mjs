@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export async function startExecutionPipelineFixture({ source, directory, authenticate }) {
+export async function startExecutionPipelineFixture({ source, directory, authenticate, shellSandbox = false }) {
   await mkdir(directory, { recursive: true });
   const load = file => import(pathToFileURL(join(source, file)).href);
   const { createAgentSessionFactory, createServeAgentSessionStore, startServer } = await load('packages/server/src/index.ts');
@@ -23,7 +23,7 @@ export async function startExecutionPipelineFixture({ source, directory, authent
   const base = defaultAppCapabilities('desktop');
   const fake = createFakePlatform({ features: [], bundleExtra: { app: { platform: 'desktop' }, capabilities: { ...base,
     tools: { ...base.tools, shell: true }, execution: { version: 'bound-device-v1', boundDevice: { tools: { shell: true, process: true, read: true } } } } } });
-  const modelCalls = new Map(), operations = new Map(), routes = [], accepted = new Set();
+  const modelCalls = new Map(), operations = new Map(), routes = [], accepted = new Set(), backgroundActions = [];
   let records = 0, memoryCalls = 0, failure;
   function record(stage, facts = {}) {
     assert.ok(++records <= 8192, 'Native pipeline evidence is bounded.');
@@ -31,7 +31,7 @@ export async function startExecutionPipelineFixture({ source, directory, authent
   }
   const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   const response = (request, text, tool) => new Response(frame('t.open', { exchangeId: `net-pipeline-${records}`, model: request.model, protocol: 'twp/1' }) +
-    (tool ? frame('t.delta', { i: 0, t: 'tool_use', id: tool.id, name: 'Shell', vJson: JSON.stringify(tool.args) }) :
+    (tool ? frame('t.delta', { i: 0, t: 'tool_use', id: tool.id, name: tool.name ?? 'Shell', vJson: JSON.stringify(tool.args) }) :
       frame('t.delta', { i: 0, t: 'text', v: text })) + frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }),
     { headers: { 'content-type': 'text/event-stream' } });
   const fetchImpl = async (input, init) => {
@@ -43,8 +43,40 @@ export async function startExecutionPipelineFixture({ source, directory, authent
       if (request.meta?.purpose === 'memory') {
         assert.ok(++memoryCalls <= 8); return response(request, 'nothing to save');
       }
-      assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Shell']);
       const prompts = request.thread.filter(item => item.role === 'user').flatMap(item => item.blocks ?? []).filter(block => block.t === 'text').map(block => block.v).join('\n');
+      const sandboxPlan = /NET_PIPELINE_SHELLSANDBOX_(normal|approved|denied|required|none)/.exec(prompts);
+      if (sandboxPlan) {
+        assert.equal(shellSandbox, true);
+        const scenario = sandboxPlan[1], key = `SHELLSANDBOX_${scenario}`;
+        const count = (modelCalls.get(key) ?? 0) + 1; modelCalls.set(key, count);
+        assert.ok(count <= (scenario === 'normal' ? 2 : 3), 'Only normal and expressly approved escalation attempts are permitted.');
+        if (count === 1) return response(request, null, { id: `native-sandbox-${scenario}-normal`, args: { command: 'native-large-unicode', cwd: '/workspace/work' } });
+        if (scenario !== 'normal' && count === 2) {
+          assert.ok(JSON.stringify(request).includes('isolation_denied'), 'Original structural denial must reach the same turn first.');
+          return response(request, null, { id: `native-sandbox-${scenario}-escalate`, args: { command: 'native-large-unicode', cwd: '/workspace/work', escalate: true } });
+        }
+        const id = `native-sandbox-${scenario}-${scenario === 'normal' ? 'normal' : 'escalate'}`;
+        const result = request.thread.flatMap(item => item.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === id);
+        assert.ok(result, 'Real sandbox result must reach the model exactly once.');
+        const text = JSON.stringify(result);
+        if (['normal', 'approved', 'none'].includes(scenario)) {
+          assert.notEqual(result.isError, true);
+          assert.ok(text.includes('中'.repeat(6000) + '🙂�') && text.includes('错'.repeat(2000) + '🙂'), 'Core must consume full native output beyond the receipt preview.');
+        }
+        return response(request, 'NET_PIPELINE_SHELLSANDBOX_DONE');
+      }
+      const planned = /NET_BACKGROUND:([^\n]+)$/.exec(prompts);
+      if (planned) {
+        const action = JSON.parse(planned[1]);
+        assert.ok(['Shell', 'ShellTask', 'ShellOutput'].includes(action.name));
+        const count = (modelCalls.get(action.id) ?? 0) + 1; modelCalls.set(action.id, count);
+        assert.ok(count <= 2, 'Each background business action has one proposal and one original result.');
+        if (count === 1) { backgroundActions.push(action); return response(request, null, action); }
+        const original = request.thread.flatMap(item => item.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === action.id);
+        assert.ok(original, 'Background results must be returned by the real kernel.');
+        return response(request, `${action.id}:settled`);
+      }
+      assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Shell']);
       const scenario = /NET_PIPELINE_(STREAM|CANCEL|LOSS)/.exec(prompts)?.[1];
       assert.ok(scenario, 'Only explicit native pipeline scenarios are allowed.');
       const count = (modelCalls.get(scenario) ?? 0) + 1; modelCalls.set(scenario, count);
@@ -62,7 +94,7 @@ export async function startExecutionPipelineFixture({ source, directory, authent
   const build = createAgentSessionFactory({ cwd: directory, store: createServeAgentSessionStore({ dir: join(directory, 'sessions') }),
     checkpoints: { autoBeforeCompact: false },
     platform: { apiBaseUrl: FAKE_API_BASE, appId: scope.applicationScopeId, appKey: 'synthetic-no-real-key', fetchImpl },
-    execution: { applicationScopeId: scope.applicationScopeId,
+    execution: { applicationScopeId: scope.applicationScopeId, shellSandbox,
       authorize: (request, user) => {
         const allowed = authenticate(request)?.endUserId === scope.endUserId && user === scope.endUserId;
         return { controller: allowed && request.headers['x-net-role'] === 'controller',
@@ -72,7 +104,7 @@ export async function startExecutionPipelineFixture({ source, directory, authent
       confirmInterpreter: ({ interpreter }) => interpreter.id === 'net-native-fixture' && interpreter.revision === '1' && interpreter.hostShell === 'powershell',
       spoolFor: () => ({ spool, bindingId: 'native' }) } });
   const unsubscribe = build.factory.execution.observeChanges(change => {
-    if (change.operation?.request.operation !== 'process.exec') return;
+    if (change.operation?.request.operation !== 'process.exec' && !(shellSandbox && change.operation?.request.operation === 'tool.invoke' && change.operation.request.args.name === 'TansrTerminalShellSandbox')) return;
     const original = change.operation;
     operations.set(original.operationId, { sessionId: original.sessionId, digest: original.digest });
     record('execution.change', { kind: change.kind, operationId: original.operationId });
@@ -109,7 +141,7 @@ export async function startExecutionPipelineFixture({ source, directory, authent
       TerminalExecutionService.prototype.subscribeOutput = subscribeOutput;
       if (failure) throw failure;
       return { realKernel: true, realExecutionSpool: true, controlledModel: true, modelCalls: Object.fromEntries(modelCalls),
-        memoryCalls, operations: [...operations.entries()], acceptedBlocks: accepted.size, routes, timingFile: join(directory, 'serve-pipeline.jsonl'),
+        memoryCalls, operations: [...operations.entries()], acceptedBlocks: accepted.size, routes, backgroundActions, timingFile: join(directory, 'serve-pipeline.jsonl'),
         performanceBaseline: 'Not an Electron comparison or a performance threshold claim.' };
     }
   };

@@ -43,6 +43,57 @@ public sealed class LocalServeHostTests : IClassFixture<LocalServeFixture>, IDis
     }
 
     [Fact]
+    public async Task TrustedHeadersAreFrozenForBothReadinessChallengesAndNotGrantedToCreatedClients()
+    {
+        var options = Options("ticket-slow"); var headers = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = "synthetic-fixed-user-ticket" }; options.ReadinessHeaders = headers;
+        var records = Path.Combine(root, "readiness.txt");
+        options.Environment["TANSR_FIXTURE_USER_TOKEN"] = "synthetic-fixed-user-ticket";
+        options.Environment["TANSR_FIXTURE_REQUESTS"] = records;
+        var starting = LocalServeHost.StartAsync(options); headers["x-tansr-demo-user-token"] = "changed-after-start";
+        using var host = await starting; Assert.True(host.IsReady);
+        var observed = await File.ReadAllLinesAsync(records);
+        Assert.Equal(new[] { "synthetic-fixed-user-ticket|invalid-token", "synthetic-fixed-user-ticket|valid-token" }, observed);
+        using var anonymousClient = host.CreateClient();
+        await Assert.ThrowsAsync<TansrProtocolException>(() => anonymousClient.ListSessionsAsync());
+        Assert.Equal("<missing>|valid-token", (await File.ReadAllLinesAsync(records)).Last());
+        var clientHeaders = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = "synthetic-fixed-user-ticket" };
+        using var authenticatedClient = host.CreateClient(SessionContract.Sdk1, () => "local-binding-not-user-ticket", null, 2097152, 2097152, clientHeaders);
+        clientHeaders["x-tansr-demo-user-token"] = "changed-after-client-construction";
+        Assert.Equal(0, (await authenticatedClient.ListSessionsAsync()).GetProperty("total").GetInt32());
+        Assert.True((await host.StopAsync()).CleanupConfirmed);
+    }
+
+    [Fact]
+    public async Task RequiredApplicationTicketIsNotBypassedByTheRandomToken()
+    {
+        var options = Options("ticket"); options.Environment["TANSR_FIXTURE_USER_TOKEN"] = "synthetic-fixed-user-ticket";
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => LocalServeHost.StartAsync(options));
+        Assert.Equal("serve_authenticated_readiness_failed", error.Code); Exited(int.Parse(File.ReadAllText(Path.Combine(root, "pid.txt"))));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("user\r\nInjected: true")]
+    [InlineData("user\0")]
+    [InlineData("用户")]
+    public async Task InvalidReadinessHeaderCannotStartAProcess(string principal)
+    {
+        var options = Options("healthy"); options.ReadinessHeaders = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = principal };
+        await Assert.ThrowsAsync<ArgumentException>(() => LocalServeHost.StartAsync(options));
+        Assert.False(File.Exists(Path.Combine(root, "pid.txt")));
+    }
+
+    [Fact]
+    public async Task ReadinessHeadersCannotOverrideBearerAndUseTheSameControlledBounds()
+    {
+        var options = Options("healthy"); options.ReadinessHeaders = new Dictionary<string, string> { ["Authorization"] = "Bearer forbidden" };
+        await Assert.ThrowsAsync<ArgumentException>(() => LocalServeHost.StartAsync(options));
+        options.ReadinessHeaders = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = new string('x', 4097) };
+        await Assert.ThrowsAsync<ArgumentException>(() => LocalServeHost.StartAsync(options));
+        Assert.False(File.Exists(Path.Combine(root, "pid.txt")));
+    }
+
+    [Fact]
     public async Task ImmediateExitIsReportedWithoutUsingADisposedLifetime()
     {
         var error = await Assert.ThrowsAsync<TansrProtocolException>(() => LocalServeHost.StartAsync(Options("exit")));
@@ -137,19 +188,23 @@ public sealed class LocalServeFixture : IDisposable
           static void Main(string[] args) {
             File.WriteAllText(Environment.GetEnvironmentVariable("TANSR_FIXTURE_PID"),Process.GetCurrentProcess().Id.ToString());
             if(args[0]=="exit") return;
-            if(args[0]=="slow") Thread.Sleep(500);
+            if(args[0]=="slow" || args[0]=="ticket-slow") Thread.Sleep(500);
             if(args[0]=="stall") { Thread.Sleep(60000); return; }
             int port=0;
             for(int i=0;i<args.Length-1;i++) if(args[i]=="--port")port=int.Parse(args[i+1]);
             var listener=new TcpListener(IPAddress.Loopback,port); listener.Start();
             while(true) using(var peer=listener.AcceptTcpClient()) using(var stream=peer.GetStream()) {
               var reader=new StreamReader(stream,Encoding.ASCII,false,1024,true);
-              string line=reader.ReadLine(), auth=null; int size=0;
+              string line=reader.ReadLine(), auth=null, principal=null; int size=0;
               while((line=reader.ReadLine())!=null && line.Length>0) {
                 size+=line.Length;if(size>65536)throw new Exception("header cap");
                 if(line.StartsWith("Authorization:",StringComparison.OrdinalIgnoreCase))auth=line.Substring(14).Trim();
+                if(line.StartsWith("x-tansr-demo-user-token:",StringComparison.OrdinalIgnoreCase))principal=line.Substring("x-tansr-demo-user-token:".Length).Trim();
               }
-              bool allowed=args[0]=="anonymous" || auth=="Bearer "+Environment.GetEnvironmentVariable("TANSR_SERVE_TOKEN");
+              bool validToken=auth=="Bearer "+Environment.GetEnvironmentVariable("TANSR_SERVE_TOKEN");
+              var records=Environment.GetEnvironmentVariable("TANSR_FIXTURE_REQUESTS");
+              if(records!=null)File.AppendAllText(records,(principal??"<missing>")+"|"+(validToken?"valid-token":"invalid-token")+"\n");
+              bool allowed=args[0]=="anonymous" || validToken && (!args[0].StartsWith("ticket") || principal==Environment.GetEnvironmentVariable("TANSR_FIXTURE_USER_TOKEN"));
               var body=allowed?"{\"sessions\":[],\"total\":0}":"{\"error\":{\"code\":\"unauthorized\"}}";
               var response="HTTP/1.1 "+(allowed?"200 OK":"401 Unauthorized")+"\r\nContent-Type: application/json\r\nContent-Length: "+Encoding.UTF8.GetByteCount(body)+"\r\nConnection: close\r\n\r\n"+body;
               var bytes=Encoding.UTF8.GetBytes(response);stream.Write(bytes,0,bytes.Length);stream.Flush();

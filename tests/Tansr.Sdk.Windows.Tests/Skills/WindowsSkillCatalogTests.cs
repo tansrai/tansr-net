@@ -178,6 +178,43 @@ public sealed class WindowsSkillCatalogTests : IDisposable
         Assert.Equal("skills/review/reference.md", Assert.Single(Assert.Single(catalog.Index()).Resources).RelativePath);
     }
 
+    [Fact]
+    public void InlineSkillsShareTheIndexedReadSurfaceWithoutAnyWorkspaceOrTemporaryFile()
+    {
+        var inline = WindowsSkillDescriptor.FromInline("inline", "Inline guidance", "审阅正文🙂", "审阅合同");
+        var catalog = WindowsSkillCatalog.FromInline(new[] { inline }); var index = Assert.Single(catalog.Index());
+        Assert.True(inline.IsInline); Assert.True(index.IsInline); Assert.Empty(index.RelativePath);
+        Assert.Equal("审阅正文🙂", catalog.Read("inline", index.DefinitionDigest).Content);
+        Assert.Empty(catalog.Assemble("inline", index.DefinitionDigest).Resources);
+        Assert.Equal("workspace_required", Assert.Throws<WindowsSkillException>(() => WindowsSkillCatalog.FromInline(new[] { Descriptor() })).Code);
+        var mixed = new WindowsSkillCatalog(_workspace, new[] { Descriptor(), inline });
+        Assert.Equal(2, mixed.Index().Count);
+        Assert.Equal("size_limit", Assert.Throws<WindowsSkillException>(() => WindowsSkillCatalog.FromInline(new[] { inline },
+            new WindowsSkillCatalogOptions { MaximumSkillBytes = 2 }).Index()).Code);
+    }
+
+    [Fact]
+    public void RevokedTrustRejectsReadsResourcesAssembliesAndNewIndexesImmediately()
+    {
+        var catalog = Catalog(); var entry = Assert.Single(catalog.Index()); var resource = Assert.Single(entry.Resources);
+        catalog.Revoke();
+        Assert.Equal("trust_revoked", Assert.Throws<WindowsSkillException>(() => catalog.Read(entry.Name, entry.DefinitionDigest)).Code);
+        Assert.Equal("trust_revoked", Assert.Throws<WindowsSkillException>(() => catalog.ReadResource(entry.Name, entry.DefinitionDigest, resource.RelativePath, resource.ContentDigest)).Code);
+        Assert.Equal("trust_revoked", Assert.Throws<WindowsSkillException>(() => catalog.Assemble(entry.Name, entry.DefinitionDigest)).Code);
+        Assert.Equal("trust_revoked", Assert.Throws<WindowsSkillException>(() => catalog.Index()).Code);
+    }
+
+    [Fact]
+    public void HostAuthorizationIsCheckedAgainBeforeReturningMaterial()
+    {
+        var reads = 0; var allowed = true;
+        var catalog = WindowsSkillCatalog.FromInline(new[] { WindowsSkillDescriptor.FromInline("inline", "desc", "body") },
+            new WindowsSkillCatalogOptions { Authorize = (_, _) => { if (!allowed) throw new WindowsSkillException("host_revoked"); if (++reads == 3) allowed = false; } });
+        var entry = Assert.Single(catalog.Index());
+        Assert.Equal("host_revoked", Assert.Throws<WindowsSkillException>(() => catalog.Read(entry.Name, entry.DefinitionDigest)).Code);
+        Assert.Equal(3, reads);
+    }
+
     public void Dispose()
     {
         _workspace.Dispose(); Directory.Delete(_directory, true);

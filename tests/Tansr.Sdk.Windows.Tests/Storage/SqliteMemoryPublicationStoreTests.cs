@@ -12,6 +12,50 @@ namespace Tansr.Sdk.Windows.Tests.Storage;
 public sealed class SqliteMemoryPublicationStoreTests
 {
     [Fact]
+    public async Task LateWriterAndBackupReplayCannotReplaceACommittedDeletionPublication()
+    {
+        using var f = new Fixture();
+        // The publication body stays opaque here. Only Serve interprets its deletion generation.
+        byte[] original = Encoding.UTF8.GetBytes("{\"deletionGeneration\":\"0\",\"files\":{\"fact.md\":\"synthetic fact\"}}"),
+            late = Encoding.UTF8.GetBytes("{\"deletionGeneration\":\"0\",\"files\":{\"fact.md\":\"late synthetic fact\"}}"),
+            deleted = Encoding.UTF8.GetBytes("{\"deletionGeneration\":\"1\",\"files\":{}}");
+        string originalEtag = WireJson.Sha256(original), deletedEtag = WireJson.Sha256(deleted);
+        using (var store = await SqliteMemoryPublicationStore.OpenAsync(f.Options()))
+        {
+            await f.Stage(store, "original", original); await f.Run(store, "commit", new { transferId = "original" });
+            await f.Stage(store, "late-writer", late, originalEtag);
+            await f.Stage(store, "delete", deleted, originalEtag); await f.Run(store, "commit", new { transferId = "delete" });
+        }
+        using (var reopened = await SqliteMemoryPublicationStore.OpenAsync(f.Options(StorageOpenMode.Reopen)))
+        {
+            AssertTransfer(await f.Run(reopened, "commit", new { transferId = "late-writer" }), "conflict", late.Length, null);
+            // Original committed transfer is an immutable receipt, never a command to republish old bytes.
+            AssertTransfer(await f.Run(reopened, "commit", new { transferId = "original" }), "committed", original.Length, originalEtag);
+            await f.Stage(reopened, "backup-replay", original, originalEtag);
+            AssertTransfer(await f.Run(reopened, "commit", new { transferId = "backup-replay" }), "conflict", original.Length, null);
+            Assert.Equal(deletedEtag, (await f.Run(reopened, "head")).GetProperty("publication").GetProperty("etag").GetString());
+            Assert.Equal(deleted, await f.ReadAll(reopened));
+        }
+        using var final = await SqliteMemoryPublicationStore.OpenAsync(f.Options(StorageOpenMode.Reopen));
+        AssertTransfer(await f.Run(final, "query", new { transferId = "late-writer" }), "conflict", late.Length, null);
+        AssertTransfer(await f.Run(final, "query", new { transferId = "backup-replay" }), "conflict", original.Length, null);
+        Assert.Equal(deleted, await f.ReadAll(final));
+    }
+
+    [Fact]
+    public async Task NewAuthorizationCannotTakeOverAnOldTransferAfterReopen()
+    {
+        using var f = new Fixture(); byte[] body = Encoding.UTF8.GetBytes("synthetic old-owner body"); string originalOwner = f.Owner;
+        using (var store = await SqliteMemoryPublicationStore.OpenAsync(f.Options())) await f.Stage(store, "old-transfer", body);
+        f.AuthorizationRevision = "2";
+        using var reopened = await SqliteMemoryPublicationStore.OpenAsync(f.Options(StorageOpenMode.Reopen));
+        Assert.Equal("request_conflict", (await Assert.ThrowsAsync<SqliteMemoryPublicationException>(() => f.Run(reopened, "commit", new { transferId = "old-transfer" }))).Code);
+        Assert.Equal(JsonValueKind.Null, (await f.Run(reopened, "head")).GetProperty("publication").ValueKind);
+        // The storage owner is not itself an authorization check. ExecutionHost rejects an old scope;
+        // the preserved transfer can only be reconciled by an explicit trusted recovery witness.
+        Assert.NotEqual(originalOwner, f.Owner);
+    }
+    [Fact]
     public async Task PublicationCasAndOriginalTransferReceiptsSurviveReopenWithoutRewritingTheWinner()
     {
         using var f = new Fixture(); byte[] first = Encoding.UTF8.GetBytes("{\"memory\":\"偏好 😀\"}"), second = Encoding.UTF8.GetBytes("other memory");

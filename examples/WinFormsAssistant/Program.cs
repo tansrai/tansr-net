@@ -412,7 +412,8 @@ internal sealed class AssistantForm : Form
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
         await StopTerminalDeviceAsync();
         _lifetime!.Cancel(); CloseSessionWindows(); if (_observation != null) await _observation;
-        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); } _storage = null;
+        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
+        _storage = null;
         _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
         _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
         if (_connection != null) await _connection.CloseAsync(); _connection = null;
@@ -428,7 +429,8 @@ internal sealed class AssistantForm : Form
         catch (Exception error) { _localSaveFailure = " 本地上下文镜像未确认：" + ErrorText(error); }
         // 本地断开不发远端 interrupt/close/delete；保留会话 ID 供以后查账。
         _lifetime?.Cancel(); CloseSessionWindows(); if (_observation != null) await _observation;
-        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); } _storage = null;
+        if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
+        _storage = null;
         string? cleanupFailure = null;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { await StopTerminalDeviceAsync(); } catch (Exception error) { cleanupFailure = ErrorText(error); }

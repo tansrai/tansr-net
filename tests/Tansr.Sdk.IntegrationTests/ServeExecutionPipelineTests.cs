@@ -3,6 +3,8 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Runtime.ExceptionServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -28,6 +30,281 @@ public sealed class ServeExecutionPipelineTests(ITestOutputHelper output, Window
     private static JsonElement Interpreter => Json(new { id = "net-native-fixture", revision = "1", hostShell = "powershell" });
     private static string Required(string name) => Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException(name + " is required; use scripts/serve-integration.mjs.");
     private static readonly TimeSpan Step = TimeSpan.FromSeconds(25);
+
+    [Fact]
+    public void FrozenSandboxGoldenCasesMatchTheIndependentCodec()
+    {
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root != null && !File.Exists(Path.Combine(root.FullName, "contract", "terminal-shell-sandbox-v1.golden.json"))) root = root.Parent;
+        Assert.NotNull(root);
+        using var corpus = JsonDocument.Parse(File.ReadAllText(Path.Combine(root.FullName, "contract", "terminal-shell-sandbox-v1.golden.json")));
+        Assert.Equal(TerminalShellSandboxContract.SchemaSha256, corpus.RootElement.GetProperty("schemaSha256").GetString());
+        foreach (var sample in corpus.RootElement.GetProperty("cases").EnumerateArray())
+        {
+            var error = Record.Exception(() =>
+            {
+                if (sample.GetProperty("kind").GetString() == "request") TerminalShellSandboxContract.ValidateRequest(sample.GetProperty("input"));
+                else TerminalShellSandboxContract.ValidateResponse(sample.GetProperty("input"), sample.TryGetProperty("request", out var request) ? request : null);
+            });
+            Assert.True(sample.GetProperty("accept").GetBoolean() == (error == null), sample.GetProperty("id").GetString() + ": " + error);
+        }
+        Assert.Equal(32, corpus.RootElement.GetProperty("cases").GetArrayLength());
+    }
+
+    [Theory]
+    [InlineData("normal")]
+    [InlineData("approved")]
+    [InlineData("denied")]
+    [InlineData("required")]
+    [InlineData("none")]
+    [Trait("Category", "ServeSourceIntegration")]
+    public async Task SandboxProfileUsesFullOriginalOutputBeyondBoundedReceiptWithoutReexecution(string scenario)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(85)); var ct = deadline.Token;
+        var directory = Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "sandbox-pipeline", "dotnet-" + scenario); Directory.CreateDirectory(directory);
+        var security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false); var user = WindowsIdentity.GetCurrent().User!;
+        security.SetOwner(user); security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl,
+            InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(directory).SetAccessControl(security);
+        TansrClientOptions Options() => new()
+        {
+            BaseUri = new Uri(Required("TANSR_SERVE_SANDBOX_URL")),
+            AllowInsecureLoopback = true,
+            TokenProvider = _ => Task.FromResult(Required("TANSR_SERVE_TEST_TOKEN")),
+            PrincipalProvider = () => "net-execution-app/net-integration-user",
+            ExecutionScopeProvider = () => Scope,
+            StreamIdleTimeout = TimeSpan.FromSeconds(35),
+            RequestTimeout = TimeSpan.FromSeconds(10),
+            MaxReconnectAttempts = 0
+        };
+        using var controllerHttp = Http(new HttpClientHandler(), "controller"); using var deviceHttp = Http(new HttpClientHandler(), "executor");
+        using var controller = new TansrClient(Options(), controllerHttp); using var device = new TansrClient(Options(), deviceHttp);
+        using var controlTerminal = new TerminalConnection(Options(), true, controllerHttp); using var terminal = new TerminalConnection(Options(), true, deviceHttp);
+        var session = await controller.CreateSessionAsync(new CreateSessionOptions { Tools = ["Shell"] }, ct);
+        using var workspace = new WindowsWorkspace(directory);
+        using var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
+        {
+            Path = Path.Combine(directory, "journal.sqlite"),
+            Mode = StorageOpenMode.Create,
+            ExecutorId = "net-native-pc",
+            ApplicationScopeId = "net-execution-app",
+            EndUserId = "net-integration-user",
+            ReadContext = () => Scope
+        }, ct);
+        var preparations = 0; var mode = WindowsSandboxMode.On;
+        IWindowsShellSandboxRuntime? runtime = scenario == "normal" ? new WindowsHygieneSandboxRuntime() : new StructuralSandboxDenial();
+        WindowsProcessRequest ProcessFactory(JsonElement request, WindowsWorkspace location)
+        {
+            Assert.Equal("native-large-unicode", request.GetProperty("command").GetString()); Interlocked.Increment(ref preparations);
+            return new WindowsProcessRequest(program.Executable, ["large-unicode"], () => location.AcquireProcessDirectory());
+        }
+        using var sandbox = new WindowsShellSandboxHost(new WindowsShellSandboxHostOptions(
+            new WindowsBackgroundHostOptions(directory, ProcessFactory) { CandidateRevision = WindowsBackgroundHost.CandidateRevision },
+            Interpreter, journal, () => new(mode, new([directory], false), runtime))
+        { CandidateSchemaSha256 = WindowsShellSandboxHost.CandidateSchemaSha256 });
+        var sink = new BoundSink();
+        var backend = new WindowsExecutorBackend("net-native-pc", [new WindowsExecutorWorkspace("work", "1", workspace)], [sandbox.CreateTool()], Interpreter, ProcessFactory, executionOutput: sink);
+        TerminalBinding? binding = null;
+        using var host = new DeviceSessionHost(new ExecutionClient(controller), new ExecutionClient(device), backend, journal,
+            new DeviceSessionOptions
+            {
+                SessionId = session.Id,
+                WorkspaceId = "work",
+                RequestedTools = ["Shell"],
+                AfterBindingAsync = async (bound, token) =>
+                {
+                    var control = await controlTerminal.BindAsync(Json(new
+                    {
+                        contract = "terminal-services-v1",
+                        requestId = "native-sandbox",
+                        session = new { sessionContract = "sdk1", sessionId = session.Id },
+                        executionBinding = bound.GetProperty("binding"),
+                        required = new[] { "execution-stream-v1" },
+                        optional = Array.Empty<string>()
+                    }), token);
+                    binding = terminal.AttachBinding(control); sink.Set(terminal.CreateOutputSink(binding));
+                },
+                ExecutionNotifications = (_, _) => Task.FromResult<IExecutionNotificationSource>(new TerminalExecutionNotifications(terminal, binding!))
+            }, (_, token) => { token.ThrowIfCancellationRequested(); return Task.CompletedTask; });
+        var events = new List<AgentEvent>(); var escalationPermissions = 0; var deniedPermission = false;
+        try
+        {
+            await host.StartAsync(ct);
+            using var run = session.StartRun("NET_PIPELINE_SHELLSANDBOX_" + scenario, new SessionRunOptions { Timeout = Step }, async (item, token) =>
+            {
+                events.Add(item);
+                if (item.Name == "server.permission.request")
+                {
+                    var p = item.Data.GetProperty("payload");
+                    var earlier = (await journal.OperationsAsync(cancellationToken: token)).Any(value => value.GetProperty("request").GetProperty("operation").GetString() == "tool.invoke");
+                    if (earlier) { escalationPermissions++; if (scenario == "required") mode = WindowsSandboxMode.Required; if (scenario == "none") runtime = null; }
+                    var allow = !(earlier && scenario == "denied"); deniedPermission |= !allow;
+                    await session.PermissionAsync(p.GetProperty("requestId").GetString()!, p.GetProperty("digest").GetString()!, allow, token);
+                }
+            }, ct);
+            Assert.False((await run.Completion.WaitAsync(Step, ct)).WasAborted);
+            Assert.Contains(events, item => item.Name == "msg.text.delta" && item.Data.GetProperty("text").GetString() == "NET_PIPELINE_SHELLSANDBOX_DONE");
+            var operations = (await journal.OperationsAsync(cancellationToken: ct)).Where(item => item.GetProperty("request").GetProperty("operation").GetString() == "tool.invoke").ToArray();
+            Assert.Equal(scenario is "normal" or "denied" ? 1 : 2, operations.Length);
+            if (scenario != "normal") Assert.Equal(1, escalationPermissions);
+            Assert.Equal(scenario is "normal" or "denied" ? 1 : 2, preparations);
+            if (scenario == "denied") { Assert.True(deniedPermission); Assert.False(File.Exists(Path.Combine(directory, "launches.txt"))); return; }
+            var operation = scenario == "normal" ? Assert.Single(operations) : Assert.Single(operations, item =>
+                JsonDocument.Parse(item.GetProperty("request").GetProperty("args").GetProperty("argsJson").GetString()!).RootElement.TryGetProperty("escalation", out _));
+            var receipt = await journal.ReceiptAsync(operation, ct); Assert.NotNull(receipt);
+            using var tool = JsonDocument.Parse(receipt.Value.GetProperty("result").GetProperty("args").GetProperty("resultJson").GetString()!);
+            using var response = JsonDocument.Parse(tool.RootElement.GetProperty("content")[0].GetProperty("text").GetString()!);
+            var sandboxState = response.RootElement.GetProperty("sandbox");
+            Assert.Equal(scenario == "none" ? "none" : "partial", sandboxState.GetProperty("capability").GetString());
+            Assert.Equal(scenario == "approved", sandboxState.GetProperty("escalated").GetBoolean());
+            if (scenario == "required")
+            {
+                Assert.Equal("required", sandboxState.GetProperty("mode").GetString()); Assert.True(sandboxState.GetProperty("isolationDenied").GetBoolean());
+                Assert.Equal(JsonValueKind.Null, response.RootElement.GetProperty("result").ValueKind); Assert.False(File.Exists(Path.Combine(directory, "launches.txt"))); return;
+            }
+            Assert.True(response.RootElement.GetProperty("output").GetProperty("previewTruncated").GetBoolean());
+            Assert.Single(await File.ReadAllLinesAsync(Path.Combine(directory, "launches.txt"), ct)); Assert.Null(backend.LastOutputFailure);
+            using var observation = new TerminalObservationClient(Options(), true, controllerHttp);
+            var toolCallId = $"native-sandbox-{scenario}-{(scenario == "normal" ? "normal" : "escalate")}";
+            var correlation = Assert.Single((await observation.ReadOutputCorrelationsAsync(session.Id, toolCallId: toolCallId, cancellationToken: ct)).Correlations);
+            Assert.Equal(operation.GetProperty("operationId").GetString(), correlation.OperationId); Assert.Equal("tool-output", correlation.OutputAuthority);
+        }
+        finally { await session.CloseAsync().WaitAsync(Step); await host.StopAsync().WaitAsync(Step); await sandbox.CloseAsync().WaitAsync(Step); }
+    }
+
+    private sealed class StructuralSandboxDenial : IWindowsShellSandboxRuntime
+    {
+        public string Id => "synthetic-structural-denial";
+        public WindowsSandboxCapability Capability => WindowsSandboxCapability.Partial;
+        public string CapabilityReason => "test-only pre-execution denial; not OS isolation";
+        public WindowsProcessRequest Prepare(WindowsProcessRequest approvedProcess, string workingDirectory, WindowsSandboxPolicy policy)
+            => throw new WindowsSandboxIsolationDeniedException();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    [Trait("Category", "ServeSourceIntegration")]
+    public async Task BackgroundAndForegroundHandoffUseOriginalKernelTaskRegistry(bool handoff)
+    {
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(85)); var ct = deadline.Token;
+        var directory = Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "execution-pipeline", handoff ? "handoff" : "background");
+        Directory.CreateDirectory(directory);
+        var security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false);
+        var user = WindowsIdentity.GetCurrent().User!; security.SetOwner(user);
+        security.AddAccessRule(new FileSystemAccessRule(user, FileSystemRights.FullControl, InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+        new DirectoryInfo(directory).SetAccessControl(security);
+        TansrClientOptions Options() => new()
+        {
+            BaseUri = new Uri(Required("TANSR_SERVE_EXECUTION_URL")),
+            AllowInsecureLoopback = true,
+            TokenProvider = _ => Task.FromResult(Required("TANSR_SERVE_TEST_TOKEN")),
+            PrincipalProvider = () => "net-execution-app/net-integration-user",
+            ExecutionScopeProvider = () => Scope,
+            StreamIdleTimeout = TimeSpan.FromSeconds(35),
+            RequestTimeout = TimeSpan.FromSeconds(10),
+            MaxReconnectAttempts = 0
+        };
+        using var controllerHttp = Http(new HttpClientHandler(), "controller"); using var deviceHttp = Http(new HttpClientHandler(), "executor");
+        using var controller = new TansrClient(Options(), controllerHttp); using var device = new TansrClient(Options(), deviceHttp);
+        using var controlTerminal = new TerminalConnection(Options(), true, controllerHttp); using var terminal = new TerminalConnection(Options(), true, deviceHttp);
+        var session = await controller.CreateSessionAsync(new CreateSessionOptions { Tools = ["Shell"] }, ct);
+        using var workspace = new WindowsWorkspace(directory);
+        var launches = 0;
+        var selected = new Func<JsonElement, WindowsWorkspace, WindowsProcessRequest>((request, location) =>
+        {
+            Assert.Equal("native-background", request.GetProperty("command").GetString()); Interlocked.Increment(ref launches);
+            var process = new WindowsProcessRequest(program.Executable, ["tree-pipeline"], () => location.AcquireProcessDirectory());
+            process.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows); return process;
+        });
+        using var background = new WindowsBackgroundHost(new WindowsBackgroundHostOptions(directory, selected)
+        { CandidateRevision = WindowsBackgroundHost.CandidateRevision, MaximumRuntime = TimeSpan.FromMinutes(2) });
+        var backend = new WindowsExecutorBackend("net-native-pc", [new WindowsExecutorWorkspace("work", "1", workspace)], [background.CreateTool()], Interpreter, selected);
+        using var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
+        {
+            Path = Path.Combine(directory, "journal.sqlite"),
+            Mode = StorageOpenMode.Create,
+            ExecutorId = "net-native-pc",
+            ApplicationScopeId = "net-execution-app",
+            EndUserId = "net-integration-user",
+            ReadContext = () => Scope
+        }, ct);
+        TerminalBinding? deviceBinding = null;
+        using var host = new DeviceSessionHost(new ExecutionClient(controller), new ExecutionClient(device), backend, journal,
+            new DeviceSessionOptions
+            {
+                SessionId = session.Id,
+                WorkspaceId = "work",
+                RequestedTools = ["Shell"],
+                AfterBindingAsync = async (bound, token) =>
+                {
+                    var binding = await controlTerminal.BindAsync(Json(new
+                    {
+                        contract = "terminal-services-v1",
+                        requestId = handoff ? "handoff" : "background",
+                        session = new { sessionContract = "sdk1", sessionId = session.Id },
+                        executionBinding = bound.GetProperty("binding"),
+                        required = new[] { "execution-stream-v1", "execution-background-v1" },
+                        optional = Array.Empty<string>()
+                    }), token);
+                    deviceBinding = terminal.AttachBinding(binding);
+                },
+                ExecutionNotifications = (_, _) => Task.FromResult<IExecutionNotificationSource>(new TerminalExecutionNotifications(terminal, deviceBinding!))
+            }, (_, token) => { token.ThrowIfCancellationRequested(); return Task.CompletedTask; });
+        var allEvents = new List<AgentEvent>(); var turn = 0;
+        async Task<JsonElement> ToolAsync(string name, object args)
+        {
+            var id = (handoff ? "handoff-" : "background-") + ++turn; var events = new List<AgentEvent>();
+            using var run = session.StartRun("NET_BACKGROUND:" + Json(new { id, name, args }).GetRawText(), new SessionRunOptions { Timeout = Step }, async (item, token) =>
+            {
+                events.Add(item); allEvents.Add(item);
+                if (item.Name == "server.permission.request")
+                {
+                    var prompt = item.Data.GetProperty("payload");
+                    await session.PermissionAsync(prompt.GetProperty("requestId").GetString()!, prompt.GetProperty("digest").GetString()!, true, token);
+                }
+            }, ct);
+            var final = await run.Completion.WaitAsync(Step, ct); Assert.False(final.WasAborted);
+            var result = Assert.Single(events, item => item.Name == "tool.completed" && item.Data.GetProperty("toolCallId").GetString() == id);
+            Assert.False(result.Data.TryGetProperty("isError", out var failed) && failed.GetBoolean(), result.Data.GetRawText());
+            return result.Data.GetProperty("data").Clone();
+        }
+        try
+        {
+            await host.StartAsync(ct);
+            var started = handoff
+                ? await ToolAsync("Shell", new { command = "native-background", timeout_ms = 1000 })
+                : await ToolAsync("Shell", new { command = "native-background", run_in_background = true });
+            var task = started.GetProperty("backgroundArtifact"); var id = task.GetProperty("taskId").GetString()!;
+            Assert.False(started.TryGetProperty("outputFile", out _));
+            int childPid = 0;
+            await WaitUntilAsync(() =>
+            {
+                try { return int.TryParse(File.ReadAllText(Path.Combine(directory, "child-pid.txt")), out childPid); }
+                catch (IOException) { return false; }
+            }, ct);
+            using var child = Process.GetProcessById(childPid);
+            Assert.False(child.HasExited);
+            var visible = await ToolAsync("ShellOutput", new { task_id = id, offset = "0", length = 16384 });
+            Assert.Contains("PIPE_TREE|", Encoding.UTF8.GetString(Convert.FromBase64String(visible.GetProperty("bytesBase64").GetString()!)));
+            Assert.False(visible.GetProperty("gap").GetBoolean()); Assert.False(visible.GetProperty("complete").GetBoolean());
+            var state = await ToolAsync("ShellTask", new { task_id = id, action = "query" }); Assert.Equal("running", state.GetProperty("task").GetProperty("status").GetString());
+            await ToolAsync("ShellTask", new { task_id = id, action = "cancel" }); Assert.True(child.WaitForExit((int)Step.TotalMilliseconds));
+            var terminalState = await ToolAsync("ShellTask", new { task_id = id, action = "query" }); Assert.Equal("killed", terminalState.GetProperty("task").GetProperty("status").GetString());
+            var deleted = await ToolAsync("ShellTask", new { task_id = id, action = "delete_output" }); Assert.True(deleted.GetProperty("outputDeleted").GetBoolean());
+            Assert.Equal(1, launches); Assert.Single(await File.ReadAllLinesAsync(Path.Combine(directory, "launches.txt"), ct));
+            var entries = await journal.OperationsAsync(cancellationToken: ct);
+            var launch = Assert.Single(entries, item => item.GetProperty("request").GetProperty("operation").GetString() == "tool.invoke" &&
+                JsonDocument.Parse(item.GetProperty("request").GetProperty("args").GetProperty("argsJson").GetString()!).RootElement.GetProperty("action").GetString() == "launch");
+            Assert.NotNull(await journal.ReceiptAsync(launch, ct));
+            Assert.Equal(handoff ? "foreground-handoff" : "background", JsonDocument.Parse(launch.GetProperty("request").GetProperty("args").GetProperty("argsJson").GetString()!).RootElement.GetProperty("mode").GetString());
+        }
+        finally
+        {
+            await session.CloseAsync().WaitAsync(Step); await host.StopAsync().WaitAsync(Step); await background.CloseAsync().WaitAsync(Step);
+            await File.WriteAllLinesAsync(Path.Combine(directory, "background-events.jsonl"), allEvents.Select(item => item.Data.GetRawText()), new UTF8Encoding(false));
+        }
+    }
 
     [Theory]
     [InlineData("STREAM")]
@@ -176,6 +453,12 @@ public sealed class ServeExecutionPipelineTests(ITestOutputHelper output, Window
                 {
                     await visible.UntilAsync(text => text.Contains("PIPE_OUT_中文🙂\n", StringComparison.Ordinal) && visible.Error.Contains("PIPE_ERR_中文🙂\n", StringComparison.Ordinal), ct);
                     Assert.False(nativeRoot.HasExited); Assert.False(run.Completion.IsCompleted);
+                    using var observationClient = new TerminalObservationClient(Options(), true, controllerHttp);
+                    var correlations = await observationClient.ReadOutputCorrelationsAsync(session.Id, toolCallId: "native-stream", cancellationToken: ct);
+                    var correlation = Assert.Single(correlations.Correlations);
+                    Assert.Equal("native-stream", correlation.ToolCallId); Assert.Equal(operationId, correlation.OperationId);
+                    Assert.Equal(operation.GetProperty("digest").GetString(), correlation.RequestDigest); Assert.Equal("tool-output", correlation.OutputAuthority);
+                    Assert.False(correlations.Truncated);
                     Record("view.complete-prefix-process-live");
                     // Reconnect from the same original key, replay one block, and retain one decoder/view.
                     observation!.Cancel(); await observing!.WaitAsync(Step, ct); observation.Dispose();

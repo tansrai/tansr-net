@@ -73,7 +73,7 @@ internal sealed class ArchiveFlowFixture
         private JsonElement Coverage() => Element(new { sourceId = "source", sourceGeneration = "source-generation", fromSequence = HasRecord ? "1" : null, throughSequence = HasRecord ? "1" : null, headDigest = HasRecord ? _data.Record.GetProperty("recordDigest").GetString() : null, complete = HasRecord });
         public Task CloseAsync() => Task.CompletedTask;
     }
-    internal sealed class Client : IArchiveClient
+    internal sealed class Client : IArchiveClient, IArchiveConnectionSource
     {
         private readonly ArchiveFlowFixture _data;
         internal readonly List<string> Calls = new();
@@ -84,9 +84,16 @@ internal sealed class ArchiveFlowFixture
         internal Action? OnAck;
         internal bool LoseAck, LoseMaterial;
         internal Action? OnRespond;
+        internal Func<string?, Func<JsonElement, CancellationToken, Task>, CancellationToken, Task<string?>>? Observe;
         private readonly HashSet<int> _uploaded = new();
         internal Client(ArchiveFlowFixture data) => _data = data;
         public JsonElement ReadScope() => _data.Scope;
+        public Task<string?> ConsumeEventsAsync(string bindingId, JsonElement generations, Func<JsonElement, CancellationToken, Task> onFrame,
+            string? lastEventId = null, CancellationToken cancellationToken = default)
+            => Observe?.Invoke(lastEventId, onFrame, cancellationToken) ?? throw new NotSupportedException();
+        public async Task<string?> ConsumeConnectedEventsAsync(string bindingId, JsonElement generations, Func<JsonElement, CancellationToken, Task> onFrame,
+            Func<CancellationToken, Task> onConnected, string? lastEventId = null, CancellationToken cancellationToken = default)
+        { await onConnected(cancellationToken); return await ConsumeEventsAsync(bindingId, generations, onFrame, lastEventId, cancellationToken); }
         public JsonElement GetEffectiveLimits(string bindingId) => _data.Limits;
         public Task<JsonElement> GetCapabilitiesAsync(CancellationToken cancellationToken = default) => throw new NotSupportedException();
         public Task<JsonElement> GetBindingTargetAsync(JsonElement request, CancellationToken cancellationToken = default) => throw new NotSupportedException();

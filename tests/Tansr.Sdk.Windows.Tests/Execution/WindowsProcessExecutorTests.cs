@@ -18,6 +18,20 @@ public sealed class WindowsProcessExecutorTests : IDisposable, IClassFixture<Win
     }
 
     [Fact]
+    public async Task TrustedExecutableDigestIsCheckedBeforeTheProcessRuns()
+    {
+        var request = Request("tree-pipeline"); request.ExpectedExecutableSha256 = new string('0', 64);
+        var error = await Assert.ThrowsAsync<WindowsWorkspaceException>(() => new WindowsProcessExecutor().ExecuteAsync(request));
+        Assert.Equal("executable_digest_mismatch", error.Code);
+        Assert.False(File.Exists(Path.Combine(directory, "launches.txt")));
+        request = Request("arguments", "exact-approved-program");
+        request.ExpectedExecutableSha256 = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(program.Executable)));
+        var result = await new WindowsProcessExecutor().ExecuteAsync(request);
+        Assert.Equal(WindowsProcessTermination.Exited, result.Termination);
+        Assert.Equal(Convert.ToBase64String(Encoding.UTF8.GetBytes("exact-approved-program")), result.StandardOutput.Trim());
+    }
+
+    [Fact]
     public async Task DeliversUtf8AndSeparateStreamsBeforeProcessExits()
     {
         var releaseName = @"Local\tansr-process-output-" + Guid.NewGuid().ToString("N");

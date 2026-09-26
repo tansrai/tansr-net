@@ -82,7 +82,83 @@ public sealed class CacheClientTests
         using var client = new TansrClient(new TansrClientOptions { BaseUri = new("https://serve.test/"), TokenProvider = _ => Task.FromResult("token") });
         Assert.Throws<TansrProtocolException>(() => new CacheClient(client, true));
         Assert.Empty(fixture.Handler.Requests);
-        Assert.DoesNotContain(typeof(TansrClient).Assembly.GetExportedTypes(), type => type.Namespace == "Tansr.Sdk.Cache");
+        Assert.DoesNotContain(typeof(TansrClient).Assembly.GetExportedTypes(), type =>
+            type == typeof(CacheClient) || type == typeof(CacheBinding) || type == typeof(CacheOperation) || type == typeof(CacheTicket));
+        Assert.Equal("unsupported_capability", Assert.Throws<TansrProtocolException>(() => new CacheContinuityClient(fixture.Client)).Code);
+    }
+
+    [Theory]
+    [InlineData(CacheContinuityOpenKind.New)]
+    [InlineData(CacheContinuityOpenKind.Import)]
+    [InlineData(CacheContinuityOpenKind.Resume)]
+    [InlineData(CacheContinuityOpenKind.Fork)]
+    public async Task PublicPreviewFacadePreservesOriginalWireAndRedactsTickets(CacheContinuityOpenKind kind)
+    {
+        using var fixture = new Fixture(); var cache = new CacheContinuityClient(fixture.Client, true);
+        var ticket = kind is CacheContinuityOpenKind.Resume or CacheContinuityOpenKind.Fork ? CacheContinuityTicket.Restore(Ticket) : null;
+        var operation = await cache.PrepareOpenAsync("session/中文", kind, ticket, "request");
+        Assert.Equal("epoch", operation.OperationEpoch); Assert.Equal("request", operation.RequestId); Assert.Equal("open", operation.Action);
+        var original = operation.ExportOriginalRequest(); var changedCopy = operation.ExportOriginalRequest(); changedCopy[0] = 0;
+        var receipt = await cache.SubmitAsync(operation);
+        Assert.Equal("binding", receipt.Binding.Id); Assert.Equal("logical", receipt.Binding.LogicalReference); Assert.Equal("active", receipt.Binding.State);
+        Assert.Equal(Ticket, receipt.Ticket!.ExportProtectedValue()); Assert.Equal(Time, receipt.TicketExpiresAt);
+        Assert.Equal(original, fixture.Handler.Requests[1].Body); Assert.DoesNotContain(Ticket, receipt.ToString());
+        Assert.DoesNotContain(Ticket, receipt.Ticket.ToString()); Assert.DoesNotContain(Ticket, operation.ToString());
+        Assert.NotNull(operation.ExportOriginalReceipt());
+        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Path.StartsWith("/v2/", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task PublicPreviewRecoveryAfterLostReturnQueriesExactOriginalAndRejectsAnotherUser()
+    {
+        using var fixture = new Fixture(); var cache = new CacheContinuityClient(fixture.Client, true);
+        var operation = await cache.PrepareOpenAsync("original-session", CacheContinuityOpenKind.New, requestId: "request");
+        var original = operation.ExportOriginalRequest(); fixture.Respond = _ => throw new HttpRequestException("secret detail");
+        Assert.Equal("network_error", (await Assert.ThrowsAsync<TansrProtocolException>(() => cache.SubmitAsync(operation))).Code);
+        Assert.Equal("query_status_required", (await Assert.ThrowsAsync<TansrProtocolException>(() => cache.SubmitAsync(operation))).Code);
+        var restored = cache.RestoreOperation(operation.Action, original, operation.OriginalPrincipal);
+        fixture.Respond = request => Json(Reply(request)); fixture.Revision = "2";
+        var receipt = await cache.QueryAsync(restored); Assert.Equal("logical", receipt.Binding.LogicalReference);
+        Assert.Equal("GET", fixture.Handler.Requests[2].Method); Assert.Contains("operationEpoch=epoch&requestId=request", fixture.Handler.Requests[2].Path, StringComparison.Ordinal);
+        Assert.Single(fixture.Handler.Requests, request => request.Method == "POST");
+        var confirmed = cache.RestoreOperation(operation.Action, original, operation.OriginalPrincipal, restored.ExportOriginalReceipt());
+        fixture.User = "other"; fixture.Principal = "app/other";
+        Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => cache.QueryAsync(confirmed))).Code);
+        Assert.Equal(3, fixture.Handler.Requests.Count);
+        var other = new CacheContinuityClient(fixture.Client, true);
+        Assert.Equal("context_changed", Assert.Throws<TansrProtocolException>(() => other.RestoreOperation(operation.Action, original, operation.OriginalPrincipal)).Code);
+    }
+
+    [Theory]
+    [InlineData("renew")]
+    [InlineData("rotate")]
+    [InlineData("rebind")]
+    [InlineData("close")]
+    public async Task PublicPreviewMutationDoesNotMintLogicalReferenceOrReplaceTheServerCas(string action)
+    {
+        using var fixture = new Fixture(); var cache = new CacheContinuityClient(fixture.Client, true);
+        var opened = await cache.SubmitAsync(await cache.PrepareOpenAsync("session", CacheContinuityOpenKind.New, requestId: "request"));
+        var operation = action switch
+        {
+            "renew" => await cache.PrepareRenewAsync(opened.Binding, opened.Ticket!, "mutation"),
+            "rotate" => await cache.PrepareRotateAsync(opened.Binding, opened.Ticket!, "mutation"),
+            "rebind" => await cache.PrepareRebindAsync(opened.Binding, "replacement-session", "mutation"),
+            _ => await cache.PrepareCloseAsync(opened.Binding, opened.Ticket!, "mutation")
+        };
+        var result = await cache.SubmitAsync(operation); Assert.Equal("logical", result.Binding.LogicalReference);
+        var posted = fixture.Handler.Requests.Last(); var body = CacheJson.Read(posted.Body!);
+        Assert.Equal("1", body.GetProperty("expectedRevision").GetString()); Assert.False(body.TryGetProperty("logicalRef", out _));
+        Assert.Equal(action == "close", result.Ticket is null); Assert.Equal(action, operation.Action);
+    }
+
+    [Fact]
+    public async Task PublicPreviewPropagatesStructuredServerRejectionWithoutRetryOrFallback()
+    {
+        using var fixture = new Fixture(); var cache = new CacheContinuityClient(fixture.Client, true);
+        fixture.Respond = _ => Json("{\"protocol\":\"sdk2-cache-v1\",\"requestId\":\"rejected\",\"code\":\"forbidden\",\"status\":403,\"retryAction\":\"none\",\"fallback\":\"none\",\"message\":\"private server detail\"}", HttpStatusCode.Forbidden);
+        var error = await Assert.ThrowsAsync<CacheContinuityException>(() => cache.DiscoverAsync());
+        Assert.Equal(403, error.StatusCode); Assert.Equal("forbidden", error.Code); Assert.Equal("none", error.RetryAction); Assert.Equal("none", error.Fallback);
+        Assert.Single(fixture.Handler.Requests);
     }
 
     [Theory]

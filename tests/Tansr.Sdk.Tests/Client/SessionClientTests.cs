@@ -62,7 +62,9 @@ public sealed class SessionClientTests
     [Fact]
     public async Task FrozenRoutesPreserveBodiesWithoutUnexpectedDiscovery()
     {
-        using var handler = new Handler(r => Json(r.Path == "/v2/sessions" ? Created : "{\"status\":\"accepted\"}"));
+        using var handler = new Handler(r => r.Method == "DELETE" && r.Path.Contains("/checkpoints/", StringComparison.Ordinal)
+            ? new HttpResponseMessage(HttpStatusCode.NoContent)
+            : Json(r.Path == "/v2/sessions" ? Created : "{\"status\":\"accepted\"}"));
         using var http = new HttpClient(handler);
         using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new CreateSessionOptions { Model = "main", MaxTokens = 1000 });

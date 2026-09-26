@@ -1,5 +1,10 @@
 using System;
 using System.IO;
+using System.Diagnostics;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -14,13 +19,16 @@ using Tansr.Sdk.Windows.Storage;
 
 internal static class Program
 {
-    private static async Task<int> Main()
+    private static Task<int> Main(string[] args) => RunAsync(args);
+
+    internal static async Task<int> RunAsync(string[] args)
     {
         var tempRoot = Path.GetFullPath(Path.GetTempPath());
         var root = Path.Combine(tempRoot, "tansr-net-consumer-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
         try
         {
+            if (args.Contains("--require-no-node") && NodeIsOnPath()) throw new Exception("node_visible_on_path");
             using (var client = new TansrClient(new TansrClientOptions
             {
                 BaseUri = new Uri("https://example.invalid"),
@@ -50,6 +58,26 @@ internal static class Program
                 var process = await new WindowsProcessExecutor().ExecuteAsync(request, null, CancellationToken.None);
                 if (!process.CleanupConfirmed || process.ExitCode != 0 || !process.StandardOutput.Contains("tansr-package-consumer")) throw new Exception("process");
             }
+            var localServe = Argument(args, "--local-serve");
+            if (localServe != null) await ConsumeLocalServe(root, localServe, Argument(args, "--local-serve-sha256") ?? throw new Exception("serve_digest_required"));
+            var receipt = Argument(args, "--receipt");
+            if (receipt != null)
+            {
+                using var identity = WindowsIdentity.GetCurrent();
+                var principal = new WindowsPrincipal(identity);
+                using var current = Process.GetCurrentProcess();
+                var document = new
+                {
+                    outcome = "passed", runtime = Environment.Version.ToString(), processId = current.Id,
+                    executable = current.MainModule!.FileName, is64BitProcess = Environment.Is64BitProcess,
+                    elevated = principal.IsInRole(WindowsBuiltInRole.Administrator), nodeOnPath = NodeIsOnPath(),
+                    coreAssembly = typeof(TansrClient).Assembly.Location,
+                    windowsAssembly = typeof(WindowsWorkspace).Assembly.Location,
+                    sqliteAssembly = typeof(Microsoft.Data.Sqlite.SqliteConnection).Assembly.Location,
+                    localServe = localServe != null, cleanupConfirmed = true
+                };
+                File.WriteAllText(Path.GetFullPath(receipt), JsonSerializer.Serialize(document), new UTF8Encoding(false));
+            }
             Console.WriteLine("PACKAGE_CONSUMER_OK " + Environment.Version);
             return 0;
         }
@@ -63,6 +91,32 @@ internal static class Program
             if (!root.StartsWith(tempRoot, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("cleanup_scope");
             Directory.Delete(root, true);
         }
+    }
+
+    private static string? Argument(string[] args, string name)
+    {
+        var index = Array.IndexOf(args, name);
+        if (index < 0) return null;
+        if (index + 1 >= args.Length || args[index + 1].StartsWith("--", StringComparison.Ordinal)) throw new Exception("missing_argument_" + name);
+        return args[index + 1];
+    }
+
+    private static bool NodeIsOnPath() => (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+        .Any(path => path.Length != 0 && File.Exists(Path.Combine(path.Trim('"'), "node.exe")));
+
+    private static async Task ConsumeLocalServe(string root, string executable, string digest)
+    {
+        var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start(); var port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
+        using var workspace = new WindowsWorkspace(root);
+        using var host = await LocalServeHost.StartAsync(new LocalServeHostOptions(executable, digest, workspace) { Port = port });
+        using var client = host.CreateClient();
+        var sessions = await client.ListSessionsAsync();
+        if (!host.IsReady || sessions.GetProperty("sessions").ValueKind != JsonValueKind.Array) throw new Exception("local_serve_list");
+        var stopped = await host.StopAsync();
+        if (!stopped.CleanupConfirmed || !stopped.IoSettled || host.IsReady) throw new Exception("local_serve_cleanup");
+        try { await client.ListSessionsAsync(); throw new Exception("local_serve_survived_owner"); }
+        catch (TansrProtocolException error) when (error.Code == "serve_not_ready") { }
     }
 
     private static async Task ConsumeMemoryPublication(string root)

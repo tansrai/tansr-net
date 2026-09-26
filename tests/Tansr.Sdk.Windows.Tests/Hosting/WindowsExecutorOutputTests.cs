@@ -17,6 +17,33 @@ public sealed class WindowsExecutorOutputTests : IClassFixture<WindowsProcessTes
     { this.program = program; Directory.CreateDirectory(path); workspace = new WindowsWorkspace(path); }
 
     [Fact]
+    public async Task LocalGuardAndExactInterpreterRejectBeforeTheTrustedFactoryOrAnyProcess()
+    {
+        var selected = 0;
+        var backend = new WindowsExecutorBackend("executor", [new WindowsExecutorWorkspace("workspace", "1", workspace)],
+            interpreter: Interpreter, processFactory: (_, space) =>
+            { selected++; return new WindowsProcessRequest(program.Executable, ["tree-pipeline"], () => space.AcquireProcessDirectory()); });
+        foreach (var replacement in new[]
+        {
+            ("\"executorId\":\"executor\"", "\"executorId\":\"other\""),
+            ("\"workspaceRevision\":\"1\"", "\"workspaceRevision\":\"2\""),
+            ("\"workspaceId\":\"workspace\"", "\"workspaceId\":\"other\""),
+            ("\"id\":\"synthetic\"", "\"id\":\"forged\""),
+            ("\"hostShell\":\"powershell\"", "\"hostShell\":\"posix\"")
+        })
+        {
+            var original = Operation().GetRawText(); var replaced = original.Replace(replacement.Item1, replacement.Item2, StringComparison.Ordinal);
+            Assert.NotEqual(original, replaced);
+            using var operation = JsonDocument.Parse(replaced);
+            await Assert.ThrowsAsync<ExecutionRejectedException>(() => backend.ExecuteAsync(operation.RootElement, _ => Task.CompletedTask, CancellationToken.None));
+        }
+        await Assert.ThrowsAsync<ExecutionRejectedException>(() => backend.ExecuteAsync(Operation(), _ => throw new ExecutionRejectedException("local_denied"), CancellationToken.None));
+        using var stop = new CancellationTokenSource(); stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => backend.ExecuteAsync(Operation(), _ => Task.CompletedTask, stop.Token));
+        Assert.Equal(0, selected); Assert.False(File.Exists(Path.Combine(path, "launches.txt")));
+    }
+
+    [Fact]
     public async Task RawOutputCrossesSdkSinkWhileTheNativeProcessStillRuns()
     {
         var releaseName = @"Local\tansr-output-sink-" + Guid.NewGuid().ToString("N");

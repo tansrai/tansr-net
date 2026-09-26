@@ -12,7 +12,8 @@ function sourceCommitted(source) {
   return execFileSync('git', ['status', '--porcelain', '--',
     ':(glob)packages/*/src/**', ':(glob)packages/*/test/**', ':(glob)packages/*/package.json',
     'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml', 'doc/rfc/sdk2-ext-v1.schema.json',
-    'doc/rfc/terminal-services-v1.schema.json', 'doc/rfc/sdk2-archive-recovery-v1.schema.json'],
+    'doc/rfc/terminal-services-v1.schema.json', 'doc/rfc/sdk2-archive-recovery-v1.schema.json',
+    'doc/rfc/terminal-observation-v1.schema.json', 'doc/rfc/terminal-shell-sandbox-v1.schema.json', 'doc/rfc/terminal-profile-v1.schema.json'],
   { cwd: source, encoding: 'utf8', windowsHide: true }).trim() === '';
 }
 function inventory(source) {
@@ -31,7 +32,8 @@ function inventory(source) {
     const file = 'packages/' + pkg.name + '/package.json'; if (existsSync(resolve(source, file))) paths.push(file);
   }
   for (const file of ['package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml',
-    'doc/rfc/sdk2-ext-v1.schema.json', 'doc/rfc/terminal-services-v1.schema.json', 'doc/rfc/sdk2-archive-recovery-v1.schema.json']) {
+    'doc/rfc/sdk2-ext-v1.schema.json', 'doc/rfc/terminal-services-v1.schema.json', 'doc/rfc/sdk2-archive-recovery-v1.schema.json',
+    'doc/rfc/terminal-observation-v1.schema.json', 'doc/rfc/terminal-shell-sandbox-v1.schema.json', 'doc/rfc/terminal-profile-v1.schema.json']) {
     assert.ok(existsSync(resolve(source, file)), 'Required source snapshot entry missing: ' + file); paths.push(file);
   }
   return paths.sort().map(path => { const bytes = readFileSync(resolve(source, path)); return { path, bytes: bytes.length, sha256: hash(bytes) }; });
@@ -40,7 +42,10 @@ function approvedSchemas(files) {
   const pins = {
     'doc/rfc/sdk2-ext-v1.schema.json': '969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605',
     'doc/rfc/terminal-services-v1.schema.json': '8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896',
-    'doc/rfc/sdk2-archive-recovery-v1.schema.json': 'f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4'
+    'doc/rfc/sdk2-archive-recovery-v1.schema.json': 'f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4',
+    'doc/rfc/terminal-observation-v1.schema.json': 'b6668463458e78b2cfe23baa72d9d9ac6263a248467dd8aeb60387fc2f67c28a',
+    'doc/rfc/terminal-shell-sandbox-v1.schema.json': 'be3ebcf6dc650844319a18a15f6abbefb9316f704410b591f9ba6dcab7620fe1',
+    'doc/rfc/terminal-profile-v1.schema.json': '560ad136f0619a2a0592151d56e10871c3799ca438163c4e2872381bf5f5159a'
   };
   for (const [path, expected] of Object.entries(pins)) assert.equal(files.find(entry => entry.path === path)?.sha256, expected, 'Approved candidate schema drift: ' + path);
 }

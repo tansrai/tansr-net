@@ -8,6 +8,7 @@ using Xunit;
 
 namespace Tansr.Sdk.Windows.Tests.Mcp;
 
+[Collection("Native MCP published candidate")]
 public sealed class McpClientTests
 {
     [Fact]
@@ -98,9 +99,119 @@ public sealed class McpClientTests
         var request = Assert.Single(server.Requests, x => Method(x.Body) == "tools/call");
         Assert.Equal("allowed", request.Body.GetProperty("params").GetProperty("name").GetString());
         Assert.Equal(binding.DefinitionDigest, tool.DefinitionDigest);
-        Assert.Equal("unsupported_content", Assert.Throws<McpException>(() => McpToolAdapter.MapResult(Json("{\"content\":[{\"type\":\"audio\",\"data\":\"not-audio\"}]}"))).Code);
+        Assert.Equal("[audio content (unknown), 9 base64 chars omitted]", McpToolAdapter.MapResult(Json("{\"content\":[{\"type\":\"audio\",\"data\":\"not-audio\"}]}"))
+            .GetProperty("content")[0].GetProperty("text").GetString());
         await client.CloseAsync();
         await Assert.ThrowsAsync<McpException>(() => tool.Invoke(Json("{}"), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ApprovedRemoteDefinitionCannotChangeBetweenDiscoveryAndInvocation()
+    {
+        using var server = new Server(); using var client = await McpClient.ConnectHttpAsync(server.Options());
+        var definition = Assert.Single(await client.ListToolsAsync(new[] { "allowed" }));
+        var binding = new McpToolBinding("local", "allowed", new string('a', 64), definition);
+        Assert.Equal(64, binding.RemoteDefinitionDigest!.Length);
+        var tool = Assert.Single(McpToolAdapter.CreateTools(client, new[] { binding }));
+        await tool.Invoke(Json("{}"), CancellationToken.None);
+        Assert.Single(server.Requests, x => Method(x.Body) == "tools/call");
+        server.DefinitionChanged = true;
+        Assert.Equal("definition_changed", (await Assert.ThrowsAsync<McpException>(() => tool.Invoke(Json("{}"), CancellationToken.None))).Code);
+        Assert.Single(server.Requests, x => Method(x.Body) == "tools/call");
+    }
+
+    [Fact]
+    public async Task CurrentHostTrustRevocationBlocksAnAlreadyCreatedToolWithoutReconnecting()
+    {
+        using var server = new Server(); bool allowed = true;
+        using var client = await McpClient.ConnectHttpAsync(server.Options(), new McpClientOptions
+        { Authorize = (_, _) => allowed ? Task.CompletedTask : Task.FromException(new McpException("trust_revoked")) });
+        var tool = Assert.Single(McpToolAdapter.CreateTools(client, new[] { new McpToolBinding("local", "allowed", new string('a', 64)) }));
+        await tool.Invoke(Json("{}"), CancellationToken.None); allowed = false;
+        Assert.Equal("trust_revoked", (await Assert.ThrowsAsync<McpException>(() => tool.Invoke(Json("{}"), CancellationToken.None))).Code);
+        Assert.Single(server.Requests, x => Method(x.Body) == "tools/call");
+        Assert.Single(server.Requests, x => Method(x.Body) == "initialize");
+        await client.CloseAsync(); Assert.Equal(McpConnectionState.Closed, client.State);
+    }
+
+    [Fact]
+    public void ResultMappingPreservesResourcesErrorsAndStructuredDataWithoutFetchingOrExecutingThem()
+    {
+        var result = McpToolAdapter.MapResult(Json("""
+            {"isError":true,"content":[
+              {"type":"text","text":"plain"},
+              {"type":"image","mimeType":"image/png","data":"YQ=="},
+              {"type":"audio","mimeType":"audio/wav","data":"secretAudio"},
+              {"type":"resource_link","uri":"file:///secret","name":"reference","description":"do not follow"},
+              {"type":"resource","resource":{"uri":"mem://text","text":"resource instructions"}},
+              {"type":"resource","resource":{"uri":"mem://image","mimeType":"image/jpeg","blob":"Yg=="}},
+              {"type":"resource","resource":{"uri":"mem://archive","mimeType":"application/zip","blob":"secretBlob"}},
+              {"type":"future-content"}],"structuredContent":{"count":4,"text":"中文"}}
+            """));
+        Assert.True(result.GetProperty("isError").GetBoolean());
+        var content = result.GetProperty("content"); Assert.Equal(9, content.GetArrayLength());
+        Assert.Equal("plain", content[0].GetProperty("text").GetString());
+        Assert.Equal("image", content[1].GetProperty("t").GetString());
+        Assert.Equal("[audio content (audio/wav), 11 base64 chars omitted]", content[2].GetProperty("text").GetString());
+        Assert.Contains("file:///secret", content[3].GetProperty("text").GetString());
+        Assert.Equal("[resource mem://text]\nresource instructions", content[4].GetProperty("text").GetString());
+        Assert.Equal("image/jpeg", content[5].GetProperty("mime").GetString());
+        Assert.Contains("base64 body omitted", content[6].GetProperty("text").GetString());
+        Assert.Contains("unsupported MCP content type", content[7].GetProperty("text").GetString());
+        Assert.Contains("\"count\":4", content[8].GetProperty("text").GetString());
+        Assert.DoesNotContain("secretAudio", result.GetRawText()); Assert.DoesNotContain("secretBlob", result.GetRawText());
+        Assert.Contains("[MCP structuredContent]", McpToolAdapter.MapResult(Json("{\"structuredContent\":{\"value\":1}}"))
+            .GetProperty("content")[0].GetProperty("text").GetString());
+        Assert.Equal("(empty result)", McpToolAdapter.MapResult(Json("{\"content\":[]}"))
+            .GetProperty("content")[0].GetProperty("text").GetString());
+    }
+
+    [Fact]
+    public void LargeImagesAreExplicitMetadataAndMalformedStructuredDataIsNotSilentlyLost()
+    {
+        var raw = Json("{\"content\":[{\"type\":\"image\",\"mimeType\":\"image/png\",\"data\":\"" + new string('x', 40000) + "\"}]}");
+        var result = McpToolAdapter.MapResult(raw);
+        Assert.Contains("terminal receipt budget exceeded", result.GetProperty("content")[0].GetProperty("text").GetString());
+        Assert.True(result.GetRawText().Length < 512);
+        Assert.Equal("invalid_result", Assert.Throws<McpException>(() => McpToolAdapter.MapResult(Json("{\"content\":[],\"structuredContent\":[]}"))).Code);
+    }
+
+    [Fact]
+    public void ApprovedRemoteSchemasKeepFractionalBoundsAndIgnorePropertyOrdering()
+    {
+        var first = new McpToolBinding("local", "allowed", new string('a', 64), Json("{\"name\":\"allowed\",\"inputSchema\":{\"type\":\"number\",\"minimum\":0.25}}"));
+        var second = new McpToolBinding("local", "allowed", new string('a', 64), Json("{\"inputSchema\":{\"minimum\":0.25,\"type\":\"number\"},\"name\":\"allowed\"}"));
+        Assert.Equal(first.RemoteDefinitionDigest, second.RemoteDefinitionDigest);
+    }
+
+    [Fact]
+    public async Task SharedExampleConnectsAnExplicitHttpAllowlistAndRevokesExistingBindings()
+    {
+        using var server = new Server();
+        string[] names = ["TANSR_MCP_EXE", "TANSR_MCP_HTTP_URL", "TANSR_MCP_HTTP_ALLOW_LOOPBACK", "TANSR_MCP_TOOLS", "TANSR_MCP_HTTP_BEARER", "TANSR_MCP_DLL"];
+        var previous = names.Select(Environment.GetEnvironmentVariable).ToArray();
+        Tansr.Examples.NativeMcpToolConnection? connection = null;
+        try
+        {
+            foreach (var name in names) Environment.SetEnvironmentVariable(name, null);
+            Environment.SetEnvironmentVariable("TANSR_MCP_HTTP_URL", server.Options().Endpoint.AbsoluteUri);
+            Environment.SetEnvironmentVariable("TANSR_MCP_HTTP_ALLOW_LOOPBACK", "1");
+            Environment.SetEnvironmentVariable("TANSR_MCP_TOOLS", "[{\"name\":\"local_allowed\",\"remoteName\":\"allowed\"}]");
+            connection = await Tansr.Examples.NativeMcpToolConnection.OpenConfiguredAsync(CancellationToken.None);
+            Assert.NotNull(connection); var binding = Assert.Single(connection.Bindings);
+            Assert.False(binding.Declaration.GetProperty("readOnly").GetBoolean());
+            var result = await binding.ExecuteAsync(Json("{\"argumentsJson\":\"{}\"}"), CancellationToken.None);
+            Assert.Equal("hello", result.GetProperty("content")[0].GetProperty("text").GetString());
+            Assert.Single(server.Requests, request => Method(request.Body) == "tools/call");
+            await connection.RevokeAsync();
+            await Assert.ThrowsAsync<InvalidOperationException>(() => binding.ExecuteAsync(Json("{\"argumentsJson\":\"{}\"}"), CancellationToken.None));
+            Assert.Single(server.Requests, request => Method(request.Body) == "tools/call");
+        }
+        finally
+        {
+            try { if (connection != null) await connection.CloseAsync(); }
+            finally { for (int index = 0; index < names.Length; index++) Environment.SetEnvironmentVariable(names[index], previous[index]); }
+        }
     }
 
     [Fact]
@@ -131,7 +242,7 @@ public sealed class McpClientTests
         private readonly Task _loop;
         private readonly System.Collections.Concurrent.ConcurrentBag<Task> _clients = new();
         internal readonly System.Collections.Concurrent.ConcurrentQueue<Request> Requests = new();
-        internal bool Sse, Redirect, StallTool, LargeToolResult, ExpireTool;
+        internal bool Sse, Redirect, StallTool, LargeToolResult, ExpireTool, DefinitionChanged;
         internal Server() { _listener.Start(); _loop = AcceptAsync(); }
         internal McpHttpOptions Options()
         {
@@ -174,7 +285,7 @@ public sealed class McpClientTests
                     if (method == "initialize")
                     { await Respond(stream, "200 OK", "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"protocolVersion\":\"2025-11-25\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"fixture\",\"version\":\"1\"}}}", "Mcp-Session-Id: synthetic-session\r\n"); return; }
                     if (method == "tools/list")
-                    { await Respond(stream, "200 OK", "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"tools\":[{\"name\":\"forbidden\",\"inputSchema\":{}},{\"name\":\"allowed\",\"inputSchema\":{}}]}}"); return; }
+                    { await Respond(stream, "200 OK", "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"tools\":[{\"name\":\"forbidden\",\"inputSchema\":{}},{\"name\":\"allowed\",\"inputSchema\":" + (DefinitionChanged ? "{\"required\":[\"new-privilege\"]}" : "{}") + "}]}}"); return; }
                     if (StallTool) { await Task.Delay(Timeout.Infinite, _stop.Token); return; }
                     if (ExpireTool) { await Respond(stream, "404 Not Found", ""); return; }
                     string result = "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + (LargeToolResult ? new string('x', 2048) : "hello") + "\"}]}}";

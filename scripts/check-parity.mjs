@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { resolve, dirname, relative, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,6 +106,47 @@ export function extractCapabilityRows(text) {
   need(result.length > 0, 'Electron capability baseline missing'); return result;
 }
 
+// The frozen SDK class/interface declarations use one public member per two-space
+// source line. Braces/parameters/literals are tokenized so method bodies and nested
+// object types do not invent public members. Source hashes still fail closed on
+// any upstream syntax change before a reviewed inventory can be accepted.
+export function extractMembers(text, name, kind = 'class') {
+  const tokens = tokenize(text), lines = text.split(/\r?\n/), result = [];
+  let start = tokens.findIndex((token, index) => token.value === kind && tokens[index + 1]?.value === name);
+  need(start >= 0, 'Public declaration missing: ' + name);
+  while (tokens[start]?.value !== '{') { need(start < tokens.length, 'Declaration body missing: ' + name); start++; }
+  let braces = 1, parentheses = 0, brackets = 0, lastLine = -1;
+  for (let i = start + 1; i < tokens.length && braces; i++) {
+    const token = tokens[i];
+    if (braces === 1 && parentheses === 0 && brackets === 0 && token.line !== lastLine && /^  \S/.test(lines[token.line - 1])) {
+      lastLine = token.line;
+      let next = i;
+      while (['public', 'readonly', 'async', 'static', 'override', 'declare', 'abstract', 'get', 'set'].includes(tokens[next]?.value)) next++;
+      const member = tokens[next];
+      if (member?.kind === 'name' && !['private', 'protected', 'constructor'].includes(member.value) &&
+          ['(', '<', ':', '?', '=', ';'].includes(tokens[next + 1]?.value))
+        result.push({ name: name + '.' + member.value, line: token.line });
+    }
+    if (token.kind !== 'punctuation') continue;
+    if (token.value === '{') braces++; else if (token.value === '}') braces--;
+    else if (token.value === '(') parentheses++; else if (token.value === ')') parentheses--;
+    else if (token.value === '[') brackets++; else if (token.value === ']') brackets--;
+  }
+  need(result.length > 0, 'Empty member inventory: ' + name);
+  need(new Set(result.map(item => item.name)).size === result.length, 'Duplicate member inventory: ' + name);
+  return result;
+}
+
+export function extractInvocations(text, names) {
+  const tokens = tokenize(text), result = [];
+  for (const name of names) {
+    const index = tokens.findIndex((token, offset) => token.kind === 'name' && token.value === name && tokens[offset + 1]?.value === '(');
+    need(index >= 0, 'Advanced SDK invocation missing: ' + name);
+    result.push({ name, line: tokens[index].line });
+  }
+  return result;
+}
+
 function inside(root, path) {
   const value = resolve(root, path), rel = relative(root, value);
   need(!isAbsolute(rel) && rel !== '..' && !rel.startsWith('../') && !rel.startsWith('..\\'), 'Source escapes root');
@@ -114,19 +155,46 @@ function inside(root, path) {
 
 export function check(mapping, sourceRoot) {
   need(mapping.format === 'tansr-net-public-api-map-v1', 'Unknown mapping format');
-  need(mapping.evidenceStatus === 'coverage-only-not-behavior-acceptance', 'Mapping must not claim completed behavior');
+  need(['coverage-only-not-behavior-acceptance', 'reviewed-behavior-evidence'].includes(mapping.evidenceStatus), 'Unknown evidence status');
   need(mapping.groups.length === 16 && new Set(mapping.groups.map(g => g.id)).size === 16, 'The fixed 16 groups must remain intact');
-  need(mapping.groups.every((g, i) => g.id === 'P' + String(i + 1).padStart(2, '0') && g.complete === false && g.evidence.length === 0), 'The fixed group identities/evidence cannot be changed implicitly');
+  need(mapping.groups.every((g, i) => g.id === 'P' + String(i + 1).padStart(2, '0') && typeof g.complete === 'boolean'), 'The fixed group identities must remain intact');
   const groups = new Set(mapping.groups.map(g => g.id)), sources = new Map(mapping.sources.map(s => [s.path, s]));
+  const evidence = new Map();
+  for (const item of mapping.behaviorEvidence ?? []) {
+    need(typeof item.id === 'string' && !evidence.has(item.id), 'Duplicate behavior evidence');
+    need(['passed', 'ready-not-run'].includes(item.status) && item.behavior?.length && item.command?.length && item.assertions?.length && item.files?.length, 'Incomplete behavior evidence: ' + item.id);
+    for (const file of item.files) {
+      const content = readFileSync(inside(repository, file.path), 'utf8');
+      need(file.anchor?.length && content.includes(file.anchor), 'Behavior entry missing: ' + file.path + '#' + file.anchor);
+    }
+    if (item.status === 'passed') need(item.receipt?.length && item.sourceRevision?.length, 'Passed behavior lacks source/receipt: ' + item.id);
+    evidence.set(item.id, item);
+  }
+  const verifyEvidence = item => {
+    need(Array.isArray(item.evidence), 'Missing evidence list: ' + item.id);
+    for (const id of item.evidence) need(evidence.has(id), 'Unknown behavior evidence: ' + id);
+    if (item.complete || item.status === 'verified') {
+      need(item.evidence.length > 0 && item.evidence.every(id => evidence.get(id).status === 'passed'), 'Cannot close with unrun evidence: ' + item.id);
+      need(item.remaining === '' && item.acceptance?.length, 'Closed item lacks complete acceptance conditions: ' + item.id);
+    } else need(item.remaining?.length, 'Open item needs a concrete remaining condition: ' + item.id);
+  };
+  for (const group of mapping.groups) {
+    verifyEvidence(group);
+    for (const file of group.netSources) need(existsSync(inside(repository, file)), 'Mapped implementation missing: ' + file);
+  }
   const ids = new Set();
   for (const entry of mapping.entries) {
     need(!ids.has(entry.id), 'Duplicate mapping: ' + entry.id); ids.add(entry.id);
     need(groups.has(entry.group) && sources.has(entry.source), 'Unknown group/source: ' + entry.id);
-    need(['pending', 'partial-unverified', 'serve-dependency'].includes(entry.status), 'Evidence not sufficient to close: ' + entry.id);
-    need(entry.net?.length && entry.remaining?.length && Array.isArray(entry.serveDependencies), 'Missing behavior/gap: ' + entry.id);
-    need(Array.isArray(entry.evidence) && entry.evidence.length === 0, 'Behavior evidence must be reviewed separately: ' + entry.id);
+    need(['pending', 'partial-unverified', 'serve-dependency', 'verified'].includes(entry.status), 'Unknown behavior status: ' + entry.id);
+    need(entry.net?.length && Array.isArray(entry.serveDependencies), 'Missing behavior/gap: ' + entry.id);
+    verifyEvidence(entry);
   }
-  for (const group of groups) need(mapping.entries.some(e => e.group === group), 'Empty capability group: ' + group);
+  for (const group of mapping.groups) {
+    const entries = mapping.entries.filter(e => e.group === group.id);
+    need(entries.length > 0, 'Empty capability group: ' + group.id);
+    if (group.complete) need(entries.every(entry => entry.status === 'verified'), 'Group has open behavior entries: ' + group.id);
+  }
   let enumerated = 0;
   for (const source of mapping.sources) {
     const frozen = readFileSync(inside(repository, source.snapshot));
@@ -142,12 +210,26 @@ export function check(mapping, sourceRoot) {
       need(expected.length === entries.length, 'Public entry count differs: ' + source.path);
       enumerated += entries.length;
     }
+    for (const spec of source.members ?? []) {
+      const actual = extractMembers(bytes.toString('utf8'), spec.name, spec.kind);
+      const expected = mapping.entries.filter(e => e.source === source.path && e.inventory === spec.inventory);
+      for (const member of actual) need(expected.some(entry => entry.symbol === member.name), 'New public member has no mapping: ' + member.name);
+      need(expected.length === actual.length && expected.every(entry => actual.some(member => member.name === entry.symbol)), 'Mapped public member vanished: ' + source.path);
+      enumerated += actual.length;
+    }
+    if (source.invocations) {
+      const actual = extractInvocations(bytes.toString('utf8'), source.invocations);
+      const expected = mapping.entries.filter(e => e.source === source.path && e.inventory === 'advanced-entry');
+      need(expected.length === actual.length && actual.every(item => expected.some(entry => entry.symbol === item.name)), 'Advanced SDK invocation has no mapping: ' + source.path);
+      enumerated += actual.length;
+    }
     need(sha(bytes) === source.sha256, 'Upstream source changed; refresh reviewed mapping/evidence: ' + source.path);
   }
   const pkgSource = sources.get('packages/sdk/package.json');
   const pkg = JSON.parse(readFileSync(inside(repository, pkgSource.snapshot), 'utf8'));
   need(JSON.stringify(Object.keys(pkg.publishConfig.exports).sort()) === JSON.stringify(mapping.publishedEntrypoints.slice().sort()), 'Published SDK entrypoint changed');
-  return { entries: mapping.entries.length, enumerated, groups: mapping.groups.length, sourceFiles: mapping.sources.length, acceptedBehavior: 0 };
+  return { entries: mapping.entries.length, enumerated, groups: mapping.groups.length, sourceFiles: mapping.sources.length,
+    acceptedBehavior: mapping.groups.filter(group => group.complete).length, referencedEvidence: evidence.size };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

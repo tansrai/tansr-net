@@ -49,9 +49,25 @@ public sealed class WindowsProcessTestProgram : IDisposable
         {
             static void Main(string[] args)
             {
+                try { Run(args); }
+                catch(Exception error) { File.WriteAllText("fixture-error.txt", error.ToString()); throw; }
+            }
+            static void Run(string[] args)
+            {
                 Console.OutputEncoding = new UTF8Encoding(false);
                 switch(args[0])
                 {
+                    case "benchmark":
+                        File.AppendAllText("launches.txt", Process.GetCurrentProcess().Id + "\n");
+                        for(var sample = 0; sample < 100; sample++) {
+                            var stream = sample % 2 == 0 ? Console.Out : Console.Error;
+                            stream.WriteLine("QPC_SAMPLE|" + sample + "|" + Stopwatch.GetTimestamp() + "|" + Stopwatch.Frequency + "|" + Process.GetCurrentProcess().Id + "|中文🙂");
+                            stream.Flush(); Thread.Sleep(100);
+                        }
+                        using(var benchmarkRelease = EventWaitHandle.OpenExisting(args[1])) {
+                            if(!benchmarkRelease.WaitOne(45000)) { Environment.ExitCode=73; return; }
+                        }
+                        Console.WriteLine("BENCHMARK_DONE"); Console.Out.Flush(); break;
                     case "paced":
                         File.AppendAllText("launches.txt", Process.GetCurrentProcess().Id + "\n");
                         Console.WriteLine("PIPE_TIME|" + Stopwatch.GetTimestamp() + "|" + Stopwatch.Frequency + "|" + DateTime.UtcNow.Ticks + "|" + Process.GetCurrentProcess().Id);
@@ -70,6 +86,7 @@ public sealed class WindowsProcessTestProgram : IDisposable
                     case "tree-pipeline":
                         File.AppendAllText("launches.txt", Process.GetCurrentProcess().Id + "\n");
                         var heldChild = Process.Start(new ProcessStartInfo(Assembly.GetExecutingAssembly().Location, "child-sleep") { UseShellExecute = false, CreateNoWindow = true });
+                        File.WriteAllText("child-pid.txt", heldChild.Id.ToString());
                         Console.WriteLine("PIPE_TREE|" + Process.GetCurrentProcess().Id + "|" + heldChild.Id + "|" + DateTime.UtcNow.Ticks);
                         Console.Out.Flush(); Thread.Sleep(60000); break;
                     case "unicode":
@@ -86,6 +103,11 @@ public sealed class WindowsProcessTestProgram : IDisposable
                         var binary = Console.OpenStandardOutput();
                         foreach(var value in new byte[] { 0, 255, 240, 159, 153, 130, 128, 65 }) { binary.WriteByte(value); binary.Flush(); }
                         break;
+                    case "large-unicode":
+                        File.AppendAllText("launches.txt", "once\n");
+                        Console.Write(new string('中', 6000) + "🙂\uFFFD"); Console.Out.Flush();
+                        Console.Error.Write(new string('错', 2000) + "🙂"); Console.Error.Flush(); break;
+                    case "environment-count": File.AppendAllText("launches.txt", "once\n"); goto case "environment";
                     case "environment": Console.Write(Environment.GetEnvironmentVariable(args[1])); Console.Write(Environment.GetEnvironmentVariable("EXPLICIT_VALUE")); break;
                     case "sleep": Console.Write("ready"); Thread.Sleep(60000); break;
                     case "child-sleep": Thread.Sleep(60000); break;

@@ -12,6 +12,32 @@ public sealed class SqliteArchiveStoreTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public async Task HighLevelHostPreservesOldFileFamilyAndRequiresExplicitRecoveryCapability(bool encrypted)
+    {
+        using var fixture = new Fixture(encrypted); using var store = await SqliteArchiveStore.OpenAsync(fixture.Options());
+        using var outbox = await SqliteMaterialResponseOutbox.OpenAsync(new SqliteMaterialResponseOutboxOptions
+        { Path = System.IO.Path.Combine(fixture.Directory, "outbox.sqlite"), Mode = StorageOpenMode.Create, Identity = fixture.Identity, ReadContext = () => fixture.Scope });
+        using var client = new Tansr.Sdk.Client.TansrClient(new Tansr.Sdk.Client.TansrClientOptions
+        { BaseUri = new Uri("https://archive.test/"), PrincipalProvider = () => "app/user", ExecutionScopeProvider = () => fixture.Scope, TokenProvider = _ => Task.FromResult("unused-token") });
+        var archive = new Tansr.Sdk.Archive.ArchiveClient(client);
+        var options = new Tansr.Sdk.Hosting.ArchiveSessionOptions
+        {
+            Identity = fixture.Identity,
+            ReadContext = () => fixture.Scope,
+            MaterialOutbox = outbox,
+            ReadEventCursorAsync = _ => Task.FromResult<string?>(null),
+            SaveEventCursorAsync = (_, _) => Task.CompletedTask
+        };
+        var host = new Tansr.Sdk.Hosting.ArchiveSessionHost(archive, store, options);
+        Assert.False(host.SupportsAcknowledgementRecovery); await host.ResumeAsync();
+        options.EnableAcknowledgementRecovery = true;
+        Assert.Equal("unsupported_capability", Assert.Throws<Tansr.Sdk.Client.TansrProtocolException>(() => new Tansr.Sdk.Hosting.ArchiveSessionHost(archive, store, options)).Code);
+        Assert.Null(await store.PendingAsync()); Assert.Null(await store.HeadAsync());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public async Task DurableOriginalAckSurvivesRestartAndConfirmIsImmutable(bool encrypted)
     {
         using var fixture = new Fixture(encrypted); JsonElement ack;
@@ -170,7 +196,7 @@ public sealed class SqliteArchiveStoreTests
 
     internal sealed class Fixture : IDisposable
     {
-        internal string Directory { get; } = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tansr-net-archive-" + Guid.NewGuid().ToString("N"));
+        internal string Directory { get; }
         internal string Path => System.IO.Path.Combine(Directory, "archive.sqlite");
         internal string User { get; set; } = "user";
         internal string RetentionRevision { get; set; } = "0";
@@ -180,8 +206,9 @@ public sealed class SqliteArchiveStoreTests
         internal JsonElement Reference { get; }
         internal ArchiveReceiveInput Input { get; }
         internal SyntheticKeys? Keys { get; }
-        internal Fixture(bool encrypted = false, byte[]? body = null)
+        internal Fixture(bool encrypted = false, byte[]? body = null, string? directory = null)
         {
+            Directory = directory ?? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "tansr-net-archive-" + Guid.NewGuid().ToString("N"));
             System.IO.Directory.CreateDirectory(Directory); Keys = encrypted ? new SyntheticKeys() : null; Body = body ?? Encoding.UTF8.GetBytes("Synthetic 原档案 😀");
             var generations = new { historyEpoch = "history", deletionGeneration = "0", projectionRevision = "0" }; var target = new { sessionId = "session/中文", sourceSnapshotDigest = new string('a', 64), generations };
             Identity = Element(new { scope = new { applicationScopeId = "app", endUserId = "user" }, bindingId = "binding", target = new { target.sessionId, generations }, sourceId = "source", sourceGeneration = "source-generation" });

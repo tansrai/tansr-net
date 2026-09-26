@@ -169,6 +169,8 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
             var afterPin = await CommandAsync(new { id = "after-pin", action = "inspect" }, ct);
             Assert.Contains("NET_PIN_449", afterPin.GetProperty("files").GetProperty("pending-anchors.md").GetString());
 
+            var capturedWriter = await CommandAsync(new { id = "capture-writer-before-forget", action = "capture-writer" }, ct);
+            Assert.True(capturedWriter.GetProperty("captured").GetBoolean()); Assert.True(capturedWriter.GetProperty("writeAcceptedBeforeDeletion").GetBoolean());
             state = await control.ReadMemoryAsync(session.Id, ct);
             var forget = control.CreateMemoryOperation(session.Id, state, "forget-request", "forget-operation", Json(new { kind = "forget", topic = "net-preference.md" }));
             var forgotten = await control.SubmitMemoryAsync(forget, ct);
@@ -180,6 +182,8 @@ public sealed class ServeMemoryPublicationTests(ITestOutputHelper output)
             Assert.Equal(JsonValueKind.Null, afterForget.GetProperty("files").GetProperty("MEMORY.md").ValueKind);
             Assert.Equal("1", afterForget.GetProperty("memory").GetProperty("deletionGeneration").GetString());
             await CommandAsync(new { id = "confirm-deletion-floor", action = "deletion-floor", generation = "1" }, ct);
+            var late = await CommandAsync(new { id = "late-writer-after-forget", action = "late-write" }, ct);
+            Assert.True(late.GetProperty("lateWriteRejected").GetBoolean()); Assert.True(late.GetProperty("backupReplayRejected").GetBoolean());
             var absentEvents = new ConcurrentQueue<AgentEvent>();
             await session.SendAndObserveAsync("NET_MEMORY_AFTER_DELETE. Search for the deleted report preference without reconstructing it from the conversation.",
                 new SessionRunOptions { Timeout = TimeSpan.FromSeconds(40) }, (item, token) => ObserveAsync(item, absentEvents, token), ct);

@@ -86,12 +86,14 @@ public sealed class ConsoleAssistantTests
         using var f = new Fixture(); var session = await f.ResumeAsync(); using var stop = new CancellationTokenSource(); using var view = new SessionView();
         f.Handler.EmitStart = false;
         using var tools = CreateTools(session);
-        var observation = (Task)ConsoleProgram.GetMethod("ObserveAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session, view, tools, stop.Token])!;
+        await ((Task)tools.GetType().GetProperty("Ready", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tools)!).WaitAsync(Deadline);
+        var metadataAtReady = f.Handler.MetadataReads; Assert.Equal(1, metadataAtReady);
+        var observation = (Task)ConsoleProgram.GetMethod("ObserveAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session, view, tools, stop.Token, null])!;
         await f.Handler.Listening.Task.WaitAsync(Deadline);
         await session.SendAsync("first interactive prompt");
         await session.SubmitInputAsync("input-original", new SessionInputTarget("epoch", "current"), "same turn text");
         await session.SendAsync("second interactive prompt");
-        Assert.Equal(2, f.Handler.Messages); Assert.Equal(1, f.Handler.Inputs); Assert.Equal(0, f.Handler.MetadataReads);
+        Assert.Equal(2, f.Handler.Messages); Assert.Equal(1, f.Handler.Inputs); Assert.Equal(metadataAtReady, f.Handler.MetadataReads);
         stop.Cancel(); await observation.WaitAsync(Deadline); Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
     }
 

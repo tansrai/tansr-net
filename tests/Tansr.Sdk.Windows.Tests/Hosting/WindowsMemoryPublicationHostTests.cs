@@ -21,6 +21,102 @@ public sealed class WindowsMemoryPublicationHostTests
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public async Task InjectedDurablePublicationStoreUsesOriginalOwnerAndIsNotClosedByTheToolAdapter()
+    {
+        using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite);
+        var host = new WindowsMemoryPublicationHost((IMemoryPublicationStore)adapter, true); var backend = f.Backend(host);
+        await Stage(backend); var committed = Response(await Call(backend, Request("commit", transfer: "transfer")));
+        Assert.Equal("committed", committed.GetProperty("transfer").GetProperty("status").GetString());
+        Assert.Equal(Digest, committed.GetProperty("transfer").GetProperty("etag").GetString());
+        Assert.Equal(3, adapter.Owners.Count); Assert.All(adapter.Owners, owner =>
+        {
+            var value = WireJson.Parse(Encoding.UTF8.GetBytes(owner));
+            Assert.Equal("session", value.GetProperty("sessionId").GetString());
+            Assert.Equal("binding", value.GetProperty("binding").GetProperty("bindingId").GetString());
+            Assert.Equal("user", value.GetProperty("scope").GetProperty("endUserId").GetString());
+        });
+        Assert.Equal(0, adapter.CloseCalls);
+        await adapter.CloseAsync(); Assert.Equal(1, adapter.CloseCalls);
+    }
+
+    [Fact]
+    public async Task NonDurableBackendAndMalformedIdentityFailBeforeInvocation()
+    {
+        using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite) { Durable = false };
+        Assert.Equal("ENOTSUP", Assert.Throws<ExecutionRejectedException>(() => new WindowsMemoryPublicationHost(adapter, true)).Code);
+        adapter.Durable = true; adapter.IdentityOverride = Element(new { bad = true });
+        Assert.Throws<ArgumentException>(() => new WindowsMemoryPublicationHost(adapter, true));
+        Assert.Empty(adapter.Owners); await Task.CompletedTask;
+    }
+
+    [Theory]
+    [InlineData("sourceId")]
+    [InlineData("sourceGeneration")]
+    [InlineData("domainKey")]
+    [InlineData("transferId")]
+    [InlineData("action")]
+    public async Task InjectedBackendCannotAcknowledgeAnotherPublicationOrOperation(string field)
+    {
+        using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite);
+        var backend = f.Backend(new WindowsMemoryPublicationHost(adapter, true)); await Stage(backend);
+        adapter.Alter = response => field == "transferId"
+            ? Set(response, "transfer", Set(response.GetProperty("transfer"), field, Element("other")))
+            : Set(response, field, Element(field == "sourceGeneration" ? "2" : field == "action" ? "query" : "other"));
+        var error = await Assert.ThrowsAsync<IOException>(() => Call(backend, Request("commit", transfer: "transfer")));
+        Assert.Equal("memory_publication_outcome_unconfirmed", error.Message);
+        adapter.Alter = null;
+        Assert.Equal("committed", Response(await Call(backend, Request("query", transfer: "transfer"))).GetProperty("transfer").GetProperty("status").GetString());
+    }
+
+    [Theory]
+    [InlineData("etag")]
+    [InlineData("offset")]
+    [InlineData("nextOffset")]
+    [InlineData("payloadDigest")]
+    [InlineData("byteLength")]
+    public async Task InjectedBackendReadMustMatchOriginalRangeAndContent(string field)
+    {
+        using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite);
+        var backend = f.Backend(new WindowsMemoryPublicationHost(adapter, true)); await Stage(backend); await Call(backend, Request("commit", transfer: "transfer"));
+        adapter.Alter = response => Set(response, field, field is "offset" or "nextOffset" or "byteLength" ? Element(1) : Element(new string('0', 64)));
+        Assert.Equal("memory_publication_outcome_unconfirmed", (await Assert.ThrowsAsync<IOException>(() => Call(backend, Request("read")))).Message);
+    }
+
+    [Fact]
+    public async Task OnlyExplicitPrecommitRejectionMayBecomeAToolError()
+    {
+        using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite);
+        var backend = f.Backend(new WindowsMemoryPublicationHost(adapter, true));
+        adapter.Error = new MemoryPublicationRejectedException("capacity_exceeded");
+        var rejected = Tool(await Call(backend, Request("begin", transfer: "one")));
+        Assert.Equal("error", rejected.GetProperty("status").GetString()); Assert.Equal("capacity_exceeded", rejected.GetProperty("message").GetString());
+        adapter.Error = new IOException("unknown backend commit");
+        await Assert.ThrowsAsync<IOException>(() => Call(backend, Request("begin", transfer: "one")));
+        Assert.Throws<ArgumentException>(() => new MemoryPublicationRejectedException("secret or unknown storage status"));
+        var legacy = new SqliteMemoryPublicationException("store_offline"); Assert.Equal("store_offline", legacy.Code);
+        adapter.Error = legacy;
+        Assert.Equal("memory_publication_outcome_unconfirmed", (await Assert.ThrowsAsync<IOException>(() => Call(backend, Request("begin", transfer: "one")))).Message);
+    }
+
+    private sealed class PublicationAdapter(IMemoryPublicationStore inner) : IMemoryPublicationStore
+    {
+        internal bool Durable = true;
+        internal JsonElement? IdentityOverride;
+        internal Func<JsonElement, JsonElement>? Alter;
+        internal Exception? Error;
+        internal readonly List<string> Owners = [];
+        internal int CloseCalls;
+        public bool AtomicDurablePublication => Durable && inner.AtomicDurablePublication;
+        public JsonElement Identity => IdentityOverride ?? inner.Identity;
+        public async Task<JsonElement> ExecuteAsync(JsonElement request, string ownerCanonical, CancellationToken cancellationToken = default)
+        {
+            Owners.Add(ownerCanonical); if (Error != null) throw Error;
+            var result = await inner.ExecuteAsync(request, ownerCanonical, cancellationToken); return Alter?.Invoke(result) ?? result;
+        }
+        public Task CloseAsync(CancellationToken cancellationToken = default) { CloseCalls++; return inner.CloseAsync(cancellationToken); }
+    }
+
+    [Fact]
     public async Task ExplicitPreviewAndRealSqlitePublicationRoundTripPreserveOriginalOwner()
     {
         using var f = new Fixture(); using var store = await f.Open();
