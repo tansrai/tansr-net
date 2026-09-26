@@ -1,0 +1,26 @@
+<Project>
+  <!-- The SDK can infer win-x86 for a .NET Framework executable, then reset
+       PlatformTarget to AnyCPU after resolving portable native assets. The
+       SQLite package's RID-empty content rule no longer applies in that case.
+       Keep the caller's architecture and use the original loader's RID paths. -->
+  <Target Name="TansrPreserveSqliteAnyCpuNativeLayout"
+          AfterTargets="AdjustDefaultPlatformTargetForNetFrameworkExeWithNoNativeCopyLocalItems"
+          BeforeTargets="AssignTargetPaths"
+          Condition="'$(TargetFrameworkIdentifier)' == '.NETFramework' and '$(OS)' == 'Windows_NT' and '$(_UsingDefaultRuntimeIdentifier)' == 'true' and '$(RuntimeIdentifier)' == 'win-x86' and '$(PlatformTarget)' == 'AnyCPU'">
+    <ItemGroup>
+      <_TansrSqliteResolvedNative Include="@(NativeCopyLocalItems)"
+                                  Condition="'%(NativeCopyLocalItems.NuGetPackageId)' == 'SQLitePCLRaw.lib.e_sqlite3' and '%(NativeCopyLocalItems.PathInPackage)' == 'runtimes/win-x86/native/e_sqlite3.dll'" />
+      <_TansrSqliteAnyCpuNative Include="%(_TansrSqliteResolvedNative.Identity)" Condition="'@(_TansrSqliteResolvedNative)' != ''">
+        <Link>runtimes\win-x86\native\e_sqlite3.dll</Link>
+      </_TansrSqliteAnyCpuNative>
+      <_TansrSqliteAnyCpuNative Include="$([System.IO.Path]::GetFullPath('%(_TansrSqliteResolvedNative.RootDir)%(_TansrSqliteResolvedNative.Directory)..\..\win-x64\native\e_sqlite3.dll'))" Condition="'@(_TansrSqliteResolvedNative)' != ''">
+        <Link>runtimes\win-x64\native\e_sqlite3.dll</Link>
+      </_TansrSqliteAnyCpuNative>
+      <Content Include="@(_TansrSqliteAnyCpuNative)">
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+        <Pack>false</Pack>
+      </Content>
+    </ItemGroup>
+  </Target>
+</Project>

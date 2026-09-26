@@ -262,3 +262,7 @@ SDK 核心包462595字节，SHA256 `51abcca685b14da2256929ab55922d70f8983c58ba98
 Windows四条失败只修测试：原执行账本按 canonical JSON 保存，回读的字段次序与首次内存 receipt 不同，现比较完整规范化对象；Node进程的UTF-8输出原被系统CP936解码，现为三条标准流显式固定严格UTF-8。原全部字段、digest、中文、分裂UTF-8和不重执行断言保留。54项新Store断言在333池一次通过。两个池有重叠，不能按329+18虚增测试总数，也不把首轮333全部登记为通过；`suite-summary.json`记录原始计数。
 
 联验准备发现并交Serve单写者修复原内部缺口：forget耐久提交后，旧MemoryHost固定删除代际，导致同会话原命令查询/下轮准备也被stale_generation阻断。不能在C#自动新建会话或重试写回规避。修复应保持旧任务失效，在合法安全点从原可信authority取得新host；真实链最终回执须包含此行为。
+
+独立net48消费新增真实记忆IO后暴露旧打包缺口：SQLite初始化失败。原生包未缺字节，根目录DLL哈希与NuGet原包x86一致；当前SDK10.0.301在默认.NET Framework可执行项目先隐式推断win-x86，依赖按此复制单个x86 DLL，随后ResolveReferences把默认PlatformTarget恢复AnyCPU，实际CLR4为64位。上游SQLite的无RID双目录分支此时又因隐式RID而没有启用。修复须在包的buildTransitive中限定这个推断组合，使用已解析原依赖的x86/x64分目录，不覆盖用户RID/PlatformTarget、不切成32位求绿。原失败包、inner异常、PE/原依赖哈希和MSBuild前后属性留在本批archive；首次失败不计消费通过。
+
+上述修复已加入 `buildTransitive/net48/Tansr.Sdk.Windows.targets`，WinForms项目引用也导入同一文件；保持依赖锁不变，只从实际已解析的原生资产定位同包两架构目录。定向诊断中默认CLR4/publish实际记忆链通过；显式x64仍为win-x64/x64，新增补目录item为空；WinForms也解析出正确runtime路径。正式新包自动导入与独立消费由后续回执单独证明，不用诊断的手动Import代替NuGet行为。
