@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.png binary
 *.ico binary
+# Byte-for-byte upstream evidence: do not normalize line endings on checkout.
+contract/** -text -whitespace
+doc/compatibility/source/** -text -whitespace

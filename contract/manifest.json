@@ -1,0 +1,38 @@
+{
+  "format": "tansr-net-contract-lock-v1",
+  "protocol": "sdk2-ext-v1",
+  "sourceRepository": "tansr-cli",
+  "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
+  "terminalServices": "not-frozen-not-implemented",
+  "files": [
+    {
+      "snapshot": "contract/sdk2-ext-v1.schema.json",
+      "source": "doc/rfc/sdk2-ext-v1.schema.json",
+      "bytes": 108205,
+      "sha256": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605"
+    },
+    {
+      "snapshot": "contract/sdk2-wire-v1.json",
+      "source": "scripts/sdk2/fixtures/sdk2-wire-v1.json",
+      "bytes": 4848,
+      "sha256": "d911959c91182834af396e09c523a14f223a65871588561dff5faf1d0ba27930"
+    },
+    {
+      "snapshot": "contract/reference/wire-codec.ts",
+      "source": "packages/api-client/src/sdk2/wire-codec.ts",
+      "bytes": 10889,
+      "sha256": "315d0fdea198d454c5f25ce1df06f209f740abb459c5c02eacd3bd51fbe4f9f7"
+    },
+    {
+      "source": "scripts/test/sdk2-extension-schema.test.mjs",
+      "snapshot": "contract/reference/sdk2-extension-schema.test.mjs.txt",
+      "sha256": "ba34688b6dde73f789c6d34caaed6d245d363e1b86d77b4d7beebd18a4ee0eeb",
+      "bytes": 62139
+    },
+    {
+      "snapshot": "contract/schema-vectors.json",
+      "sha256": "7515024bb86552c36a5f466269043cff54bf8ded7378f11c8864468571d50c01",
+      "bytes": 41056
+    }
+  ]
+}

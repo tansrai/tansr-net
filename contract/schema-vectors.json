@@ -1,0 +1,1379 @@
+{
+  "format": "tansr-net-schema-vectors-v1",
+  "protocol": "sdk2-ext-v1",
+  "source": "scripts/test/sdk2-extension-schema.test.mjs",
+  "vectors": [
+    {
+      "id": "source-CapabilitiesResponse",
+      "schema": "CapabilitiesResponse",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "availability": "legacy-complete",
+        "capabilities": [
+          "archive-transfer-v1",
+          "context-materials-v1"
+        ],
+        "limits": {
+          "controlBytes": 262144,
+          "recordBytes": 262144,
+          "pageRecords": 128,
+          "pageBytes": 1048576,
+          "attachmentBytes": 33554432,
+          "chunkBytes": 262144,
+          "materialConcurrent": 2,
+          "materialQueue": 16,
+          "materialCandidates": 32,
+          "materialBytes": 1048576,
+          "materialDeadlineMs": 30000,
+          "pendingRecords": 4096,
+          "pendingBytes": 67108864,
+          "inflightReserveBytes": 16777216,
+          "offlineMs": 86400000,
+          "eventRetentionMs": 600000,
+          "eventRetentionFrames": 4096,
+          "eventRetentionBytes": 8388608,
+          "terminalReceiptRetentionMs": 604800000,
+          "epochLifetimeMs": 3600000,
+          "materialChunkBytes": 65536
+        },
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        },
+        "archiveAckFormats": [
+          "split-receipts-v1"
+        ]
+      }
+    },
+    {
+      "id": "source-BindingCreateRequest",
+      "schema": "BindingCreateRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "expectedRevision": "0",
+        "requiredCapabilities": [
+          "archive-transfer-v1"
+        ],
+        "optionalCapabilities": [],
+        "archive": {
+          "strategy": "single-authorized-source",
+          "sourceId": "source-1",
+          "durability": "source-ack-with-durable-spool",
+          "delivery": "required",
+          "sessionAvailability": "legacy-complete",
+          "ackFormat": "split-receipts-v1"
+        }
+      }
+    },
+    {
+      "id": "source-BindingView",
+      "schema": "BindingView",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "scope": {
+          "applicationScopeId": "app-1",
+          "endUserId": "alice",
+          "authorizationRevision": "1"
+        },
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "revision": "0",
+        "state": "active",
+        "sourceId": "source-1",
+        "acceptedCapabilities": [
+          "archive-transfer-v1"
+        ],
+        "rejectedCapabilities": [],
+        "availability": "legacy-complete",
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        },
+        "limits": {
+          "controlBytes": 262144,
+          "recordBytes": 262144,
+          "pageRecords": 128,
+          "pageBytes": 1048576,
+          "attachmentBytes": 33554432,
+          "chunkBytes": 262144,
+          "materialConcurrent": 2,
+          "materialQueue": 16,
+          "materialCandidates": 32,
+          "materialBytes": 1048576,
+          "materialDeadlineMs": 30000,
+          "pendingRecords": 4096,
+          "pendingBytes": 67108864,
+          "inflightReserveBytes": 16777216,
+          "offlineMs": 86400000,
+          "eventRetentionMs": 600000,
+          "eventRetentionFrames": 4096,
+          "eventRetentionBytes": 8388608,
+          "terminalReceiptRetentionMs": 604800000,
+          "epochLifetimeMs": 3600000,
+          "materialChunkBytes": 65536
+        },
+        "archiveAckFormat": "split-receipts-v1"
+      }
+    },
+    {
+      "id": "source-ArchiveReadRequest",
+      "schema": "ArchiveReadRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "afterSequence": null,
+        "limit": 128,
+        "maxBytes": 1048576
+      }
+    },
+    {
+      "id": "source-ArchivePage",
+      "schema": "ArchivePage",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "records": [
+          {
+            "recordId": "record-1",
+            "sequence": "1",
+            "target": {
+              "sessionId": "legacy opaque/会话",
+              "generations": {
+                "historyEpoch": "history-1",
+                "deletionGeneration": "0",
+                "projectionRevision": "1"
+              },
+              "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+            },
+            "turnId": "turn-1",
+            "recordKind": "turn",
+            "turnState": "completed",
+            "predecessorDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+            "recordDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "artifactId": "artifact-1",
+              "sourceId": "source-1",
+              "bytes": 2,
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "mediaType": "application/vnd.tansr.ir+json"
+            },
+            "attachments": [],
+            "payloadDigest": "b2cd26781655c4161828d52ad9da2663bc3efbe4bc2456f14b0c1fe6df42cfc3"
+          }
+        ],
+        "nextAfterSequence": "1",
+        "complete": true,
+        "publishedThroughSequence": "1"
+      }
+    },
+    {
+      "id": "source-ArtifactReadRequest",
+      "schema": "ArtifactReadRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "artifactId": "artifact-1",
+        "offset": 0,
+        "maxBytes": 262144
+      }
+    },
+    {
+      "id": "source-ArtifactChunk",
+      "schema": "ArtifactChunk",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "artifactId": "artifact-1",
+        "sourceId": "source-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "offset": 0,
+        "bytes": 2,
+        "totalBytes": 2,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "chunkSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "base64": "W10="
+      }
+    },
+    {
+      "id": "source-ArchiveAckRequest",
+      "schema": "ArchiveAckRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "expectedRevision": "0",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "coverage": {
+          "fromSequence": "1",
+          "throughSequence": "1",
+          "headDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "ackFormat": "split-receipts-v1",
+        "payloads": [
+          {
+            "artifactId": "artifact-1",
+            "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "state": "durably-stored"
+          }
+        ],
+        "attachments": []
+      }
+    },
+    {
+      "id": "source-ArchiveStatus",
+      "schema": "ArchiveStatus",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "revision": "1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "publishedThroughSequence": "1",
+        "acknowledgedCoverage": {
+          "fromSequence": "1",
+          "throughSequence": "1",
+          "headDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "releasableThroughSequence": null,
+        "pendingBytes": 2,
+        "pendingRecords": 1,
+        "sessionPersistence": "unchanged",
+        "state": "active"
+      }
+    },
+    {
+      "id": "source-MaterialRequest",
+      "schema": "MaterialRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "requestedRecords": [
+          {
+            "recordId": "record-1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "artifactId": "artifact-1",
+              "sourceId": "source-1",
+              "bytes": 2,
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "mediaType": "application/vnd.tansr.ir+json"
+            },
+            "attachments": []
+          }
+        ],
+        "purpose": "context-recall",
+        "maxBytes": 1048576,
+        "remainingTtlMs": 30000,
+        "chunkBytes": 65536
+      }
+    },
+    {
+      "id": "source-MaterialResponseRequest",
+      "schema": "MaterialResponseRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "results": [
+          {
+            "recordId": "record-1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "uploadId": "upload-artifact-1"
+            },
+            "attachments": []
+          }
+        ]
+      }
+    },
+    {
+      "id": "source-MaterialReceipt",
+      "schema": "MaterialReceipt",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "state": "received",
+        "revision": "1",
+        "acceptedRecordIds": [
+          "record-1"
+        ]
+      }
+    },
+    {
+      "id": "source-BindingCloseRequest",
+      "schema": "BindingCloseRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "expectedRevision": "0",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        }
+      }
+    },
+    {
+      "id": "source-MutationReceipt",
+      "schema": "MutationReceipt",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "operation": "archive-ack",
+        "semanticDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "completed",
+        "revision": "1",
+        "outcomeRef": "ack-1"
+      }
+    },
+    {
+      "id": "source-OperationStatusRequest",
+      "schema": "OperationStatusRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "operation": "archive-ack",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        }
+      }
+    },
+    {
+      "id": "source-EventFrame",
+      "schema": "EventFrame",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "eventId": "event-1",
+        "cursor": "stream-cursor-1",
+        "revision": "1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "eventType": "material.request",
+        "payload": {
+          "protocol": "sdk2-ext-v1",
+          "bindingId": "binding-1",
+          "materialRequestId": "material-1",
+          "target": {
+            "sessionId": "legacy opaque/会话",
+            "generations": {
+              "historyEpoch": "history-1",
+              "deletionGeneration": "0",
+              "projectionRevision": "1"
+            },
+            "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+          },
+          "sourceId": "source-1",
+          "sourceGeneration": "source-boot-1",
+          "requestedRecords": [
+            {
+              "recordId": "record-1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "payload": {
+                "artifactId": "artifact-1",
+                "sourceId": "source-1",
+                "bytes": 2,
+                "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "mediaType": "application/vnd.tansr.ir+json"
+              },
+              "attachments": []
+            }
+          ],
+          "purpose": "context-recall",
+          "maxBytes": 1048576,
+          "remainingTtlMs": 30000,
+          "chunkBytes": 65536
+        }
+      }
+    },
+    {
+      "id": "source-ErrorResponse",
+      "schema": "ErrorResponse",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "requestId": "req-1",
+        "code": "source_unavailable",
+        "status": 503,
+        "message": "Source unavailable",
+        "retryAction": "query-status"
+      }
+    },
+    {
+      "id": "source-BindingTargetRequest",
+      "schema": "BindingTargetRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "sessionId": "legacy opaque/会话"
+      }
+    },
+    {
+      "id": "source-BindingTargetView",
+      "schema": "BindingTargetView",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "revision": "0",
+        "bindingId": null,
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        }
+      }
+    },
+    {
+      "id": "source-MaterialUploadChunkRequest",
+      "schema": "MaterialUploadChunkRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "artifactId": "artifact-1",
+        "offset": 0,
+        "bytes": 2,
+        "chunkSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "base64": "W10="
+      }
+    },
+    {
+      "id": "source-MaterialUploadStatusRequest",
+      "schema": "MaterialUploadStatusRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "artifactId": "artifact-1"
+      }
+    },
+    {
+      "id": "source-MaterialUploadStatus",
+      "schema": "MaterialUploadStatus",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "uploadId": "upload-artifact-1",
+        "artifact": {
+          "artifactId": "artifact-1",
+          "sourceId": "source-1",
+          "bytes": 2,
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "mediaType": "application/vnd.tansr.ir+json"
+        },
+        "state": "committed",
+        "chunkBytes": 65536,
+        "receivedOffsets": [
+          0
+        ],
+        "receivedBytes": 2,
+        "remainingTtlMs": 30000
+      }
+    },
+    {
+      "id": "source-MaterialStatusRequest",
+      "schema": "MaterialStatusRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1"
+      }
+    },
+    {
+      "id": "unknown-CapabilitiesResponse",
+      "schema": "CapabilitiesResponse",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "availability": "legacy-complete",
+        "capabilities": [
+          "archive-transfer-v1",
+          "context-materials-v1"
+        ],
+        "limits": {
+          "controlBytes": 262144,
+          "recordBytes": 262144,
+          "pageRecords": 128,
+          "pageBytes": 1048576,
+          "attachmentBytes": 33554432,
+          "chunkBytes": 262144,
+          "materialConcurrent": 2,
+          "materialQueue": 16,
+          "materialCandidates": 32,
+          "materialBytes": 1048576,
+          "materialDeadlineMs": 30000,
+          "pendingRecords": 4096,
+          "pendingBytes": 67108864,
+          "inflightReserveBytes": 16777216,
+          "offlineMs": 86400000,
+          "eventRetentionMs": 600000,
+          "eventRetentionFrames": 4096,
+          "eventRetentionBytes": 8388608,
+          "terminalReceiptRetentionMs": 604800000,
+          "epochLifetimeMs": 3600000,
+          "materialChunkBytes": 65536
+        },
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        },
+        "archiveAckFormats": [
+          "split-receipts-v1"
+        ],
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-BindingCreateRequest",
+      "schema": "BindingCreateRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "expectedRevision": "0",
+        "requiredCapabilities": [
+          "archive-transfer-v1"
+        ],
+        "optionalCapabilities": [],
+        "archive": {
+          "strategy": "single-authorized-source",
+          "sourceId": "source-1",
+          "durability": "source-ack-with-durable-spool",
+          "delivery": "required",
+          "sessionAvailability": "legacy-complete",
+          "ackFormat": "split-receipts-v1"
+        },
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-BindingView",
+      "schema": "BindingView",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "scope": {
+          "applicationScopeId": "app-1",
+          "endUserId": "alice",
+          "authorizationRevision": "1"
+        },
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "revision": "0",
+        "state": "active",
+        "sourceId": "source-1",
+        "acceptedCapabilities": [
+          "archive-transfer-v1"
+        ],
+        "rejectedCapabilities": [],
+        "availability": "legacy-complete",
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        },
+        "limits": {
+          "controlBytes": 262144,
+          "recordBytes": 262144,
+          "pageRecords": 128,
+          "pageBytes": 1048576,
+          "attachmentBytes": 33554432,
+          "chunkBytes": 262144,
+          "materialConcurrent": 2,
+          "materialQueue": 16,
+          "materialCandidates": 32,
+          "materialBytes": 1048576,
+          "materialDeadlineMs": 30000,
+          "pendingRecords": 4096,
+          "pendingBytes": 67108864,
+          "inflightReserveBytes": 16777216,
+          "offlineMs": 86400000,
+          "eventRetentionMs": 600000,
+          "eventRetentionFrames": 4096,
+          "eventRetentionBytes": 8388608,
+          "terminalReceiptRetentionMs": 604800000,
+          "epochLifetimeMs": 3600000,
+          "materialChunkBytes": 65536
+        },
+        "archiveAckFormat": "split-receipts-v1",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArchiveReadRequest",
+      "schema": "ArchiveReadRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "afterSequence": null,
+        "limit": 128,
+        "maxBytes": 1048576,
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArchivePage",
+      "schema": "ArchivePage",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "records": [
+          {
+            "recordId": "record-1",
+            "sequence": "1",
+            "target": {
+              "sessionId": "legacy opaque/会话",
+              "generations": {
+                "historyEpoch": "history-1",
+                "deletionGeneration": "0",
+                "projectionRevision": "1"
+              },
+              "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+            },
+            "turnId": "turn-1",
+            "recordKind": "turn",
+            "turnState": "completed",
+            "predecessorDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+            "recordDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "artifactId": "artifact-1",
+              "sourceId": "source-1",
+              "bytes": 2,
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "mediaType": "application/vnd.tansr.ir+json"
+            },
+            "attachments": [],
+            "payloadDigest": "b2cd26781655c4161828d52ad9da2663bc3efbe4bc2456f14b0c1fe6df42cfc3"
+          }
+        ],
+        "nextAfterSequence": "1",
+        "complete": true,
+        "publishedThroughSequence": "1",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArtifactReadRequest",
+      "schema": "ArtifactReadRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "artifactId": "artifact-1",
+        "offset": 0,
+        "maxBytes": 262144,
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArtifactChunk",
+      "schema": "ArtifactChunk",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "artifactId": "artifact-1",
+        "sourceId": "source-1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "offset": 0,
+        "bytes": 2,
+        "totalBytes": 2,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "chunkSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "base64": "W10=",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArchiveAckRequest",
+      "schema": "ArchiveAckRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "expectedRevision": "0",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "coverage": {
+          "fromSequence": "1",
+          "throughSequence": "1",
+          "headDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "ackFormat": "split-receipts-v1",
+        "payloads": [
+          {
+            "artifactId": "artifact-1",
+            "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+            "state": "durably-stored"
+          }
+        ],
+        "attachments": [],
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ArchiveStatus",
+      "schema": "ArchiveStatus",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "revision": "1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "publishedThroughSequence": "1",
+        "acknowledgedCoverage": {
+          "fromSequence": "1",
+          "throughSequence": "1",
+          "headDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        "releasableThroughSequence": null,
+        "pendingBytes": 2,
+        "pendingRecords": 1,
+        "sessionPersistence": "unchanged",
+        "state": "active",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialRequest",
+      "schema": "MaterialRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "requestedRecords": [
+          {
+            "recordId": "record-1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "artifactId": "artifact-1",
+              "sourceId": "source-1",
+              "bytes": 2,
+              "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+              "mediaType": "application/vnd.tansr.ir+json"
+            },
+            "attachments": []
+          }
+        ],
+        "purpose": "context-recall",
+        "maxBytes": 1048576,
+        "remainingTtlMs": 30000,
+        "chunkBytes": 65536,
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialResponseRequest",
+      "schema": "MaterialResponseRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "results": [
+          {
+            "recordId": "record-1",
+            "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "payload": {
+              "uploadId": "upload-artifact-1"
+            },
+            "attachments": []
+          }
+        ],
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialReceipt",
+      "schema": "MaterialReceipt",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "state": "received",
+        "revision": "1",
+        "acceptedRecordIds": [
+          "record-1"
+        ],
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-BindingCloseRequest",
+      "schema": "BindingCloseRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "expectedRevision": "0",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MutationReceipt",
+      "schema": "MutationReceipt",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "bindingId": "binding-1",
+        "operation": "archive-ack",
+        "semanticDigest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "state": "completed",
+        "revision": "1",
+        "outcomeRef": "ack-1",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-OperationStatusRequest",
+      "schema": "OperationStatusRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "operation": "archive-ack",
+        "request": {
+          "requestId": "req-1",
+          "operationEpoch": "host-epoch-1"
+        },
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-EventFrame",
+      "schema": "EventFrame",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "eventId": "event-1",
+        "cursor": "stream-cursor-1",
+        "revision": "1",
+        "generations": {
+          "historyEpoch": "history-1",
+          "deletionGeneration": "0",
+          "projectionRevision": "1"
+        },
+        "eventType": "material.request",
+        "payload": {
+          "protocol": "sdk2-ext-v1",
+          "bindingId": "binding-1",
+          "materialRequestId": "material-1",
+          "target": {
+            "sessionId": "legacy opaque/会话",
+            "generations": {
+              "historyEpoch": "history-1",
+              "deletionGeneration": "0",
+              "projectionRevision": "1"
+            },
+            "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+          },
+          "sourceId": "source-1",
+          "sourceGeneration": "source-boot-1",
+          "requestedRecords": [
+            {
+              "recordId": "record-1",
+              "digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+              "payload": {
+                "artifactId": "artifact-1",
+                "sourceId": "source-1",
+                "bytes": 2,
+                "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+                "mediaType": "application/vnd.tansr.ir+json"
+              },
+              "attachments": []
+            }
+          ],
+          "purpose": "context-recall",
+          "maxBytes": 1048576,
+          "remainingTtlMs": 30000,
+          "chunkBytes": 65536
+        },
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-ErrorResponse",
+      "schema": "ErrorResponse",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "requestId": "req-1",
+        "code": "source_unavailable",
+        "status": 503,
+        "message": "Source unavailable",
+        "retryAction": "query-status",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-BindingTargetRequest",
+      "schema": "BindingTargetRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "sessionId": "legacy opaque/会话",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-BindingTargetView",
+      "schema": "BindingTargetView",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "revision": "0",
+        "bindingId": null,
+        "operationEpoch": {
+          "id": "host-epoch-1",
+          "issuedAt": "2026-09-16T00:00:00Z",
+          "expiresAt": "2026-09-16T00:05:00Z",
+          "state": "active"
+        },
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialUploadChunkRequest",
+      "schema": "MaterialUploadChunkRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "target": {
+          "sessionId": "legacy opaque/会话",
+          "generations": {
+            "historyEpoch": "history-1",
+            "deletionGeneration": "0",
+            "projectionRevision": "1"
+          },
+          "sourceSnapshotDigest": "ce30c097da4a1d8578ab03937b362977c9723823d44916cf6be383f5f6cfe9e2"
+        },
+        "sourceId": "source-1",
+        "sourceGeneration": "source-boot-1",
+        "artifactId": "artifact-1",
+        "offset": 0,
+        "bytes": 2,
+        "chunkSha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+        "base64": "W10=",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialUploadStatusRequest",
+      "schema": "MaterialUploadStatusRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "artifactId": "artifact-1",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialUploadStatus",
+      "schema": "MaterialUploadStatus",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "uploadId": "upload-artifact-1",
+        "artifact": {
+          "artifactId": "artifact-1",
+          "sourceId": "source-1",
+          "bytes": 2,
+          "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+          "mediaType": "application/vnd.tansr.ir+json"
+        },
+        "state": "committed",
+        "chunkBytes": 65536,
+        "receivedOffsets": [
+          0
+        ],
+        "receivedBytes": 2,
+        "remainingTtlMs": 30000,
+        "unapproved": true
+      }
+    },
+    {
+      "id": "unknown-MaterialStatusRequest",
+      "schema": "MaterialStatusRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "bindingId": "binding-1",
+        "materialRequestId": "material-1",
+        "unapproved": true
+      }
+    },
+    {
+      "id": "sequence-0",
+      "schema": "Sequence",
+      "valid": true,
+      "value": "0"
+    },
+    {
+      "id": "sequence-1",
+      "schema": "Sequence",
+      "valid": true,
+      "value": "1"
+    },
+    {
+      "id": "sequence-9007199254740993",
+      "schema": "Sequence",
+      "valid": true,
+      "value": "9007199254740993"
+    },
+    {
+      "id": "sequence-9223372036854775807",
+      "schema": "Sequence",
+      "valid": true,
+      "value": "9223372036854775807"
+    },
+    {
+      "id": "bad-sequence-",
+      "schema": "Sequence",
+      "valid": false,
+      "value": ""
+    },
+    {
+      "id": "bad-sequence-00",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "00"
+    },
+    {
+      "id": "bad-sequence-01",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "01"
+    },
+    {
+      "id": "bad-sequence-+1",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "+1"
+    },
+    {
+      "id": "bad-sequence--1",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "-1"
+    },
+    {
+      "id": "bad-sequence-1e3",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "1e3"
+    },
+    {
+      "id": "bad-sequence-9223372036854775808",
+      "schema": "Sequence",
+      "valid": false,
+      "value": "9223372036854775808"
+    },
+    {
+      "id": "bad-sequence-1",
+      "schema": "Sequence",
+      "valid": false,
+      "value": 1
+    },
+    {
+      "id": "record-zero",
+      "schema": "RecordSequence",
+      "valid": false,
+      "value": "0"
+    },
+    {
+      "id": "record-one",
+      "schema": "RecordSequence",
+      "valid": true,
+      "value": "1"
+    },
+    {
+      "id": "initialize-csharp",
+      "schema": "SessionInitializeRequest",
+      "valid": true,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "sessionId": "session-1",
+        "platform": {
+          "platform": "windows",
+          "arch": "x64",
+          "language": "csharp",
+          "runtimeVersion": "10.0",
+          "adapterVersion": "1"
+        }
+      }
+    },
+    {
+      "id": "initialize-not-authority",
+      "schema": "SessionInitializeRequest",
+      "valid": false,
+      "value": {
+        "protocol": "sdk2-ext-v1",
+        "sessionId": "session-1",
+        "platform": {
+          "platform": "windows",
+          "arch": "x64",
+          "language": "csharp",
+          "runtimeVersion": "10.0",
+          "adapterVersion": "1"
+        },
+        "role": "admin"
+      }
+    }
+  ]
+}

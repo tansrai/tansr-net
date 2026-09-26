@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net48;net10.0-windows</TargetFrameworks>
+    <PackageId>Tansr.Sdk.Windows</PackageId>
+    <Description>Tansr .NET SDK 的 Windows 文件、进程与本地安全存储适配。</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../Tansr.Sdk/Tansr.Sdk.csproj" />
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" Condition="'$(TargetFramework)' == 'net48'" />
+    <Reference Include="System.Security" Condition="'$(TargetFramework)' == 'net48'" />
+    <Reference Include="System.Net.Http" Condition="'$(TargetFramework)' == 'net48'" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
+    <!-- 2.1.12 ships a net461 target referencing the removed win-arm binary (upstream #678). -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="2.1.13" />
+    <PackageReference Include="Microsoft.Bcl.Cryptography" Version="10.0.12" Condition="'$(TargetFramework)' == 'net48'" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="10.0.12" Condition="'$(TargetFramework)' != 'net48'" />
+  </ItemGroup>
+</Project>

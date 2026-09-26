@@ -1,0 +1,16 @@
+Tansr .NET SDK
+Copyright (c) 2026 Tansr. Licensed under MIT.
+
+The protocol schema and compatibility source snapshots originate from the Tansr
+TypeScript repositories. Their exact revisions and SHA256 hashes are recorded in
+contract/manifest.json and doc/compatibility/public-api-map.json.
+
+Runtime dependencies retain their own licenses:
+System.Text.Json, Microsoft.Data.Sqlite, Microsoft.Bcl.Cryptography,
+System.Security.Cryptography.ProtectedData: Microsoft / .NET Foundation, MIT.
+SQLitePCLRaw: SourceGear / Eric Sink, Apache-2.0.
+SQLite native library: public domain, subject to its upstream distribution notices.
+
+NuGet restores the runtime dependencies; they are not replaced or concealed in the
+two Tansr package assemblies. Exact dependency versions are in packages.lock.json.
+See the NuGet package metadata for each dependency's complete license and notices.

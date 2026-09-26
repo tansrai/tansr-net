@@ -1,0 +1,72 @@
+{
+  "name": "@tansr/sdk",
+  "version": "0.17.0",
+  "description": "Tansr public TypeScript SDK: headless agent API (query / createSession / runAgent) + pure protocol type re-exports (public, MIT).",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "prepack": "node build.mjs",
+    "prepublishOnly": "node ../../scripts/release/gate.mjs --package sdk",
+    "exports:snapshot": "node ../../scripts/release/exports-snapshot.mjs --package sdk",
+    "test": "node --import ../../scripts/inject-globals.mjs --import tsx --test --test-timeout=180000 \"test/**/*.test.ts\""
+  },
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./internal/platform-runtime": {
+      "types": "./src/internal/platform-runtime.ts",
+      "default": "./src/internal/platform-runtime.ts"
+    },
+    "./extensions": {
+      "types": "./src/extensions/index.ts",
+      "default": "./src/extensions/index.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "contract/MANIFEST.json",
+    "README.md",
+    "LICENSE",
+    "NOTICE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./extensions": {
+        "types": "./dist/extensions.d.ts",
+        "default": "./dist/extensions.js"
+      }
+    }
+  },
+  "dependencies": {
+    "undici": "^8.10.0",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "optionalDependencies": {
+    "@vscode/ripgrep": "^1.15.14"
+  },
+  "devDependencies": {
+    "@tansr/i18n": "workspace:*",
+    "@tansr/kernel": "workspace:*",
+    "@tansr/protocol": "workspace:*",
+    "@tansr/providers": "workspace:*",
+    "@tansr/testkit": "workspace:*",
+    "esbuild": "^0.28.1",
+    "rollup": "^4.63.0",
+    "rollup-plugin-dts": "^6.5.1",
+    "typescript": "^5.9.3"
+  }
+}

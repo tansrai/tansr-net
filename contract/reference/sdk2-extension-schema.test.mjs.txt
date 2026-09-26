@@ -1,0 +1,970 @@
+/** SDK2-01b draft contract checks. These are schema/reference-model tests, not product acceptance. */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+
+// Reuse the lockfile's existing ESLint -> Ajv dependency; do not add a second validator or dependency.
+const requireFromEslint = createRequire(import.meta.resolve('eslint'));
+const Ajv = requireFromEslint('ajv');
+const schema = JSON.parse(readFileSync(new URL('../../doc/rfc/sdk2-ext-v1.schema.json', import.meta.url), 'utf8'));
+const ajv = new Ajv({ allErrors: true, jsonPointers: true, strictKeywords: true, schemaId: 'auto' });
+assert.equal(ajv.validateSchema(schema), true, JSON.stringify(ajv.errors));
+ajv.addSchema(schema);
+const validator = (name) => ajv.compile({ $ref: schema.$id + '#/definitions/' + name });
+const copy = (value) => structuredClone(value);
+const hash = (value) => createHash('sha256').update(value).digest('hex');
+const domainHash = (domain, value) => createHash('sha256').update(domain, 'utf8').update('\0').update(value).digest('hex');
+const protocol = 'sdk2-ext-v1';
+const ackFormat = 'split-receipts-v1';
+const digest = 'a'.repeat(64);
+const generations = { historyEpoch: 'history-1', deletionGeneration: '0', projectionRevision: '1' };
+const target = { sessionId: 'legacy opaque/会话', generations, sourceSnapshotDigest: hash('trusted-current-snapshot') };
+const request = { requestId: 'req-1', operationEpoch: 'host-epoch-1' };
+const operationEpoch = { id: 'host-epoch-1', issuedAt: '2026-09-16T00:00:00Z', expiresAt: '2026-09-16T00:05:00Z', state: 'active' };
+const limits = {
+  controlBytes: 262144, recordBytes: 262144, pageRecords: 128, pageBytes: 1048576,
+  attachmentBytes: 33554432, chunkBytes: 262144, materialConcurrent: 2, materialQueue: 16,
+  materialCandidates: 32, materialBytes: 1048576, materialDeadlineMs: 30000,
+  pendingRecords: 4096, pendingBytes: 67108864, inflightReserveBytes: 16777216,
+  offlineMs: 86400000, eventRetentionMs: 600000, eventRetentionFrames: 4096,
+  eventRetentionBytes: 8388608, terminalReceiptRetentionMs: 604800000,
+  epochLifetimeMs: 3600000, materialChunkBytes: 65536,
+};
+const artifact = { artifactId: 'artifact-1', sourceId: 'source-1', bytes: 2, sha256: hash('[]'), mediaType: 'application/vnd.tansr.ir+json' };
+const coverage = { fromSequence: '1', throughSequence: '1', headDigest: digest };
+const binding = {
+  protocol, bindingId: 'binding-1', scope: { applicationScopeId: 'app-1', endUserId: 'alice', authorizationRevision: '1' },
+  target, revision: '0', state: 'active', sourceId: 'source-1', acceptedCapabilities: ['archive-transfer-v1'],
+  rejectedCapabilities: [], availability: 'legacy-complete', operationEpoch, limits, archiveAckFormat: ackFormat,
+};
+const create = {
+  protocol, request, target, expectedRevision: '0', requiredCapabilities: ['archive-transfer-v1'], optionalCapabilities: [],
+  archive: { strategy: 'single-authorized-source', sourceId: 'source-1', durability: 'source-ack-with-durable-spool', delivery: 'required', sessionAvailability: 'legacy-complete', ackFormat },
+};
+const record = {
+  recordId: 'record-1', sequence: '1', target, turnId: 'turn-1', recordKind: 'turn', turnState: 'completed',
+  predecessorDigest: '0'.repeat(64), recordDigest: digest, payload: artifact, attachments: [],
+  payloadDigest: domainHash('tansr.sdk2.payload.v1', '[]'),
+};
+const ack = {
+  protocol, request, bindingId: 'binding-1', expectedRevision: '0', generations, sourceId: 'source-1',
+  sourceGeneration: 'source-boot-1', coverage, ackFormat,
+  payloads: [{ artifactId: 'artifact-1', sha256: artifact.sha256, state: 'durably-stored' }], attachments: [],
+};
+const status = {
+  protocol, bindingId: 'binding-1', revision: '1', generations, sourceId: 'source-1', sourceGeneration: 'source-boot-1',
+  publishedThroughSequence: '1', acknowledgedCoverage: coverage, releasableThroughSequence: null,
+  pendingBytes: 2, pendingRecords: 1, sessionPersistence: 'unchanged', state: 'active',
+};
+const materialRequest = {
+  protocol, bindingId: 'binding-1', materialRequestId: 'material-1', target, sourceId: 'source-1',
+  sourceGeneration: 'source-boot-1', requestedRecords: [{ recordId: 'record-1', digest, payload: artifact, attachments: [] }], purpose: 'context-recall',
+  maxBytes: 1048576, remainingTtlMs: 30000, chunkBytes: 65536,
+};
+const materialResponse = {
+  protocol, request, bindingId: 'binding-1', materialRequestId: 'material-1', target, sourceId: 'source-1',
+  sourceGeneration: 'source-boot-1', results: [{ recordId: 'record-1', digest, payload: { uploadId: 'upload-artifact-1' }, attachments: [] }],
+};
+const uploadChunk = { protocol, bindingId: 'binding-1', materialRequestId: 'material-1', target,
+  sourceId: 'source-1', sourceGeneration: 'source-boot-1', artifactId: 'artifact-1', offset: 0,
+  bytes: 2, chunkSha256: artifact.sha256, base64: 'W10=' };
+const uploadStatus = { protocol, bindingId: 'binding-1', materialRequestId: 'material-1', uploadId: 'upload-artifact-1',
+  artifact, state: 'committed', chunkBytes: 65536, receivedOffsets: [0], receivedBytes: 2, remainingTtlMs: 30000 };
+const materialReceipt = { protocol, bindingId: 'binding-1', materialRequestId: 'material-1', state: 'received', revision: '1', acceptedRecordIds: ['record-1'] };
+const close = { protocol, request, bindingId: 'binding-1', expectedRevision: '0', generations };
+const goldens = {
+  CapabilitiesResponse: { protocol, availability: 'legacy-complete', capabilities: ['archive-transfer-v1', 'context-materials-v1'], limits, operationEpoch, archiveAckFormats: [ackFormat] },
+  BindingCreateRequest: create,
+  BindingView: binding,
+  ArchiveReadRequest: { protocol, bindingId: 'binding-1', generations, afterSequence: null, limit: 128, maxBytes: 1048576 },
+  ArchivePage: { protocol, bindingId: 'binding-1', generations, records: [record], nextAfterSequence: '1', complete: true, publishedThroughSequence: '1' },
+  ArtifactReadRequest: { protocol, bindingId: 'binding-1', generations, artifactId: 'artifact-1', offset: 0, maxBytes: 262144 },
+  ArtifactChunk: { protocol, bindingId: 'binding-1', artifactId: 'artifact-1', sourceId: 'source-1', generations, offset: 0, bytes: 2, totalBytes: 2, sha256: artifact.sha256, chunkSha256: artifact.sha256, base64: 'W10=' },
+  ArchiveAckRequest: ack,
+  ArchiveStatus: status,
+  MaterialRequest: materialRequest,
+  MaterialResponseRequest: materialResponse,
+  MaterialReceipt: materialReceipt,
+  BindingCloseRequest: close,
+  MutationReceipt: { protocol, request, bindingId: 'binding-1', operation: 'archive-ack', semanticDigest: digest, state: 'completed', revision: '1', outcomeRef: 'ack-1' },
+  OperationStatusRequest: { protocol, bindingId: 'binding-1', operation: 'archive-ack', request },
+  EventFrame: { protocol, bindingId: 'binding-1', eventId: 'event-1', cursor: 'stream-cursor-1', revision: '1', generations, eventType: 'material.request', payload: materialRequest },
+  ErrorResponse: { protocol, requestId: 'req-1', code: 'source_unavailable', status: 503, message: 'Source unavailable', retryAction: 'query-status' },
+  BindingTargetRequest: { protocol, sessionId: target.sessionId },
+  BindingTargetView: { protocol, target, revision: '0', bindingId: null, operationEpoch },
+  MaterialUploadChunkRequest: uploadChunk,
+  MaterialUploadStatusRequest: { protocol, bindingId: 'binding-1', materialRequestId: 'material-1', artifactId: 'artifact-1' },
+  MaterialUploadStatus: uploadStatus,
+  MaterialStatusRequest: { protocol, bindingId: 'binding-1', materialRequestId: 'material-1' },
+};
+
+test('SDK2-01b: all 23 endpoint DTO goldens pass the real draft-07 validator', async (t) => {
+  for (const [name, value] of Object.entries(goldens)) await t.test(name, () => {
+    const validate = validator(name);
+    assert.equal(validate(value), true, JSON.stringify(validate.errors));
+    assert.equal(ajv.validate(schema.$id, value), true, JSON.stringify(ajv.errors));
+  });
+});
+
+test('SDK2-01b: readonly binding target carries host snapshot CAS without creating a binding', () => {
+  const observed = copy(goldens.BindingTargetView);
+  assert.equal(observed.bindingId, null);
+  assert.equal(observed.revision, '0');
+  invalid('BindingTargetRequest', { ...goldens.BindingTargetRequest, scope: binding.scope });
+  invalid('BindingTargetRequest', { ...goldens.BindingTargetRequest, create: true });
+  const missing = copy(create); delete missing.target.sourceSnapshotDigest;
+  invalid('BindingCreateRequest', missing);
+  const checkCreate = (body, current) => {
+    assert.equal(body.expectedRevision, current.revision, 'binding_conflict');
+    assert.equal(body.target.sourceSnapshotDigest, current.target.sourceSnapshotDigest, 'binding_conflict');
+    assert.equal(canonical(body.target.generations), canonical(current.target.generations), 'stale_generation');
+  };
+  checkCreate(create, observed);
+  const rewritten = copy(observed); rewritten.target.sourceSnapshotDigest = hash('history rewritten while unbound');
+  assert.equal(rewritten.revision, '0', 'legacy rewrite need not bump an absent extension slot');
+  assert.throws(() => checkCreate(create, rewritten), /binding_conflict/);
+  assert.equal(observed.bindingId, null, 'observation did not allocate a binding');
+});
+
+function invalid(name, value, label) {
+  const validate = validator(name);
+  assert.equal(validate(value), false, label ?? JSON.stringify(value));
+}
+
+test('SDK2-01b: uint63 strings preserve exact boundaries and reject ambiguous numbers', () => {
+  const validate = validator('Sequence');
+  for (const value of ['0', '1', '9007199254740993', '9223372036854775807']) assert.equal(validate(value), true, value);
+  for (const value of [0, 1, '01', '+1', '-1', '1.0', '1e3', '', ' 1', '1 ', '9223372036854775808', '9999999999999999999', '10000000000000000000']) invalid('Sequence', value);
+  for (let i = 0n; i < 1200n; i++) {
+    const value = (9223372036854775807n - 600n + i).toString();
+    assert.equal(validate(value), BigInt(value) <= 9223372036854775807n, value);
+  }
+  invalid('ArchiveRecord', { ...record, sequence: '0' });
+  assert.equal(validator('ArchiveStatus')({ ...status, publishedThroughSequence: '0', acknowledgedCoverage: null,
+    pendingBytes: 0, pendingRecords: 0 }), true, 'empty watermarks remain zero');
+});
+
+test('SDK2-01b: only a host-provisioned current epoch enables admission; queries survive retirement', () => {
+  assert.equal(validator('EpochView')(operationEpoch), true);
+  invalid('EpochView', { ...operationEpoch, state: 'retired' });
+  invalid('EpochView', { ...operationEpoch, expiresAt: 'invalid-date' });
+  invalid('EpochView', { ...operationEpoch, renew: true });
+  assert.equal(validator('BindingView')({ ...binding, operationEpoch: null }), true);
+  invalid('CapabilitiesResponse', { ...goldens.CapabilitiesResponse, operationEpoch: null });
+  assert.equal(validator('ErrorResponse')({ protocol, requestId: 'discovery', code: 'epoch_unavailable', status: 503, message: 'No current write epoch', retryAction: 'same-request' }), true);
+  const createQuery = { protocol, operation: 'binding-create', sessionId: target.sessionId, request };
+  assert.equal(validator('OperationStatusRequest')(createQuery), true);
+  invalid('OperationStatusRequest', { ...createQuery, bindingId: 'binding-1' });
+  invalid('OperationStatusRequest', { ...createQuery, scope: binding.scope });
+  const missing = copy(createQuery); delete missing.sessionId; invalid('OperationStatusRequest', missing);
+  invalid('OperationStatusRequest', { ...goldens.OperationStatusRequest, operation: 'binding-create' });
+  const checkEpoch = (epoch, effectiveLimit) => {
+    const duration = Date.parse(epoch.expiresAt) - Date.parse(epoch.issuedAt);
+    assert.ok(Number.isFinite(duration) && duration > 0 && duration <= effectiveLimit);
+  };
+  checkEpoch(operationEpoch, limits.epochLifetimeMs);
+  assert.throws(() => checkEpoch({ ...operationEpoch, expiresAt: '2026-09-17T00:00:00.001Z' }, 86400000));
+  assert.throws(() => checkEpoch({ ...operationEpoch, expiresAt: operationEpoch.issuedAt }, 86400000));
+  assert.throws(() => checkEpoch({ ...operationEpoch, expiresAt: '2026-09-16T02:00:00Z' }, limits.epochLifetimeMs));
+});
+
+test('SDK2-01b: no future capability, new session mode, client scope or host target is admitted', () => {
+  for (const capability of ['cache-continuity-v1', 'terminal-only-v1', 'archive-sync-v1', 'host-control']) {
+    const value = copy(create); value.requiredCapabilities = [capability]; invalid('BindingCreateRequest', value);
+  }
+  const offload = copy(create); offload.archive.sessionAvailability = 'terminal-only'; invalid('BindingCreateRequest', offload);
+  for (const key of ['scope', 'applicationScopeId', 'endUserId', 'organizationId', 'cwd', 'url', 'path', 'module', 'executionKind', 'permission']) {
+    const value = copy(create); value[key] = key === 'scope' ? binding.scope : 'untrusted'; invalid('BindingCreateRequest', value, key);
+  }
+  for (const key of ['url', 'path', 'module', 'credentials', 'hostPath']) invalid('ArtifactRef', { ...artifact, [key]: 'forbidden' });
+});
+
+test('SDK2-01b: schema rejects a capability requested as both required and optional', () => {
+  for (const capability of ['archive-transfer-v1', 'context-materials-v1']) {
+    const value = copy(create);
+    value.requiredCapabilities = [capability];
+    value.optionalCapabilities = [capability];
+    invalid('BindingCreateRequest', value, `overlap:${capability}`);
+  }
+});
+
+test('SDK2-01b: limits are mandatory finite positive values and never inferred as unlimited', () => {
+  const hardLimits = { ...limits, epochLifetimeMs: 86400000 };
+  for (const key of Object.keys(limits)) {
+    const missing = copy(limits); delete missing[key]; invalid('Limits', missing, 'missing ' + key);
+    for (const bad of [-1, 0, hardLimits[key] + 1, null, 'Infinity']) invalid('Limits', { ...limits, [key]: bad }, key);
+  }
+  invalid('ArchiveReadRequest', { ...goldens.ArchiveReadRequest, limit: 129 });
+  invalid('ArtifactReadRequest', { ...goldens.ArtifactReadRequest, maxBytes: 262145 });
+  invalid('ArtifactRef', { ...artifact, bytes: 33554433 });
+});
+
+test('SDK2-01b: record provenance/projection rules and material authority are not client writable', () => {
+  invalid('ArchiveRecord', { ...record, recordKind: 'projection' });
+  const projection = { ...record, recordKind: 'projection', projection: { coverage, assemblerVersion: 'core-1', sourceHeadDigest: digest } };
+  assert.equal(validator('ArchiveRecord')(projection), true);
+  invalid('ArchiveRecord', { ...record, projection: projection.projection });
+  for (const key of ['role', 'trust', 'system', 'priority', 'permission', 'coreConsumed', 'approved', 'toolResult']) {
+    invalid('MaterialResponseRequest', { ...materialResponse, [key]: 'claimed' });
+  }
+  invalid('MaterialResponseRequest', { ...materialResponse, results: [] });
+  const surplus = copy(materialResponse); surplus.results = Array.from({ length: 33 }, () => materialResponse.results[0]);
+  invalid('MaterialResponseRequest', surplus);
+  invalid('MaterialReceipt', { ...materialReceipt, state: 'rejected' });
+  invalid('MaterialReceipt', { ...materialReceipt, state: 'received', reason: 'material_rejected' });
+});
+
+test('SDK2-01b: independent extension stream rejects legacy frames and mismatched payloads', () => {
+  invalid('EventFrame', { type: 'msg.text.delta', sessionId: 's', seq: 1, index: 0, text: 'legacy' });
+  invalid('EventFrame', { ...goldens.EventFrame, eventType: 'msg.text.delta' });
+  invalid('EventFrame', { ...goldens.EventFrame, eventType: 'unknown.future.event' });
+  invalid('EventFrame', { ...goldens.EventFrame, eventType: 'archive.status' });
+  invalid('EventFrame', { ...goldens.EventFrame, seq: 1 });
+  invalid('EventFrame', { ...goldens.EventFrame, cursor: 1 });
+  for (const eventType of ['archive.status', 'material.request', 'material.status', 'binding.status']) {
+    const payload = { 'archive.status': status, 'material.request': materialRequest, 'material.status': materialReceipt, 'binding.status': binding }[eventType];
+    const validate = validator('EventFrame');
+    assert.equal(validate({ ...goldens.EventFrame, eventType, payload }), true, JSON.stringify(validate.errors));
+  }
+});
+
+test('SDK2-01b: error/status and retry behavior cannot weaken authorization or retry unknown effects', () => {
+  const base = goldens.ErrorResponse;
+  for (const code of ['unauthorized', 'forbidden', 'request_id_conflict', 'receipt_expired', 'material_rejected']) {
+    const status = { unauthorized: 401, forbidden: 403, request_id_conflict: 409, receipt_expired: 410, material_rejected: 422 }[code];
+    assert.equal(validator('ErrorResponse')({ ...base, code, status, retryAction: 'none' }), true);
+    invalid('ErrorResponse', { ...base, code, status, retryAction: 'same-request' });
+  }
+  invalid('ErrorResponse', { ...base, status: 200 });
+  invalid('ErrorResponse', { ...base, code: 'forbidden', status: 503 });
+  invalid('ErrorResponse', { ...base, retryable: true });
+});
+
+// This small reference model expresses normative cross-request rules JSON Schema cannot enforce.
+// It is deliberately not imported by product code and is not a claim of durable implementation.
+function canonical(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  return '{' + Object.keys(value).sort().map((key) => JSON.stringify(key) + ':' + canonical(value[key])).join(',') + '}';
+}
+
+// Whole requested intervals are checked, including overlap with already acknowledged records.
+// Artifact identity is immutable across categories and records; receipt SHA is raw bytes SHA.
+function receiptSets(records, sourceId) {
+  const objects = new Map(); const payloads = new Map(); const attachments = new Map();
+  const add = (ref, category) => {
+    if (ref.sourceId !== sourceId) throw new Error('invalid_coverage');
+    const prior = objects.get(ref.artifactId);
+    if (prior && canonical(prior) !== canonical(ref)) throw new Error('invalid_coverage');
+    objects.set(ref.artifactId, ref);
+    if (!category.has(ref.artifactId)) category.set(ref.artifactId, { artifactId: ref.artifactId, sha256: ref.sha256, state: 'durably-stored' });
+  };
+  for (const record of records) {
+    add(record.payload, payloads);
+    for (const ref of record.attachments) add(ref, attachments);
+  }
+  return { payloads: [...payloads.values()], attachments: [...attachments.values()], physicalObjects: objects.size };
+}
+
+function checkWholeAck(body, records, controlBytes) {
+  if (!validator('ArchiveAckRequest')(body)) throw new Error('invalid_coverage');
+  if (Buffer.byteLength(canonical(body), 'utf8') > controlBytes) throw new Error('payload_too_large');
+  if (records.length < 1 || records.length > 128) throw new Error('invalid_coverage');
+  const expected = receiptSets(records, body.sourceId);
+  if (canonical(body.payloads) !== canonical(expected.payloads) || canonical(body.attachments) !== canonical(expected.attachments)) throw new Error('invalid_coverage');
+  return expected;
+}
+
+class BindingContractModel {
+  state = 'active';
+  revision = 0n;
+  acked = 0n;
+  published = 3n;
+  generation = copy(generations);
+  pending = 3;
+  authorized = true;
+  retired = false;
+  nowMs = 0;
+  epochExpiresAtMs = 3600000;
+  terminalReceiptRetentionMs = 604800000;
+  receipts = new Map();
+  controlBytes = limits.controlBytes;
+  archiveAckFormat = ackFormat;
+  hostRecords = new Map(['1', '2', '3'].map((sequence) => [sequence, { ...copy(record), sequence }]));
+  legacyHistory = Object.freeze(['current-effective-user', 'current-effective-assistant']);
+  hostHeads = new Map([['1', digest], ['2', hash('head-2')], ['3', hash('head-3')]]);
+
+  key(body, operation) {
+    return canonical(['app-1', 'alice', body.bindingId, operation, body.request.operationEpoch, body.request.requestId]);
+  }
+
+  query(body, operation) {
+    if (!this.authorized) throw new Error('forbidden');
+    const previous = this.receipts.get(this.key(body, operation));
+    if (!previous) throw new Error('receipt_expired');
+    return copy(previous.result);
+  }
+
+  collectTerminalReceipts() {
+    if (this.nowMs < this.epochExpiresAtMs) throw new Error('active_epoch_receipts_must_remain');
+    for (const [key, entry] of this.receipts) {
+      if (!entry.pending && this.nowMs >= entry.completedAtMs + this.terminalReceiptRetentionMs) this.receipts.delete(key);
+    }
+  }
+
+  mutate(body, operation) {
+    if (!this.authorized) throw new Error('forbidden');
+    const semantic = copy(body); delete semantic.request;
+    const witness = domainHash('tansr.sdk2.operation.v1', canonical({ scope: ['app-1', 'alice'], operation, semantic }));
+    const key = this.key(body, operation);
+    const previous = this.receipts.get(key);
+    if (previous) {
+      if (previous.witness !== witness) throw new Error('request_id_conflict');
+      return copy(previous.result);
+    }
+    if (this.retired || this.nowMs >= this.epochExpiresAtMs || body.request.operationEpoch !== request.operationEpoch) throw new Error('receipt_expired');
+    if (canonical(body.generations) !== canonical(this.generation)) throw new Error('stale_generation');
+    if (body.expectedRevision !== this.revision.toString()) throw new Error('binding_conflict');
+    if (this.state === 'closed') throw new Error('binding_closed');
+    if (operation === 'archive-ack') {
+      if (body.sourceId !== 'source-1' || body.sourceGeneration !== 'source-boot-1') throw new Error('forbidden');
+      const from = BigInt(body.coverage.fromSequence); const through = BigInt(body.coverage.throughSequence);
+      if (from < 1n || from > through || from > this.acked + 1n || through < this.acked || through > this.published ||
+        this.hostHeads.get(body.coverage.throughSequence) !== body.coverage.headDigest) throw new Error('invalid_coverage');
+      if (through - from + 1n > 128n || body.ackFormat !== this.archiveAckFormat) throw new Error('invalid_coverage');
+      const records = [];
+      for (let sequence = from; sequence <= through; sequence++) {
+        const record = this.hostRecords.get(sequence.toString());
+        if (!record || record.sequence !== sequence.toString() || canonical(record.target.generations) !== canonical(this.generation)) throw new Error('invalid_coverage');
+        records.push(record);
+      }
+      checkWholeAck(body, records, this.controlBytes);
+      this.acked = through; this.pending = Number(this.published - through);
+      if (this.state === 'closing' && this.pending === 0) this.state = 'closed';
+    } else if (operation === 'binding-close') this.state = this.pending === 0 ? 'closed' : 'closing';
+    else throw new Error('unsupported_capability');
+    this.revision++;
+    const result = { revision: this.revision.toString(), state: 'completed', acknowledged: this.acked.toString() };
+    this.receipts.set(key, { witness, result, completedAtMs: this.nowMs, pending: false });
+    return copy(result);
+  }
+}
+
+test('SDK2 split ACK: discovery and binding explicitly select the supported format only for archive', () => {
+  const discovery = copy(goldens.CapabilitiesResponse);
+  const missing = copy(discovery); delete missing.archiveAckFormats;
+  invalid('CapabilitiesResponse', missing);
+  invalid('CapabilitiesResponse', { ...discovery, archiveAckFormats: [] });
+  invalid('CapabilitiesResponse', { ...discovery, archiveAckFormats: ['mixed-receipts-v0'] });
+  const materialsOnly = { ...discovery, capabilities: ['context-materials-v1'], archiveAckFormats: [] };
+  assert.equal(validator('CapabilitiesResponse')(materialsOnly), true);
+  invalid('CapabilitiesResponse', { ...materialsOnly, archiveAckFormats: [ackFormat] });
+  invalid('BindingView', { ...binding, archiveAckFormat: null });
+  invalid('BindingView', { ...binding, archiveAckFormat: 'mixed-receipts-v0' });
+  const materialsBinding = { ...binding, acceptedCapabilities: ['context-materials-v1'], archiveAckFormat: null };
+  assert.equal(validator('BindingView')(materialsBinding), true);
+  invalid('BindingView', { ...materialsBinding, archiveAckFormat: ackFormat });
+  const legacyCreate = copy(create); delete legacyCreate.archive.ackFormat;
+  invalid('BindingCreateRequest', legacyCreate);
+  // Optional archive rejection must preserve a separately required available capability.
+  const negotiate = (input, offered) => {
+    const supported = (capability) => offered.capabilities.includes(capability) &&
+      (capability !== 'archive-transfer-v1' || offered.archiveAckFormats.includes(input.archive.ackFormat));
+    if (input.requiredCapabilities.some((value) => !supported(value))) throw new Error('unsupported_capability');
+    const accepted = [...input.requiredCapabilities, ...input.optionalCapabilities.filter(supported)];
+    return { accepted, format: accepted.includes('archive-transfer-v1') ? input.archive.ackFormat : null };
+  };
+  assert.throws(() => negotiate(create, materialsOnly), /unsupported_capability/);
+  const optional = { ...create, requiredCapabilities: ['context-materials-v1'], optionalCapabilities: ['archive-transfer-v1'] };
+  assert.deepEqual(negotiate(optional, materialsOnly), { accepted: ['context-materials-v1'], format: null });
+  assert.deepEqual(negotiate(optional, discovery), { accepted: ['context-materials-v1', 'archive-transfer-v1'], format: ackFormat });
+});
+
+function recordWithAttachments(count, sequence = '1') {
+  return { ...copy(record), sequence, recordId: 'record-' + sequence,
+    payload: { ...artifact, artifactId: 'payload-' + sequence },
+    attachments: Array.from({ length: count }, (_, index) => ({ ...artifact, artifactId: 'attachment-' + sequence + '-' + index })) };
+}
+
+function ackFor(records, overrides = {}) {
+  const sets = receiptSets(records, 'source-1');
+  return { ...copy(ack), payloads: sets.payloads, attachments: sets.attachments,
+    coverage: { fromSequence: records[0].sequence, throughSequence: records.at(-1).sequence,
+      headDigest: records.at(-1).sequence === '1' ? digest : hash('head-' + records.at(-1).sequence) }, ...overrides };
+}
+
+test('SDK2 split ACK: body plus 128 extra attachments fits without weakening either record or receipt cap', () => {
+  const full = recordWithAttachments(128); const body = ackFor([full]);
+  assert.equal(validator('ArchiveRecord')(full), true);
+  assert.equal(validator('ArchiveAckRequest')(body), true);
+  assert.equal(checkWholeAck(body, [full], limits.controlBytes).physicalObjects, 129);
+  invalid('ArchiveRecord', recordWithAttachments(129));
+  invalid('ArchiveAckRequest', { ...body, attachments: [...body.attachments, { ...body.payloads[0], artifactId: 'extra-129' }] });
+  const mixed = copy(body); delete mixed.ackFormat; delete mixed.payloads;
+  mixed.attachments = [body.payloads[0], ...body.attachments.slice(0, 127)];
+  invalid('ArchiveAckRequest', mixed, 'legacy mixed receipts are not inferred as split receipts');
+  for (const change of [
+    (value) => { value.payloads = []; },
+    (value) => { value.attachments.pop(); },
+    (value) => { value.attachments[127].sha256 = 'f'.repeat(64); },
+    (value) => { value.attachments[127].artifactId = 'foreign'; },
+    (value) => { value.payloads.push(value.payloads[0]); },
+    (value) => { value.attachments.reverse(); },
+    (value) => { value.ackFormat = 'mixed-receipts-v0'; },
+  ]) {
+    const model = new BindingContractModel(); model.hostRecords.set('1', full);
+    const bad = copy(body); change(bad);
+    assert.throws(() => model.mutate(bad, 'archive-ack'), /invalid_coverage/);
+    assert.equal(model.acked, 0n); assert.equal(model.revision, 0n); assert.equal(model.receipts.size, 0);
+  }
+});
+
+test('SDK2 split ACK: long coverage uses separate whole-prefix transactions and cannot skip or partially ACK a record', () => {
+  const first = recordWithAttachments(128); const second = recordWithAttachments(128, '2');
+  const combined = ackFor([first, second]);
+  invalid('ArchiveAckRequest', combined, 'two legal records can exceed the per-ACK extra-attachment budget');
+  const model = new BindingContractModel(); model.hostRecords.set('1', first); model.hostRecords.set('2', second);
+  assert.throws(() => model.mutate(ackFor([second]), 'archive-ack'), /invalid_coverage/);
+  assert.throws(() => model.mutate(combined, 'archive-ack'), /invalid_coverage/);
+  const one = model.mutate(ackFor([first]), 'archive-ack');
+  const twoBody = ackFor([second], { expectedRevision: one.revision, request: { ...request, requestId: 'second-prefix' } });
+  assert.equal(model.mutate(twoBody, 'archive-ack').acknowledged, '2');
+  assert.equal(model.receipts.size, 2);
+  const many = Array.from({ length: 129 }, (_, i) => ({ ...copy(record), sequence: String(i + 1) }));
+  const overRecords = ackFor(many);
+  assert.equal(validator('ArchiveAckRequest')(overRecords), true, 'schema cannot calculate the interval width');
+  assert.throws(() => checkWholeAck(overRecords, many, limits.controlBytes), /invalid_coverage/);
+  assert.doesNotThrow(() => checkWholeAck(ackFor(many.slice(0, 128)), many.slice(0, 128), limits.controlBytes));
+});
+
+test('SDK2 split ACK: overlap includes the entire requested interval, not merely its newly acknowledged tail', () => {
+  const first = recordWithAttachments(1); const second = recordWithAttachments(1, '2');
+  const model = new BindingContractModel(); model.hostRecords.set('1', first); model.hostRecords.set('2', second);
+  model.mutate(ackFor([first]), 'archive-ack');
+  const overlap = ackFor([first, second], { expectedRevision: '1', request: { ...request, requestId: 'overlap' } });
+  const missingOld = copy(overlap); missingOld.payloads.shift(); missingOld.attachments.shift();
+  assert.throws(() => model.mutate(missingOld, 'archive-ack'), /invalid_coverage/);
+  assert.equal(model.revision, 1n); assert.equal(model.acked, 1n);
+  assert.equal(model.mutate(overlap, 'archive-ack').acknowledged, '2');
+});
+
+test('SDK2 split ACK: first-occurrence sets preserve immutable artifact identity within and across categories', () => {
+  const first = recordWithAttachments(1); first.attachments.push(copy(first.attachments[0]), copy(first.payload));
+  const second = { ...copy(first), sequence: '2', recordId: 'record-2' };
+  const body = ackFor([first, second]);
+  assert.equal(body.payloads.length, 1); assert.equal(body.attachments.length, 2);
+  assert.equal(checkWholeAck(body, [first, second], limits.controlBytes).physicalObjects, 2, 'cross-category receipts do not double physical storage');
+  for (const change of [
+    (value) => { value[0].attachments[1].sha256 = 'f'.repeat(64); },
+    (value) => { value[1].payload.bytes++; },
+    (value) => { value[1].attachments[0].mediaType = 'text/plain'; },
+    (value) => { value[0].attachments[2].sourceId = 'foreign-source'; },
+  ]) {
+    const records = copy([first, second]); change(records);
+    assert.throws(() => checkWholeAck(body, records, limits.controlBytes), /invalid_coverage/);
+  }
+  const changedCrossCategory = copy(body); changedCrossCategory.attachments[1].sha256 = 'f'.repeat(64);
+  assert.throws(() => checkWholeAck(changedCrossCategory, [first, second], limits.controlBytes), /invalid_coverage/);
+});
+
+test('SDK2 split ACK: receipt replay survives new revisions and generations but current authorization remains first', () => {
+  const model = new BindingContractModel(); const firstRecord = recordWithAttachments(2);
+  model.hostRecords.set('1', firstRecord); const body = ackFor([firstRecord]);
+  const receipt = model.mutate(body, 'archive-ack');
+  model.revision = 9n; model.generation.deletionGeneration = '1'; model.retired = true;
+  assert.deepEqual(model.mutate(body, 'archive-ack'), receipt);
+  assert.deepEqual(model.query(body, 'archive-ack'), receipt);
+  const reordered = copy(body); reordered.attachments.reverse();
+  assert.throws(() => model.mutate(reordered, 'archive-ack'), /request_id_conflict/);
+  const otherFormat = { ...body, ackFormat: 'other-format' };
+  assert.throws(() => model.mutate(otherFormat, 'archive-ack'), /request_id_conflict/);
+  model.authorized = false;
+  assert.throws(() => model.mutate(body, 'archive-ack'), /forbidden/);
+  assert.throws(() => model.query(body, 'archive-ack'), /forbidden/);
+  assert.equal(model.revision, 9n); assert.equal(model.receipts.size, 1);
+});
+
+test('SDK2 split ACK: negotiated control budget is checked before promising a deliverable whole record', () => {
+  const full = recordWithAttachments(128);
+  // Use maximum legal ASCII identifiers and uint63 fields, not JS character-count estimates.
+  full.payload.artifactId = 'p'.repeat(128);
+  full.attachments.forEach((ref, i) => { ref.artifactId = String(i).padEnd(128, 'a'); });
+  const body = ackFor([full]);
+  for (const key of ['bindingId', 'sourceId', 'sourceGeneration']) body[key] = 'x'.repeat(128);
+  body.request = { requestId: 'r'.repeat(128), operationEpoch: 'e'.repeat(128) };
+  body.generations.historyEpoch = '\0'.repeat(512);
+  for (const key of ['deletionGeneration', 'projectionRevision']) body.generations[key] = '9223372036854775807';
+  body.expectedRevision = '9223372036854775807';
+  body.coverage.fromSequence = body.coverage.throughSequence = '9223372036854775807';
+  full.payload.sourceId = body.sourceId; full.attachments.forEach((ref) => { ref.sourceId = body.sourceId; });
+  const bytes = Buffer.byteLength(canonical(body), 'utf8');
+  const unicodeVariant = copy(body); unicodeVariant.generations.historyEpoch = '😀'.repeat(512);
+  assert.equal(bytes - Buffer.byteLength(canonical(unicodeVariant), 'utf8'), 1024, 'escaped NUL is six bytes per scalar, larger than four-byte UTF-8');
+  assert.doesNotThrow(() => checkWholeAck(unicodeVariant, [full], limits.controlBytes));
+  assert.ok(bytes < limits.controlBytes);
+  assert.doesNotThrow(() => checkWholeAck(body, [full], bytes));
+  assert.throws(() => checkWholeAck(body, [full], bytes - 1), /payload_too_large/);
+  let deliveryAdmitted = false;
+  const admit = (controlBytes) => { checkWholeAck(body, [full], controlBytes); deliveryAdmitted = true; };
+  assert.throws(() => admit(1024), /payload_too_large/);
+  assert.equal(deliveryAdmitted, false, 'rejection precedes any required archive delivery promise');
+  assert.equal(full.attachments.length, 128, 'do not silently reduce legal attachment count to fit limits');
+});
+
+test('SDK2-01b: reference CAS, idempotency, revocation and retired epochs preserve old facts', () => {
+  const model = new BindingContractModel();
+  const first = model.mutate(ack, 'archive-ack');
+  assert.deepEqual(model.mutate(copy(ack), 'archive-ack'), first, 'replay precedes fresh CAS, not authorization');
+  assert.equal(model.revision, 1n);
+  const changed = copy(ack); changed.coverage.throughSequence = '2'; changed.coverage.headDigest = hash('head-2');
+  assert.throws(() => model.mutate(changed, 'archive-ack'), /request_id_conflict/);
+  const stale = copy(ack); stale.request.requestId = 'new-request';
+  assert.throws(() => model.mutate(stale, 'archive-ack'), /binding_conflict/);
+  model.authorized = false;
+  assert.throws(() => model.mutate(ack, 'archive-ack'), /forbidden/);
+  model.authorized = true; model.retired = true;
+  assert.deepEqual(model.mutate(ack, 'archive-ack'), first, 'an admitted replay is a status recovery, not new write admission');
+  const retiredFresh = copy(ack); retiredFresh.request.requestId = 'new-after-retirement';
+  assert.throws(() => model.mutate(retiredFresh, 'archive-ack'), /receipt_expired/);
+  assert.deepEqual(model.query(ack, 'archive-ack'), first, 'retiring write epoch does not hide admitted facts');
+  const unknown = copy(ack); unknown.request.operationEpoch = 'unknown-epoch';
+  assert.throws(() => model.mutate(unknown, 'archive-ack'), /receipt_expired/);
+  assert.throws(() => model.query(unknown, 'archive-ack'), /receipt_expired/);
+  assert.equal(model.receipts.size, 1, 'retiring epoch never removes unresolved facts or reexecutes');
+  assert.deepEqual(model.legacyHistory, ['current-effective-user', 'current-effective-assistant']);
+});
+
+test('SDK2-01b: reference ACK cannot jump gaps, forge head, skip attachment or revive deletion', () => {
+  for (const modify of [
+    (body) => { body.coverage.fromSequence = '0'; },
+    (body) => { body.coverage.fromSequence = '2'; body.coverage.throughSequence = '2'; body.coverage.headDigest = hash('head-2'); },
+    (body) => { body.coverage.throughSequence = '4'; },
+    (body) => { body.coverage.headDigest = 'f'.repeat(64); },
+    (body) => { body.payloads = []; },
+    (body) => { body.generations.deletionGeneration = '1'; },
+  ]) {
+    const model = new BindingContractModel(); const body = copy(ack); modify(body);
+    assert.throws(() => model.mutate(body, 'archive-ack'), /invalid_coverage|stale_generation/);
+    assert.equal(model.acked, 0n); assert.equal(model.revision, 0n); assert.equal(model.receipts.size, 0);
+  }
+});
+
+test('SDK2-01b: receipt cleanup cannot reopen IDs in an active epoch or lose unresolved work', () => {
+  const model = new BindingContractModel(); model.terminalReceiptRetentionMs = 5;
+  const first = model.mutate(ack, 'archive-ack'); model.nowMs = 10;
+  assert.throws(() => model.collectTerminalReceipts(), /active_epoch_receipts_must_remain/);
+  assert.deepEqual(model.mutate(ack, 'archive-ack'), first);
+  assert.equal(model.revision, 1n);
+  model.nowMs = model.epochExpiresAtMs;
+  model.collectTerminalReceipts();
+  assert.equal(model.receipts.size, 0);
+  assert.throws(() => model.mutate(ack, 'archive-ack'), /receipt_expired/);
+  assert.throws(() => model.query(ack, 'archive-ack'), /receipt_expired/);
+  const closing = new BindingContractModel(); closing.mutate(close, 'binding-close');
+  closing.nowMs = closing.epochExpiresAtMs + closing.terminalReceiptRetentionMs + 1;
+  closing.collectTerminalReceipts();
+  assert.equal(closing.receipts.size, 0, 'completed close-intent receipt is not an immortal pending receipt');
+  assert.equal(closing.state, 'closing'); assert.equal(closing.pending, 3, 'actual accepted work remains separate');
+  const pending = new BindingContractModel();
+  pending.receipts.set('admitted-unresolved', { pending: true, completedAtMs: 0 });
+  pending.nowMs = pending.epochExpiresAtMs + pending.terminalReceiptRetentionMs + 1;
+  pending.collectTerminalReceipts(); assert.equal(pending.receipts.size, 1, 'genuinely unresolved admission remains');
+});
+
+test('SDK2-01b: reference close drains admitted archive without deleting current history', () => {
+  const model = new BindingContractModel();
+  assert.equal(model.mutate(close, 'binding-close').state, 'completed');
+  assert.equal(model.state, 'closing');
+  assert.equal(model.pending, 3);
+  const finalAck = copy(ack); finalAck.request.requestId = 'final-ack'; finalAck.expectedRevision = '1';
+  finalAck.coverage.throughSequence = '3'; finalAck.coverage.headDigest = hash('head-3');
+  const result = model.mutate(finalAck, 'archive-ack');
+  assert.equal(result.state, 'completed'); assert.equal(model.state, 'closed'); assert.equal(model.pending, 0);
+  assert.deepEqual(model.legacyHistory, ['current-effective-user', 'current-effective-assistant']);
+  assert.equal(model.receipts.size, 2);
+  model.nowMs = model.epochExpiresAtMs + model.terminalReceiptRetentionMs + 1;
+  model.collectTerminalReceipts(); assert.equal(model.receipts.size, 0, 'final ACK and close both GC after real terminal retention');
+  assert.throws(() => model.mutate(close, 'binding-close'), /receipt_expired/);
+  invalid('MutationReceipt', { ...goldens.MutationReceipt, operation: 'binding-close', state: 'accepted' });
+});
+
+test('SDK2-01b: byte and source witnesses require runtime checks beyond structural schema', () => {
+  const chunk = copy(goldens.ArtifactChunk);
+  const decode = (body) => {
+    const bytes = Buffer.from(body.base64, 'base64');
+    assert.equal(bytes.toString('base64'), body.base64);
+    assert.equal(bytes.length, body.bytes);
+    assert.ok(body.offset + body.bytes <= body.totalBytes);
+    assert.equal(hash(bytes), body.chunkSha256);
+    return bytes;
+  };
+  assert.equal(decode(chunk).toString(), '[]');
+  assert.throws(() => decode({ ...chunk, base64: 'e30=' }));
+  assert.throws(() => decode({ ...chunk, bytes: 1 }));
+  const unicode = '汉'.repeat(100000);
+  assert.ok(unicode.length < limits.controlBytes);
+  assert.ok(Buffer.byteLength(JSON.stringify({ text: unicode }), 'utf8') > limits.controlBytes);
+  assert.notEqual(hash(canonical({ value: 'é' })), hash(canonical({ value: 'e\u0301' })), 'Unicode not normalized');
+  assert.equal(hash(canonical({ b: 2, a: 1 })), hash(canonical({ a: 1, b: 2 })), 'object key order stable');
+  const body = canonical({ text: 'same bytes' });
+  const commitments = ['tansr.sdk2.payload.v1', 'tansr.sdk2.record.v1', 'tansr.sdk2.operation.v1'].map((domain) => domainHash(domain, body));
+  assert.equal(new Set(commitments).size, 3, 'payload, chain and operation witnesses cannot substitute');
+  assert.notEqual(domainHash('tansr.sdk2.payload.v1', '[]'), artifact.sha256, 'raw transport SHA is not a provenance commitment');
+});
+
+test('SDK2-01b: material upload DTOs carry bounded bytes and only server-witnessed references', () => {
+  const missing = copy(materialRequest); delete missing.requestedRecords[0].payload;
+  invalid('MaterialRequest', missing);
+  invalid('MaterialResponseRequest', { ...materialResponse, expectedRevision: '1' });
+  const originalRef = copy(materialResponse); originalRef.results[0].payload = artifact;
+  invalid('MaterialResponseRequest', originalRef);
+  invalid('MaterialUploadChunkRequest', { ...uploadChunk, bytes: 65537 });
+  invalid('MaterialUploadChunkRequest', { ...uploadChunk, base64: 'A'.repeat(87388) });
+  for (const key of ['scope', 'path', 'url', 'permission', 'artifact', 'totalBytes', 'sha256', 'expiresAt', 'expectedRevision']) {
+    invalid('MaterialUploadChunkRequest', { ...uploadChunk, [key]: 'untrusted' });
+  }
+  const bytes = Buffer.alloc(65536, 65);
+  const largest = { ...uploadChunk, bytes: bytes.length, chunkSha256: hash(bytes), base64: bytes.toString('base64') };
+  assert.equal(validator('MaterialUploadChunkRequest')(largest), true);
+  assert.ok(Buffer.byteLength(JSON.stringify(largest)) < limits.controlBytes, '64KiB raw plus base64 and metadata fits control envelope');
+  assert.equal(validator('MaterialReceipt')({ ...materialReceipt, state: 'pending', revision: '0', acceptedRecordIds: [] }), true);
+  invalid('MaterialReceipt', { ...materialReceipt, state: 'pending' });
+  for (const [code, status] of [['stream_cursor_unknown', 409], ['stream_cursor_expired', 410], ['stream_gap', 409]]) {
+    const error = { ...goldens.ErrorResponse, code, status, retryAction: 'none' };
+    assert.equal(validator('ErrorResponse')(error), true);
+    invalid('ErrorResponse', { ...error, retryAction: 'same-request' });
+  }
+});
+
+// Executable reference semantics only: the product must supply durable transactions and core leases.
+class MaterialContractModel {
+  state = 'pending';
+  nowMs = 0;
+  authorized = true;
+  retired = false;
+  epochExpiresAtMs = 3600000;
+  bindingState = 'active';
+  bindingRevision = 0n;
+  revision = 0n;
+  coreHolds = 0;
+  coreQueued = false;
+  acknowledged = false;
+  receivedBytes = 0;
+  uploads = new Map();
+  receipts = new Map();
+
+  constructor(saved = materialRequest, quota = limits.materialBytes, issuedAtMs = 0) {
+    this.saved = copy(saved);
+    this.currentTarget = copy(saved.target);
+    this.currentSourceId = saved.sourceId;
+    this.currentSourceGeneration = saved.sourceGeneration;
+    this.nowMs = issuedAtMs;
+    this.deadlineMs = issuedAtMs + saved.remainingTtlMs;
+    this.chunkBytes = saved.chunkBytes;
+    assert.ok(Number.isInteger(this.chunkBytes) && this.chunkBytes > 0 && this.chunkBytes <= limits.materialChunkBytes);
+    this.witnesses = new Map();
+    for (const item of saved.requestedRecords) for (const witness of [item.payload, ...item.attachments]) {
+      const previous = this.witnesses.get(witness.artifactId);
+      if (previous && canonical(previous) !== canonical(witness)) throw new Error('material_rejected');
+      this.witnesses.set(witness.artifactId, copy(witness));
+      if (Math.ceil(witness.bytes / this.chunkBytes) > 16) throw new Error('capacity_exceeded');
+    }
+    this.reservedBytes = [...this.witnesses.values()].reduce((sum, item) => sum + item.bytes, 0);
+    if (this.reservedBytes > Math.min(saved.maxBytes, limits.materialBytes, quota)) throw new Error('capacity_exceeded');
+  }
+
+  authorize(body) {
+    if (!this.authorized || body.bindingId !== this.saved.bindingId || body.materialRequestId !== this.saved.materialRequestId) throw new Error('forbidden');
+  }
+
+  witnessInput(body) {
+    this.authorize(body);
+    if (body.sourceId !== this.saved.sourceId || body.sourceGeneration !== this.saved.sourceGeneration) throw new Error('forbidden');
+    if (canonical(body.target) !== canonical(this.saved.target)) throw new Error('stale_generation');
+    this.checkCurrent();
+  }
+
+  checkCurrent() {
+    if (!this.authorized) throw new Error('forbidden');
+    if (canonical(this.currentTarget) !== canonical(this.saved.target)) throw new Error('stale_generation');
+    if (this.currentSourceId !== this.saved.sourceId || this.currentSourceGeneration !== this.saved.sourceGeneration) throw new Error('stale_generation');
+  }
+
+  checkNewEpoch(body) {
+    if (this.retired || this.nowMs >= this.epochExpiresAtMs || body.request.operationEpoch !== request.operationEpoch) throw new Error('receipt_expired');
+  }
+
+  operationKey(body) {
+    return canonical(['app-1', 'alice', this.saved.bindingId, 'material-response', body.request.operationEpoch, body.request.requestId]);
+  }
+
+  queryResponse(body) {
+    this.authorize(body);
+    const previous = this.receipts.get(this.operationKey(body));
+    if (!previous) throw new Error('receipt_expired');
+    return copy(previous.receipt);
+  }
+
+  pending() {
+    if (this.bindingState !== 'active') throw new Error('binding_closed');
+    if (this.nowMs >= this.deadlineMs) throw new Error('request_expired');
+    if (this.state !== 'pending') throw new Error('material_rejected');
+  }
+
+  upload(body) {
+    this.witnessInput(body); this.pending();
+    const witness = this.witnesses.get(body.artifactId);
+    if (!witness) throw new Error('material_rejected');
+    const data = Buffer.from(body.base64, 'base64');
+    if (data.toString('base64') !== body.base64 || data.length !== body.bytes || hash(data) !== body.chunkSha256) throw new Error('material_rejected');
+    const expectedBytes = Math.min(this.chunkBytes, witness.bytes - body.offset);
+    if (!Number.isInteger(body.offset) || body.offset < 0 || body.offset % this.chunkBytes !== 0 ||
+      (witness.bytes > 0 && body.offset >= witness.bytes) || expectedBytes !== body.bytes || body.bytes > this.chunkBytes) throw new Error('invalid_coverage');
+    let upload = this.uploads.get(body.artifactId);
+    if (!upload) {
+      upload = { uploadId: 'upload-' + body.artifactId, artifact: witness, chunks: new Map(), state: 'receiving' };
+      this.uploads.set(body.artifactId, upload);
+    }
+    const previous = upload.chunks.get(body.offset);
+    if (previous) {
+      if (!previous.equals(data)) throw new Error('request_id_conflict');
+      return this.uploadStatus(body);
+    }
+    upload.chunks.set(body.offset, data); this.receivedBytes += data.length;
+    const expectedCount = Math.max(1, Math.ceil(witness.bytes / this.chunkBytes));
+    if (upload.chunks.size === expectedCount) {
+      const full = Buffer.concat([...upload.chunks].sort(([a], [b]) => a - b).map(([, value]) => value));
+      if (full.length !== witness.bytes || hash(full) !== witness.sha256) {
+        this.state = 'rejected'; throw new Error('material_rejected');
+      }
+      upload.state = 'committed';
+    }
+    return this.uploadStatus(body);
+  }
+
+  uploadStatus(body) {
+    this.authorize(body);
+    if (this.nowMs >= this.deadlineMs) throw new Error('request_expired');
+    const upload = this.uploads.get(body.artifactId);
+    if (!upload) throw new Error('source_unavailable');
+    return { uploadId: upload.uploadId, state: upload.state, artifact: copy(upload.artifact),
+      receivedOffsets: [...upload.chunks.keys()].sort((a, b) => a - b),
+      receivedBytes: [...upload.chunks.values()].reduce((sum, bytes) => sum + bytes.length, 0) };
+  }
+
+  respond(body) {
+    this.authorize(body);
+    const operationKey = this.operationKey(body);
+    const semantic = copy(body); delete semantic.request;
+    const digest = hash(canonical(semantic));
+    const previous = this.receipts.get(operationKey);
+    if (previous) {
+      if (previous.digest !== digest) throw new Error('request_id_conflict');
+      return copy(previous.receipt);
+    }
+    this.checkNewEpoch(body);
+    this.witnessInput(body);
+    this.pending();
+    const seen = new Set();
+    for (const result of body.results) {
+      const requested = this.saved.requestedRecords.find((item) => item.recordId === result.recordId);
+      if (!requested || requested.digest !== result.digest || seen.has(result.recordId)) throw new Error('material_rejected');
+      seen.add(result.recordId);
+      const actual = [result.payload, ...result.attachments].map((reference) => {
+        const upload = [...this.uploads.values()].find((item) => item.uploadId === reference.uploadId);
+        if (!upload || upload.state !== 'committed') throw new Error('material_rejected');
+        return upload.artifact;
+      });
+      if (canonical(actual) !== canonical([requested.payload, ...requested.attachments])) throw new Error('material_rejected');
+    }
+    if (seen.size === 0) throw new Error('material_rejected');
+    this.state = 'received'; this.revision++; this.coreQueued = true;
+    const receipt = { state: this.state, revision: this.revision.toString(), acceptedRecordIds: [...seen] };
+    this.receipts.set(operationKey, { digest, receipt });
+    return copy(receipt);
+  }
+
+  terminate(reason) {
+    if (reason === 'forbidden') this.authorized = false;
+    if (reason === 'binding_closed') this.bindingState = 'closing';
+    if (reason === 'request_expired' && this.state !== 'pending') return false;
+    if (this.state === 'core-consumed') return false;
+    this.state = 'rejected'; this.reason = reason; this.coreQueued = false; this.revision++;
+    return true;
+  }
+
+  acquireCore() {
+    // This synchronous reference step models one exclusion boundary with the lease increment.
+    this.checkCurrent();
+    if (!this.authorized || this.bindingState !== 'active' || !['received', 'verified'].includes(this.state)) throw new Error('material_rejected');
+    this.coreQueued = false; this.coreHolds++;
+  }
+
+  releaseCore() { assert.ok(this.coreHolds > 0); this.coreHolds--; }
+  canRelease() { return this.acknowledged && !this.coreQueued && this.coreHolds === 0 && ['core-consumed', 'rejected'].includes(this.state); }
+}
+
+test('SDK2-01b: fixed material slots retry without overlap, gaps, quota recharge or unwitnessed bytes', () => {
+  const data = Buffer.alloc(65539, 65);
+  const saved = copy(materialRequest); saved.requestedRecords[0].payload = { ...artifact, bytes: data.length, sha256: hash(data) };
+  const model = new MaterialContractModel(saved);
+  const chunkAt = (offset) => { const part = data.subarray(offset, offset + 65536); return { ...uploadChunk,
+    offset, bytes: part.length, base64: part.toString('base64'), chunkSha256: hash(part) }; };
+  const last = chunkAt(65536);
+  assert.equal(model.upload(last).state, 'receiving', 'out-of-order fixed final slot does not imply full commit');
+  assert.throws(() => model.respond(materialResponse), /material_rejected/, 'missing first slot cannot be cited');
+  assert.deepEqual(model.upload(copy(last)), model.uploadStatus(last));
+  assert.equal(model.receivedBytes, 3); assert.equal(model.reservedBytes, data.length);
+  const conflicting = { ...last, base64: Buffer.from('BBB').toString('base64'), chunkSha256: hash('BBB') };
+  assert.throws(() => model.upload(conflicting), /request_id_conflict/);
+  assert.throws(() => model.upload({ ...last, offset: 1 }), /invalid_coverage/);
+  assert.throws(() => model.upload({ ...last, offset: 65537 }), /invalid_coverage/);
+  assert.throws(() => model.upload({ ...last, artifactId: 'invented-body' }), /material_rejected/);
+  assert.equal(model.upload(chunkAt(0)).state, 'committed');
+  assert.equal(model.receivedBytes, data.length);
+  model.bindingRevision = 999n;
+  const receipt = model.respond(materialResponse);
+  assert.equal(receipt.state, 'received', 'unrelated binding ACK revision cannot poison request-local CAS');
+  assert.deepEqual(model.respond(copy(materialResponse)), receipt); assert.equal(model.revision, 1n);
+  const changed = copy(materialResponse); changed.results[0].payload.uploadId = 'invented-upload';
+  assert.throws(() => model.respond(changed), /request_id_conflict/);
+  const competing = copy(materialResponse); competing.request.requestId = 'other-response';
+  assert.throws(() => model.respond(competing), /material_rejected/);
+  assert.throws(() => new MaterialContractModel(saved, data.length - 1), /capacity_exceeded/);
+  assert.throws(() => new MaterialContractModel({ ...saved, chunkBytes: 1 }), /capacity_exceeded/, 'smaller negotiated slot width cannot produce unbounded status offsets');
+  saved.requestedRecords[0].payload.bytes = 1048577;
+  assert.throws(() => new MaterialContractModel(saved), /capacity_exceeded/);
+});
+
+test('SDK2-01b: material whole SHA, request identity, source generation and deadline are mandatory', () => {
+  const wrong = new MaterialContractModel();
+  assert.throws(() => wrong.upload({ ...uploadChunk, base64: 'e30=', chunkSha256: hash('{}') }), /material_rejected/);
+  assert.equal(wrong.state, 'rejected', 'a self-consistent chunk SHA cannot replace the saved whole artifact SHA');
+  for (const modify of [
+    body => { body.materialRequestId = 'unsolicited'; }, body => { body.sourceGeneration = 'old-source'; },
+    body => { body.target.generations.projectionRevision = '99'; }, body => { body.sourceId = 'other-source'; },
+  ]) {
+    const model = new MaterialContractModel(); const body = copy(uploadChunk); modify(body);
+    assert.throws(() => model.upload(body), /forbidden|stale_generation/); assert.equal(model.uploads.size, 0);
+  }
+  const model = new MaterialContractModel(); model.upload(uploadChunk);
+  model.nowMs = 29999; assert.equal(model.uploadStatus(uploadChunk).state, 'committed');
+  model.nowMs = 30000;
+  assert.throws(() => model.respond(materialResponse), /request_expired/);
+  assert.throws(() => model.upload(copy(uploadChunk)), /request_expired/);
+  assert.throws(() => model.uploadStatus(uploadChunk), /request_expired/);
+  assert.equal(model.deadlineMs, 30000, 'status and retransmission cannot renew request lifetime');
+  const noUpload = new MaterialContractModel();
+  assert.throws(() => noUpload.uploadStatus(uploadChunk), /source_unavailable/); assert.equal(noUpload.uploads.size, 0);
+  const otherRequest = new MaterialContractModel({ ...materialRequest, materialRequestId: 'material-2' });
+  const reply = copy(materialResponse); reply.materialRequestId = 'material-2';
+  assert.throws(() => otherRequest.respond(reply), /material_rejected/, 'foreign committed upload ID is not a transferable capability');
+});
+
+test('SDK2-01b: response versus timeout, revoke and close uses one request CAS and core leases block release', () => {
+  for (const reason of ['request_expired', 'forbidden', 'binding_closed']) {
+    const first = new MaterialContractModel(); first.upload(uploadChunk);
+    first.terminate(reason);
+    assert.throws(() => first.respond(materialResponse), /material_rejected|forbidden|binding_closed/);
+    assert.equal(first.receipts.size, 0, 'losing response did not commit a receipt');
+    const responseFirst = new MaterialContractModel(); responseFirst.upload(uploadChunk);
+    const receipt = responseFirst.respond(materialResponse);
+    responseFirst.acknowledged = true;
+    assert.equal(responseFirst.canRelease(), false, 'received/core-queued is not releasable');
+    responseFirst.acquireCore();
+    responseFirst.terminate(reason);
+    assert.equal(responseFirst.canRelease(), false, 'timeout/revoke/close cannot free bytes held by core');
+    assert.deepEqual([...responseFirst.receipts.values()][0].receipt, receipt, 'late termination does not rewrite admitted response history');
+    responseFirst.releaseCore();
+    if (reason === 'request_expired') {
+      assert.equal(responseFirst.state, 'received', 'intake timeout cannot undo accepted CAS');
+      responseFirst.state = 'core-consumed';
+    }
+    assert.equal(responseFirst.canRelease(), true);
+    assert.equal(responseFirst.revision, reason === 'request_expired' ? 1n : 2n);
+  }
+  const drift = new MaterialContractModel(); drift.upload(uploadChunk);
+  drift.currentTarget.generations.deletionGeneration = '1';
+  assert.throws(() => drift.respond(materialResponse), /stale_generation/);
+  assert.equal(drift.state, 'pending');
+});
+
+test('SDK2-01b: regression detector exposes legacy close receipt immortality after the final ACK', () => {
+  const run = legacyBug => {
+    const model = new BindingContractModel(); model.mutate(close, 'binding-close');
+    if (legacyBug) model.receipts.get(model.key(close, 'binding-close')).pending = true;
+    const finalAck = copy(ack); finalAck.request.requestId = 'last'; finalAck.expectedRevision = '1';
+    finalAck.coverage.throughSequence = '3'; finalAck.coverage.headDigest = hash('head-3');
+    model.mutate(finalAck, 'archive-ack');
+    model.nowMs = model.epochExpiresAtMs + model.terminalReceiptRetentionMs + 1;
+    model.collectTerminalReceipts(); return model;
+  };
+  assert.throws(() => assert.equal(run(true).receipts.size, 0), /1 !== 0/, 'old pending-from-closing logic fails the GC acceptance');
+  assert.equal(run(false).receipts.size, 0);
+  assert.equal(run(false).state, 'closed');
+});
+
+test('SDK2-01b: review A rejects short request expiry from its original issuance time', () => {
+  const short = { ...materialRequest, remainingTtlMs: 1000 };
+  const legacy = new MaterialContractModel(short); legacy.deadlineMs = 30000; legacy.nowMs = 1001;
+  assert.throws(() => assert.throws(() => legacy.upload(uploadChunk), /request_expired/), /Missing expected exception/,
+    'the historical hard-coded deadline fails the short-TTL acceptance');
+  const fixed = new MaterialContractModel(short); fixed.nowMs = 1001;
+  assert.throws(() => fixed.upload(uploadChunk), /request_expired/); assert.equal(fixed.uploads.size, 0);
+  const shifted = new MaterialContractModel(short, limits.materialBytes, 5000);
+  shifted.nowMs = 5999; shifted.upload(uploadChunk);
+  shifted.nowMs = 6000;
+  assert.throws(() => shifted.uploadStatus(uploadChunk), /request_expired/);
+  assert.throws(() => shifted.respond(materialResponse), /request_expired/);
+  assert.equal(shifted.deadlineMs, 6000, 'reads and writes never reset original lifetime');
+});
+
+test('SDK2-01b: review B validates live target, auth and source atomically with each new core lease', () => {
+  const prepared = () => { const model = new MaterialContractModel(); model.upload(uploadChunk); model.respond(materialResponse); return model; };
+  const legacy = prepared(); legacy.currentTarget.generations.deletionGeneration = '1';
+  legacy.checkCurrent = () => {};
+  assert.throws(() => assert.throws(() => legacy.acquireCore(), /stale_generation/), /Missing expected exception/,
+    'the historical core admission without a live witness check fails acceptance');
+  for (const change of [
+    model => { model.currentTarget.generations.deletionGeneration = '1'; },
+    model => { model.currentTarget.generations.historyEpoch = 'restored-history'; },
+    model => { model.currentTarget.generations.projectionRevision = '2'; },
+    model => { model.currentSourceGeneration = 'source-restarted'; },
+    model => { model.currentSourceId = 'other-source'; },
+    model => { model.authorized = false; },
+  ]) {
+    const fixed = prepared(); fixed.acknowledged = true; fixed.acquireCore();
+    change(fixed);
+    assert.throws(() => fixed.acquireCore(), /stale_generation|forbidden/);
+    assert.equal(fixed.coreHolds, 1, 'failed admission adds no lease and preserves the already-held bytes');
+    fixed.terminate('material_rejected');
+    assert.equal(fixed.canRelease(), false);
+    fixed.releaseCore(); assert.equal(fixed.canRelease(), true);
+  }
+});
+
+test('SDK2-01b: review C gates new material operations by epoch and preserves admitted receipt recovery', () => {
+  const unknown = copy(materialResponse); unknown.request.operationEpoch = 'unknown';
+  const legacy = new MaterialContractModel(); legacy.upload(uploadChunk); legacy.checkNewEpoch = () => {};
+  assert.throws(() => assert.throws(() => legacy.respond(unknown), /receipt_expired/), /Missing expected exception/,
+    'the historical response path without the common epoch gate fails acceptance');
+  const fixed = new MaterialContractModel(); fixed.upload(uploadChunk);
+  assert.throws(() => fixed.respond(unknown), /receipt_expired/);
+  assert.equal(fixed.state, 'pending'); assert.equal(fixed.receipts.size, 0);
+  const first = fixed.respond(materialResponse); fixed.retired = true;
+  assert.deepEqual(fixed.respond(copy(materialResponse)), first);
+  assert.deepEqual(fixed.queryResponse(materialResponse), first);
+  const changed = copy(materialResponse); changed.results[0].digest = hash('other-result');
+  assert.throws(() => fixed.respond(changed), /request_id_conflict/, 'same ID compares original semantics before fresh-admission checks');
+  const fresh = copy(materialResponse); fresh.request.requestId = 'new-after-retirement';
+  assert.throws(() => fixed.respond(fresh), /receipt_expired/);
+  assert.throws(() => fixed.queryResponse(fresh), /receipt_expired/);
+  fixed.retired = false; fixed.nowMs = fixed.epochExpiresAtMs;
+  assert.throws(() => fixed.respond(fresh), /receipt_expired/);
+  assert.deepEqual(fixed.queryResponse(materialResponse), first, 'epoch lifetime does not hide an existing admitted receipt');
+  fixed.authorized = false;
+  assert.throws(() => fixed.respond(materialResponse), /forbidden/);
+  assert.throws(() => fixed.queryResponse(materialResponse), /forbidden/);
+});

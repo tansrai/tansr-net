@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Tansr.Sdk/Tansr.Sdk.csproj" />
+    <Project Path="src/Tansr.Sdk.Windows/Tansr.Sdk.Windows.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Tansr.Sdk.Tests/Tansr.Sdk.Tests.csproj" />
+    <Project Path="tests/Tansr.Sdk.Windows.Tests/Tansr.Sdk.Windows.Tests.csproj" />
+    <Project Path="tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj" />
+  </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/WpfAssistant/WpfAssistant.csproj" />
+    <Project Path="examples/WinFormsAssistant/WinFormsAssistant.csproj" />
+    <Project Path="examples/ConsoleAssistant/ConsoleAssistant.csproj" />
+  </Folder>
+</Solution>
