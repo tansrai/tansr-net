@@ -231,3 +231,5 @@ SDK 核心包462595字节，SHA256 `51abcca685b14da2256929ab55922d70f8983c58ba98
 本批典型来源观察不替代 NET-A07 的完整切模、失败回滚、活动轮快照及提示词变更矩阵。**工程完整关闭0/6，剩6，本批新增0，0%；完整验收2/24（A03/A06），剩22，本批新增0，8.3%。** 原16组完整对照仍待实结。完整记忆出版链、扩展装配、真实媒体与原生 UI 对照继续归原卡。
 
 最终源码提交、格式、两包消费、主线收编与归档校验见本批 `closure-manifest.json`；阶段已通过结果不等于已发布。NET 仓没有 remote，不声明远端推送或 NuGet 发布。
+
+本批最终产品提交 `2b8b269cef9fb1f71735e0e0966824772ee22733`；两包程序集信息版本均指向此提交。格式 verify-no-changes exit0，两包 `pack` exit0，隔离本地源下 net48/CLR4、net10 Windows 和 win-x64 NativeAOT 实际执行均通过，见 `format-verify.log`、`pack-core.log`、`pack-windows.log`、`package-consumption.log`。SDK 核心包465131字节，SHA256 `ddfe6d2cee794851da99bbdba5d490307f7029400e3af70541771feac42cd86a`；Windows包275907字节，SHA256 `f4afe81ff75e4d0573f1730073ac30cb582f9fcb9897a28d0425f67f41201f6b`。包消费证明兼容加载、原工具和AOT入口，新增来源方法的实际行为由83项元信息回归与真实Serve链证明，不把包内其他入口的烟测冒充新API真实调用。
