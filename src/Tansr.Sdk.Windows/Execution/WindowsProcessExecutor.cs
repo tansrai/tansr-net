@@ -86,6 +86,7 @@ public sealed class WindowsProcessExecutor
 
         try
         {
+            options.Started?.Invoke(process.ProcessId!.Value);
             while (true)
             {
                 var status = NativeProcessMethods.WaitForSingleObject(process.Process!, 0);
@@ -306,6 +307,9 @@ public sealed class WindowsProcessExecutor
             MaxOutputBytes = request.MaxOutputBytes;
             ChunkBytes = request.ChunkBytes;
             MaxPendingChunks = request.MaxPendingChunks;
+            Started = request.Started;
+            DrainAfterOutputLimit = request.DrainAfterOutputLimit;
+            OutputTruncated = request.OutputTruncated;
         }
 
         internal string Executable { get; }
@@ -317,6 +321,9 @@ public sealed class WindowsProcessExecutor
         internal int MaxOutputBytes { get; }
         internal int ChunkBytes { get; }
         internal int MaxPendingChunks { get; }
+        internal Action<int>? Started { get; }
+        internal bool DrainAfterOutputLimit { get; }
+        internal Action? OutputTruncated { get; }
     }
 
     private sealed class OutputCapture : IDisposable
@@ -336,6 +343,7 @@ public sealed class WindowsProcessExecutor
         private int? nativeError;
         private bool complete;
         private bool deliveryFailed;
+        private bool outputTruncated;
         private Task lastCallback = Task.CompletedTask;
 
         internal OutputCapture(ExecutionOptions options, bool queueEnabled)
@@ -420,7 +428,9 @@ public sealed class WindowsProcessExecutor
                 var accepted = Math.Min(available, size);
                 if (accepted < size)
                 {
-                    stopped ??= WindowsProcessTermination.OutputLimitExceeded;
+                    if (!outputTruncated) options.OutputTruncated?.Invoke();
+                    outputTruncated = true;
+                    if (!options.DrainAfterOutputLimit) stopped ??= WindowsProcessTermination.OutputLimitExceeded;
                 }
 
                 var destination = stream == WindowsProcessOutputStream.StandardOutput ? stdout : stderr;
@@ -434,7 +444,8 @@ public sealed class WindowsProcessExecutor
                     var chunk = new WindowsProcessOutputChunk(++sequence, stream, offset, buffer, accepted, new string(characters, 0, count));
                     if (!queue.TryAdd(chunk))
                     {
-                        stopped ??= WindowsProcessTermination.OutputBackpressure;
+                        options.OutputTruncated?.Invoke();
+                        if (!options.DrainAfterOutputLimit) stopped ??= WindowsProcessTermination.OutputBackpressure;
                         deliveryFailed = true;
                     }
                 }
@@ -489,7 +500,7 @@ public sealed class WindowsProcessExecutor
             lock (gate)
             {
                 return new WindowsProcessResult(termination, requested, processId, exitCode, true, cleanupConfirmed,
-                    pumpsComplete && !stopped.HasValue && !deliveryFailed,
+                    pumpsComplete && !stopped.HasValue && !deliveryFailed && !outputTruncated,
                     Utf8.GetString(stdout.ToArray()), Utf8.GetString(stderr.ToArray()), observed, error,
                     consumerComplete && lastCallback.IsCompleted);
             }

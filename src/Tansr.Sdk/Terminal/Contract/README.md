@@ -1,8 +1,8 @@
 # 内部终端候选消费者
 
-此处是 Serve 单写候选 `2026-09-26.candidate-4` 的原字节快照，SHA256 固定为 `5973fde3f029f9c92794cde385e4041a150de0ace476bb2f6ff2c63c2a166dd0`；来源修订、每个文件哈希见 `manifest.json`。原 `contract/` SDK2 镜像与共享 Protocol 未改。运行时自动核嵌入 schema 的 SHA；`node src/Tansr.Sdk/Terminal/Contract/check-candidate.mjs --source-root <Serve源码目录>` 同时核当前候选源是否漂移，默认仅核独立仓内快照。
+此处是 Serve 单写候选 `2026-09-26.candidate-7` 的原字节快照，SHA256 固定为 `8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896`；来源修订、每个文件哈希见 `manifest.json`。原 `contract/` SDK2 镜像与共享 Protocol 未改。运行时自动核嵌入 schema 的 SHA；`node src/Tansr.Sdk/Terminal/Contract/check-candidate.mjs --source-root <Serve源码目录>` 同时核当前候选源是否漂移，默认仅核独立仓内快照。
 
-所有消费者类型均为 internal：候选 client 负责精确发现/能力绑定/原 Scope 和 operation 校核；输出 producer 负责有界采集、批次、原块对账与封口；observer 负责每通道 UTF-8、原始字节、重复块、缺口和封口校验。输出完成与进程成功分开。网络未知不重做命令，accepted 不当 durable。
+原始候选 schema、校验器与 transport 保持 internal；公开终端装配只以显式启用的 preview 提供，稳定 RFC 会签仍未完成。候选 client 负责精确发现/能力绑定/原 Scope 和 operation 校核；输出 producer 负责有界采集、批次、原块对账与封口；observer 负责每通道 UTF-8、原始字节、重复块、缺口和封口校验。输出完成与进程成功分开。网络未知不重做命令，accepted 不当 durable。
 
 `TerminalCandidateHttpTransport` 消费 Serve candidate-3 已写入源码的发现、绑定、输出批、状态和两类 SSE 路由；精确路由来源保留在 reference-terminal-routes.ts.txt。每次请求重新取票并守卫原身份，输出 SSE 使用 afterSeq，执行器通知使用 Last-Event-ID，不互换。断流显式失败，控制写入不自动重试。Discovery 的授权/设备未确认状态交由真实 Binding 裁决，不以未确认代替拒绝或旧端降级。候选3虽含 Configuration 定义，本消费者只校验对应共享向量，没有添加配置产品操作。
 
@@ -10,6 +10,10 @@
 
 candidate-4 新增原 operation 的窄 ExecutionState GET 已接内部适配；执行状态继续复用冻结 SDK2 的 operation/receipt/digest 校验。背景 typed tool.invoke 和 Memory 定义虽在候选快照里，其产品宿主还未接入本消费者，不据此宣称能力已安装。
 
-manifest 的 sourceCommitted=false、sourceWorktreeSnapshot=true 明确候选来自上游未提交工作区；sourceBaseCommit 仅记录该工作树基线，不声称该提交树已含候选。每个快照的原字节 SHA 是实际消费来源，校验器同时核对来源标记。生产公开接线、候选冻结、真实 Serve 新路由联验、跨进程原文耐久恢复及完整背景任务/记忆协议仍是原父卡未完项。
+manifest 的 sourceCommitted=false、sourceWorktreeSnapshot=true 明确候选来自上游未提交工作区；sourceBaseCommit 仅记录该工作树基线，不声称该提交树已含候选。每个快照的原字节 SHA 是实际消费来源，校验器同时核对来源标记。公开 preview 的真实接线、完整行为验收、稳定 RFC 会签与跨进程恢复仍按原父卡结算；快照固定不表示稳定发布。
 
 Producer 原文内存最多遵循 maxRetainedBytes（8 MiB 上限）及 4096 块；未确认队列受 maxPendingBytes（2 MiB 上限）限制。任何帽达到后停止捕获并固定截断，后续原生管道仍须排空，丢弃字节不推进 seq/offset。原文保留不是耐久证明，Dispose/进程退出后不能假装仍可恢复。Observer 丢失解码状态或窗口缺口时保留原字节、重置两通道并显式呈现缺口。
+
+本轮会签锁定 candidate-7，并单独镜像 ACK 恢复合同 `sdk2-archive-recovery-v1`（SHA256 `f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4`）。20份原字节快照含 schema、golden、生成端及真实路由/语义源；不是已提交源的声明。恢复封套请求上限为原 controlBytes + 1024，响应为 2 × controlBytes + 4096，旧 ACK 和旧错误帽不变。
+
+`EmbeddedWireContract` 复用原有界 schema matcher，加载时核资源 SHA 和复制 SDK2 定义。具名结构入口允许原工具正文的负 int32 exitCode；HTTP 控制读取仍严格走非负安全整数、规范 UTF-8 JSON。两套入口不混用，不放宽原 SDK2 编码器。Background 与 MemoryPublication 的 profile 名称/definitionDigest 逐字对应生成源，由同一候选常量提供。

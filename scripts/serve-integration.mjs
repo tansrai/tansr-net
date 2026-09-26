@@ -1,6 +1,6 @@
 // Reproducible acceptance fixture, never a product Serve launcher.
-// Runs the real source HTTP/SSE router with FakeAgentFactory: no model/provider,
-// no platform credentials, no paid sampling, no claim of real-kernel parity.
+// Runs the real source HTTP/SSE router: legacy transport uses FakeAgentFactory; the
+// public assembly uses the real kernel with a controlled synthetic upstream, never paid sampling.
 import assert from 'node:assert/strict';
 import { fork, spawn, execFileSync } from 'node:child_process';
 import { randomBytes, timingSafeEqual, createHash } from 'node:crypto';
@@ -8,6 +8,7 @@ import { existsSync, readFileSync, realpathSync, mkdirSync, mkdtempSync, writeFi
 import { dirname, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { verifyServeSourceSnapshot } from './serve-source-snapshot.mjs';
 
 const script = fileURLToPath(import.meta.url);
 const repository = resolve(dirname(script), '..');
@@ -59,8 +60,10 @@ function sourceEvidence() {
   const paths = ['packages/server/test/v2-helpers.ts', 'packages/server/test/helpers.ts', 'packages/server/test/fake-platform-fetch.ts', 'doc/rfc/sdk2-ext-v1.schema.json',
     ...Array.from(packages.keys()).flatMap(name => [`packages/${name}/src`, `packages/${name}/package.json`])];
   const dirty = execFileSync('git', ['status', '--porcelain', '--', ...paths], { cwd: source, encoding: 'utf8', windowsHide: true }).trim();
-  assert.equal(dirty, '', 'Use a clean source snapshot for reproducible Serve acceptance. Commit/choose that source separately.');
-  return { revision, sourceEntrySha256: sha(sourceFile('packages/server/src/index.ts')),
+  const candidate = process.env.TANSR_SERVE_SOURCE_SNAPSHOT
+    ? verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT) : null;
+  if (!candidate) assert.equal(dirty, '', 'Use a clean source snapshot for reproducible Serve acceptance. Commit/choose that source separately.');
+  return { revision, ...(candidate ?? { sourceCommitted: true }), sourceEntrySha256: sha(sourceFile('packages/server/src/index.ts')),
     sourceFixtureSha256: sha(sourceFile('packages/server/test/v2-helpers.ts')), sourceResolutions: resolutions.length,
     publicFixtureSha256: sha(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')),
     syntheticPlatformSha256: sha(sourceFile('packages/server/test/fake-platform-fetch.ts')),
@@ -150,7 +153,11 @@ async function fixture() {
     return null;
   };
   const { startPublicFixture } = await import(pathToFileURL(resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/ServePublicFixture.mjs')).href);
-  const publicFixture = await startPublicFixture({ source, directory: required('TANSR_SERVE_TEST_DIRECTORY'), authenticate });
+  let publicFixture;
+  try {
+    publicFixture = await startPublicFixture({ source, directory: required('TANSR_SERVE_TEST_DIRECTORY'), authenticate,
+      candidate: Boolean(process.env.TANSR_SERVE_SOURCE_SNAPSHOT) });
+  } catch (error) { await server.close(); throw error; }
   let closing;
   const close = () => closing ??= (async () => { await server.close(); return await publicFixture.close(); })();
   process.on('message', async message => {
@@ -219,7 +226,7 @@ async function run() {
           assert.equal(result.interrupts, 0, 'Observation cancellation unexpectedly interrupted the controlled session.');
           assert.ok(result.requests.some(r => r.path.endsWith('/events') && r.lastEventId === '0'), 'Last-Event-ID did not reach Serve.');
           assert.ok(result.requests.every(r => r.path.startsWith('/v2/')), 'SDK1 default escaped the original session family.');
-          assert.equal(result.publicEvidence.exchanges, 3, 'Real kernel/device/material flow did not run.');
+          assert.equal(result.publicEvidence.exchanges, process.env.TANSR_SERVE_SOURCE_SNAPSHOT ? 4 : 3, 'Real kernel/device/material flow did not run.');
           for (const suffix of ['/initialize', '/execution-bindings', '/receipts', '/archive/records', '/archive/acks', '/material-responses'])
             assert.ok(result.publicEvidence.routes.some(path => path.endsWith(suffix)), `Missing public product route: ${suffix}`);
         }
@@ -230,6 +237,7 @@ async function run() {
           .map(path => [path, routes.filter(actual => actual.replace(/\/[0-9a-f]{8}-[0-9a-f-]{27,}/g, '/:id').replace(/\/jr-p-[a-f0-9]+/g, '/:artifact') === path).length]));
         console.log(JSON.stringify({ acceptance: 'public-Serve-kernel-device-archive', model: result.publicEvidence.model,
           exchanges: result.publicEvidence.exchanges, realKernel: true, authorizationChecksByRoute: routeCounts, directory, passed: exitCode === 0 }));
+        if (process.env.TANSR_SERVE_SOURCE_SNAPSHOT) verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT);
         writeFileSync(resolve(directory, 'result.json'), JSON.stringify({ source: evidence, passed: exitCode === 0,
           legacy: { sessions: result.sessions, sends: result.sends, interrupts: result.interrupts, requests: result.requests.length },
           public: { ...result.publicEvidence, authorizationChecksByRoute: routeCounts } }, null, 2));

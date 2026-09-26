@@ -8,6 +8,7 @@ using Tansr.Sdk.Hosting;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Storage;
+using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
 using Tansr.Sdk.Windows.Security;
@@ -18,7 +19,7 @@ namespace Tansr.Sdk.IntegrationTests;
 
 /// <summary>Public .NET composition against a public Serve archive host with real kernel/SQLite.
 /// Only the upstream platform/model is controlled; no paid sampling or fabricated wire receipts.</summary>
-public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
+public sealed partial class ServePublicHostIntegrationTests(ITestOutputHelper output)
 {
     private static string Required(string name) => Environment.GetEnvironmentVariable(name) ?? throw new InvalidOperationException(name + " is required; use scripts/serve-integration.mjs.");
     private static JsonElement Json(object value) => JsonSerializer.SerializeToElement(value);
@@ -34,7 +35,10 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
         var work = Path.Combine(directory, "workspace"); Directory.CreateDirectory(work);
         const string expected = "NET_DEVICE_NOTE_7319 · 中文 café 👩🏽‍💻";
         await File.WriteAllTextAsync(Path.Combine(work, "note.txt"), expected, new UTF8Encoding(false), ct);
-        using var client = new TansrClient(new TansrClientOptions
+        var candidate = Environment.GetEnvironmentVariable("TANSR_SERVE_SOURCE_SNAPSHOT") is not null;
+        using var lostAck = new LostResponseHandler("/archive/acks");
+        using var http = new HttpClient(lostAck);
+        var clientOptions = new TansrClientOptions
         {
             BaseUri = origin,
             AllowInsecureLoopback = true,
@@ -44,8 +48,9 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
             RequestTimeout = TimeSpan.FromSeconds(10),
             StreamIdleTimeout = TimeSpan.FromSeconds(15),
             MaxReconnectAttempts = 0
-        });
-        var session = await client.CreateSessionAsync(new CreateSessionOptions { Tools = ["Read"] }, ct);
+        };
+        using var client = new TansrClient(clientOptions, http);
+        var session = await client.CreateSessionAsync(new CreateSessionOptions { Tools = candidate ? ["Read", "SearchMemory"] : ["Read"] }, ct);
         using var workspace = new WindowsWorkspace(work);
         using var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
         {
@@ -68,6 +73,7 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
         try
         {
             await host.StartAsync(ct); Assert.Equal(DeviceSessionState.Ready, host.State);
+            if (candidate) await VerifyTerminalControlAsync(client, session.Id, ct);
             int permissions = 0; var businessEvents = new ConcurrentQueue<AgentEvent>();
             var result = await session.SendAndObserveAsync("Read the original device note once.", new SessionRunOptions { Timeout = TimeSpan.FromSeconds(30) }, async (item, token) =>
             {
@@ -122,9 +128,10 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
             {
                 var transfer = new ArchiveTransferSession(archive, store, identity, () => Scope,
                     current => Json(new { operationEpoch = current.GetProperty("operationEpoch").GetProperty("id").GetString(), requestId = "net-original-archive-ack" }));
-                var received = await transfer.PullAsync(2, ct);
-                Assert.Equal(1, received.ArchivedRecords); Assert.True(received.Complete); Assert.Single(received.Receipts);
-                Assert.Null(await store.PendingAsync(ct));
+                var lost = await Assert.ThrowsAnyAsync<TansrException>(() => transfer.PullAsync(2, ct));
+                Assert.Equal("network_error", lost.Code); Assert.Equal(1, lostAck.LostResponseCount);
+                var pending = await store.PendingAsync(ct); Assert.NotNull(pending);
+                Assert.Equal(WireJson.CanonicalString(lostAck.LostRequest!.Value), WireJson.CanonicalString(pending.Value));
                 var page = await store.ReadRecordsAsync(new ArchiveReadRequest { Identity = identity, Selection = Json(new { fromSequence = "1", throughSequence = "1" }) }, ct);
                 var record = Assert.Single(page.Records);
                 var body = await store.BodyAsync(record.GetProperty("payload"), ct);
@@ -135,11 +142,20 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
             settings.KeyProvider = CurrentUserDpapiArchiveKeyProvider.Open(Path.Combine(directory, "archive-key.json"), "integration-key");
             using (var reopened = await SqliteArchiveStore.OpenAsync(settings, ct))
             {
+                var original = (await reopened.PendingAsync(ct))!.Value;
+                using var recoveredClient = new TansrClient(clientOptions, http);
+                var recoveredArchive = new ArchiveClient(recoveredClient); await recoveredArchive.GetCapabilitiesAsync(ct);
+                await VerifyForeignAckQueryRejectedAsync(origin, original, ct);
+                var recovery = new ArchiveTransferSession(recoveredArchive, reopened, identity, () => Scope,
+                    _ => throw new InvalidOperationException("Original receipt recovery must not generate a new key."));
+                var confirmed = await recovery.RecoverPendingAsync(false, ct);
+                Assert.Equal(WireJson.CanonicalString(lostAck.LostReceipt!.Value), WireJson.CanonicalString(confirmed!.Value));
+                Assert.Single(lostAck.Requests, request => request.Method == "POST" && request.Path.EndsWith("/archive/acks", StringComparison.Ordinal));
                 Assert.Null(await reopened.PendingAsync(ct)); Assert.Equal("1", (await reopened.HeadAsync(ct))!.Value.GetProperty("sequence").GetString());
                 // Trusted host explicitly requests a retained original record. The test IPC only
                 // controls host lifecycle; .NET receives material.request through the real SSE.
                 var page = await reopened.ReadRecordsAsync(new ArchiveReadRequest { Identity = identity, Selection = Json(new { fromSequence = "1", throughSequence = "1" }) }, ct);
-                var original = Assert.Single(page.Records);
+                var originalRecord = Assert.Single(page.Records);
                 using var outbox = await SqliteMaterialResponseOutbox.OpenAsync(new SqliteMaterialResponseOutboxOptions
                 { Path = Path.Combine(directory, "material-outbox.sqlite"), Mode = StorageOpenMode.Create, Identity = identity, ReadContext = () => Scope }, ct);
                 binding = await archive.GetBindingAsync(bindingId, ct);
@@ -171,9 +187,9 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
                         id = "net-material-request",
                         action = "materials",
                         sessionId = session.Id,
-                        recordIds = new[] { original.GetProperty("recordId").GetString() }
+                        recordIds = new[] { originalRecord.GetProperty("recordId").GetString() }
                     }, ct);
-                    Assert.Equal(original.GetProperty("recordId").GetString(), issued.GetProperty("requestedRecords")[0].GetProperty("recordId").GetString());
+                    Assert.Equal(originalRecord.GetProperty("recordId").GetString(), issued.GetProperty("requestedRecords")[0].GetProperty("recordId").GetString());
                     var returned = await delivered.Task.WaitAsync(ct);
                     Assert.Equal("received", returned.Receipt.GetProperty("state").GetString());
                     Assert.Null(await outbox.ReadAsync(ct)); Assert.Single(returned.Availability!.AvailableRecordIds);
@@ -195,6 +211,7 @@ public sealed class ServePublicHostIntegrationTests(ITestOutputHelper output)
         }
         finally { await host.StopAsync(); }
         await session.CloseAsync(ct);
+        if (candidate) await VerifyRebaseRecoveryAsync(origin, directory, ct);
     }
 
     private static async Task<JsonElement> HostCommandAsync(object command, CancellationToken cancellationToken)

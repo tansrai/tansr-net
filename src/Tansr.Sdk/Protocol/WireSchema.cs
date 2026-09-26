@@ -13,13 +13,17 @@ internal static class WireSchema
     private static readonly JsonElement Definitions = Load();
     private static readonly TimeSpan RegexTimeout = TimeSpan.FromSeconds(1);
 
-    internal static void ValidateNamed(string name, JsonElement value)
+    internal static JsonElement Definition(string name) => Definitions.GetProperty(name);
+
+    internal static void ValidateNamed(string name, JsonElement value) => ValidateNamed(name, value, Definitions);
+
+    internal static void ValidateNamed(string name, JsonElement value, JsonElement definitions)
     {
         try
         {
             var budget = 1000000;
-            if (name == null || !Definitions.TryGetProperty(name, out var schema) ||
-                !Matches(value, schema, 0, ref budget) || !SequenceBound(name, value))
+            if (name == null || !definitions.TryGetProperty(name, out var schema) ||
+                !Matches(value, schema, definitions, 0, ref budget) || !SequenceBound(name, value))
             {
                 throw new WireProtocolException("invalid_response");
             }
@@ -46,7 +50,7 @@ internal static class WireSchema
         => (name != "Sequence" && name != "RecordSequence") ||
            (value.ValueKind == JsonValueKind.String && Sequence.TryParse(value.GetString(), out _));
 
-    private static bool Matches(JsonElement value, JsonElement schema, int depth, ref int budget)
+    private static bool Matches(JsonElement value, JsonElement schema, JsonElement definitions, int depth, ref int budget)
     {
         if (depth > 64 || --budget < 0) { return false; }
         if (schema.TryGetProperty("$ref", out var reference))
@@ -55,7 +59,7 @@ internal static class WireSchema
             const string prefix = "#/definitions/";
             if (!text.StartsWith(prefix, StringComparison.Ordinal)) { return false; }
             var name = text.Substring(prefix.Length);
-            if (!Definitions.TryGetProperty(name, out var target) || !Matches(value, target, depth + 1, ref budget) ||
+            if (!definitions.TryGetProperty(name, out var target) || !Matches(value, target, definitions, depth + 1, ref budget) ||
                 !SequenceBound(name, value)) { return false; }
         }
 
@@ -69,28 +73,28 @@ internal static class WireSchema
 
         if (schema.TryGetProperty("allOf", out var all))
         {
-            foreach (var child in all.EnumerateArray()) { if (!Matches(value, child, depth + 1, ref budget)) { return false; } }
+            foreach (var child in all.EnumerateArray()) { if (!Matches(value, child, definitions, depth + 1, ref budget)) { return false; } }
         }
 
         if (schema.TryGetProperty("anyOf", out var any))
         {
             var found = false;
-            foreach (var child in any.EnumerateArray()) { if (Matches(value, child, depth + 1, ref budget)) { found = true; break; } }
+            foreach (var child in any.EnumerateArray()) { if (Matches(value, child, definitions, depth + 1, ref budget)) { found = true; break; } }
             if (!found) { return false; }
         }
 
         if (schema.TryGetProperty("oneOf", out var one))
         {
             var count = 0;
-            foreach (var child in one.EnumerateArray()) { if (Matches(value, child, depth + 1, ref budget)) { count++; } }
+            foreach (var child in one.EnumerateArray()) { if (Matches(value, child, definitions, depth + 1, ref budget)) { count++; } }
             if (count != 1) { return false; }
         }
 
-        if (schema.TryGetProperty("not", out var not) && Matches(value, not, depth + 1, ref budget)) { return false; }
+        if (schema.TryGetProperty("not", out var not) && Matches(value, not, definitions, depth + 1, ref budget)) { return false; }
         if (schema.TryGetProperty("if", out var condition))
         {
-            var branch = Matches(value, condition, depth + 1, ref budget) ? "then" : "else";
-            if (schema.TryGetProperty(branch, out var child) && !Matches(value, child, depth + 1, ref budget)) { return false; }
+            var branch = Matches(value, condition, definitions, depth + 1, ref budget) ? "then" : "else";
+            if (schema.TryGetProperty(branch, out var child) && !Matches(value, child, definitions, depth + 1, ref budget)) { return false; }
         }
 
         if (schema.TryGetProperty("type", out var type) && !TypeMatches(value, type.GetString()!)) { return false; }
@@ -116,13 +120,13 @@ internal static class WireSchema
             if (!Within(schema, "minItems", "maxItems", value.GetArrayLength())) { return false; }
             if (schema.TryGetProperty("items", out var itemSchema))
             {
-                foreach (var item in value.EnumerateArray()) { if (!Matches(item, itemSchema, depth + 1, ref budget)) { return false; } }
+                foreach (var item in value.EnumerateArray()) { if (!Matches(item, itemSchema, definitions, depth + 1, ref budget)) { return false; } }
             }
 
             if (schema.TryGetProperty("contains", out var contains))
             {
                 var found = false;
-                foreach (var item in value.EnumerateArray()) { if (Matches(item, contains, depth + 1, ref budget)) { found = true; break; } }
+                foreach (var item in value.EnumerateArray()) { if (Matches(item, contains, definitions, depth + 1, ref budget)) { found = true; break; } }
                 if (!found) { return false; }
             }
 
@@ -143,7 +147,7 @@ internal static class WireSchema
                 if (!seen.Add(property.Name)) { return false; }
                 if (hasProperties && properties.TryGetProperty(property.Name, out var child))
                 {
-                    if (!Matches(property.Value, child, depth + 1, ref budget)) { return false; }
+                    if (!Matches(property.Value, child, definitions, depth + 1, ref budget)) { return false; }
                 }
                 else if (closed) { return false; }
             }

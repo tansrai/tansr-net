@@ -1,0 +1,538 @@
+/** SDK2 已建绑定的独立 HTTP 面。只消费可信宿主端口，不创建路径、会话、材料请求或执行工具。 */
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import { AuthenticationUnavailableError, type RequestAuthenticator } from '../auth.js';
+import { randomUUID } from 'node:crypto';
+import { types } from 'node:util';
+import { z } from 'zod';
+import {
+  decodeArchiveMetadata, encodeArchiveMetadata, hashArchiveRaw, ArchiveRecordJournalError, ArchiveSourceTransferError, MaterialSupplyError, SqliteSpoolError, EventStoreError,
+  type ArchiveBindingControl, type ArchiveGenerations, type SqliteArchiveRecordJournal,
+  type SqliteArchiveSourceAcknowledger, type SqliteArchiveSpool, type SqliteMaterialSupply,
+  type ArchiveBindingCreateRequest, type ArchiveBindingCloseRequest, type ArchiveBindingIdentity, type ArchiveBindingReceipt,
+} from '@tansr/kernel';
+import type { AdmissionController } from '../v2/admission.js';
+import type { AgentSessionsOptions } from '../v2/types.js';
+import { ArchiveHttpEventError, sendArchiveHttpEvents, type ArchiveHttpBindingEvents } from './archive-events.js';
+import { archiveRecoverySchema, SDK2_ACK_RECOVERY_LIMITS, type Sdk2AckRebaseRequest, type Sdk2AckRebaseReceipt } from './archive-recovery-contract.generated.js';
+
+const PROTOCOL = 'sdk2-ext-v1';
+const CONTROL_BYTES = 262144;
+// 原 ArtifactChunk schema 的完整 JSON 上界：固定字段、3 个 Id、最坏转义的 LegacyId、
+// 2 个 Seq、3 个整数、2 个 SHA256，以及 256KiB 正文的 base64；独立于控制请求帽。
+const ARTIFACT_RESPONSE_BYTES = 227 + 3 * 128 + 512 * 6 + 2 * 19 + 8 + 6 + 8 + 2 * 64 + 4 * Math.ceil(262144 / 3);
+const id = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._~-]*$/);
+const legacyId = z.string().min(1).refine(value => [...value].length <= 512);
+const seq = z.string().max(19).regex(/^(0|[1-9][0-9]*)$/).refine(value => /^(0|[1-9][0-9]{0,18})$/.test(value) && BigInt(value) <= 9223372036854775807n);
+const digest = z.string().regex(/^[a-f0-9]{64}$/);
+const generations = z.object({ historyEpoch: legacyId, deletionGeneration: seq, projectionRevision: seq }).strict();
+const target = z.object({ sessionId: legacyId, generations, sourceSnapshotDigest: digest }).strict();
+const identity = z.object({ operationEpoch: id, requestId: id }).strict();
+const common = { protocol: z.literal(PROTOCOL), bindingId: id };
+const integer = (min: number, max: number) => z.number().int().min(min).max(max);
+const artifactReceipt = z.object({ artifactId: id, sha256: digest, state: z.literal('durably-stored') }).strict();
+const ack = z.object({ ...common, request: identity, ackFormat: z.literal('split-receipts-v1'), expectedRevision: seq,
+  generations, sourceId: id, sourceGeneration: id,
+  coverage: z.object({ fromSequence: seq.refine(value => value !== '0'), throughSequence: seq.refine(value => value !== '0'), headDigest: digest }).strict(),
+  payloads: z.array(artifactReceipt).min(1).max(128), attachments: z.array(artifactReceipt).max(128) }).strict();
+const upload = z.object({ ...common, materialRequestId: id, target, sourceId: id, sourceGeneration: id,
+  artifactId: id, offset: integer(0, 1048576), bytes: integer(0, 65536), chunkSha256: digest,
+  base64: z.string().max(87384).regex(/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/) }).strict();
+const uploadRef = z.object({ uploadId: id }).strict();
+const response = z.object({ ...common, request: identity, materialRequestId: id, target, sourceId: id, sourceGeneration: id,
+  results: z.array(z.object({ recordId: id, digest, payload: uploadRef, attachments: z.array(uploadRef).max(128) }).strict()).min(1).max(32) }).strict();
+const capability = z.enum(['archive-transfer-v1', 'context-materials-v1']);
+const capabilities = (minimum: number) => z.array(capability).min(minimum).max(2).refine(values => new Set(values).size === values.length).readonly();
+const limits = z.object({
+  controlBytes: integer(1024, 262144), recordBytes: integer(1024, 262144), pageRecords: integer(1, 128), pageBytes: integer(1024, 1048576),
+  attachmentBytes: integer(1024, 33554432), chunkBytes: integer(1024, 262144), materialConcurrent: integer(1, 2), materialQueue: integer(1, 16),
+  materialCandidates: integer(1, 32), materialBytes: integer(1024, 1048576), materialDeadlineMs: integer(1000, 30000),
+  pendingRecords: integer(1, 4096), pendingBytes: integer(1048576, 67108864), inflightReserveBytes: integer(1048576, 16777216),
+  offlineMs: integer(1000, 86400000), eventRetentionMs: integer(1000, 600000), eventRetentionFrames: integer(1, 4096),
+  eventRetentionBytes: integer(1024, 8388608), terminalReceiptRetentionMs: integer(60000, 604800000), epochLifetimeMs: integer(60000, 86400000),
+  materialChunkBytes: integer(1, 65536),
+}).strict().refine(value => value.inflightReserveBytes <= value.pendingBytes);
+const epoch = z.object({ id, issuedAt: z.string().datetime({ offset: true }), expiresAt: z.string().datetime({ offset: true }), state: z.literal('active') })
+  .strict().refine(value => Date.parse(value.expiresAt) > Date.parse(value.issuedAt));
+const scope = z.object({ applicationScopeId: id, endUserId: legacyId, authorizationRevision: seq }).strict();
+const bindingState = z.enum(['active', 'backpressured', 'closing', 'closed']);
+const discovery = z.object({ protocol: z.literal(PROTOCOL), availability: z.literal('legacy-complete'), capabilities: capabilities(1), limits,
+  operationEpoch: epoch, archiveAckFormats: z.array(z.literal('split-receipts-v1')).max(1).readonly() }).strict()
+  .refine(value => value.archiveAckFormats.length === (value.capabilities.includes('archive-transfer-v1') ? 1 : 0));
+const bindingTarget = z.object({ protocol: z.literal(PROTOCOL), target, revision: seq, bindingId: id.nullable(), operationEpoch: epoch.nullable() }).strict();
+const bindingView = z.object({ ...common, scope, target, revision: seq, state: bindingState, sourceId: id,
+  acceptedCapabilities: capabilities(1), rejectedCapabilities: z.array(z.object({ capability, reason: z.enum(['unsupported_capability', 'not_authorized']) }).strict()).max(2).readonly(),
+  availability: z.literal('legacy-complete'), operationEpoch: epoch.nullable(), limits, archiveAckFormat: z.literal('split-receipts-v1').nullable() }).strict()
+  .refine(value => value.archiveAckFormat === (value.acceptedCapabilities.includes('archive-transfer-v1') ? 'split-receipts-v1' : null));
+const coverage = z.object({ fromSequence: seq.refine(value => value !== '0'), throughSequence: seq.refine(value => value !== '0'), headDigest: digest }).strict();
+const archiveStatus = z.object({ ...common, revision: seq, generations, sourceId: id, sourceGeneration: id,
+  publishedThroughSequence: seq.nullable(), acknowledgedCoverage: coverage.nullable(), releasableThroughSequence: seq.nullable(),
+  pendingBytes: integer(0, 67108864), pendingRecords: integer(0, 4096), sessionPersistence: z.literal('unchanged'), state: bindingState }).strict();
+const createBinding = z.object({ protocol: z.literal(PROTOCOL), request: identity, target, expectedRevision: seq,
+  requiredCapabilities: capabilities(1), optionalCapabilities: capabilities(0), archive: z.object({ strategy: z.literal('single-authorized-source'), sourceId: id,
+    durability: z.literal('source-ack-with-durable-spool'), delivery: z.literal('required'), sessionAvailability: z.literal('legacy-complete'), ackFormat: z.literal('split-receipts-v1') }).strict() }).strict()
+  .refine(value => value.requiredCapabilities.every(item => !value.optionalCapabilities.includes(item)));
+const closeBinding = z.object({ ...common, request: identity, expectedRevision: seq, generations }).strict();
+const mutationReceipt = z.object({ ...common, request: identity, operation: z.enum(['binding-create', 'archive-ack', 'binding-close']),
+  semanticDigest: digest, state: z.literal('completed'), revision: seq, outcomeRef: id }).strict();
+
+/** 包内宿主端口 DTO；原独立 wire 的局部镜像，不改变 SDK1 或新增公开协议。 */
+export type ArchiveHttpCapabilities = z.infer<typeof discovery>;
+export type ArchiveHttpBindingTarget = z.infer<typeof bindingTarget>;
+export type ArchiveHttpBindingView = z.infer<typeof bindingView>;
+export type ArchiveHttpArchiveStatus = z.infer<typeof archiveStatus>;
+type HostResult<T> = T | Promise<T>;
+export interface ArchiveHttpSession {
+  readTarget(): HostResult<ArchiveHttpBindingTarget>;
+  /** 真实原创建受理/安装管道；自动绑定宿主可仅支持原请求的精确重放。 */
+  create?(request: ArchiveBindingCreateRequest): HostResult<ArchiveHttpBindingView>;
+  queryCreate?(request: ArchiveBindingIdentity): HostResult<ArchiveBindingReceipt | null>;
+}
+
+const errorMap = {
+  invalid_request: [400, 'none'], protocol_version_mismatch: [400, 'none'], unauthorized: [401, 'none'],
+  forbidden: [403, 'none'], unsupported_capability: [422, 'none'], stale_generation: [409, 'none'],
+  archive_gap: [409, 'none'], source_unavailable: [503, 'query-status'], invalid_coverage: [422, 'none'],
+  capacity_exceeded: [429, 'same-request'], request_id_conflict: [409, 'none'], request_expired: [410, 'none'],
+  receipt_expired: [410, 'none'], payload_too_large: [413, 'none'], material_rejected: [422, 'none'],
+  binding_closed: [409, 'none'], internal_error: [500, 'query-status'], epoch_unavailable: [503, 'same-request'],
+  binding_conflict: [409, 'none'],
+  stream_cursor_unknown: [409, 'none'], stream_cursor_expired: [410, 'none'], stream_gap: [409, 'none'],
+} as const;
+type WireErrorCode = keyof typeof errorMap;
+/** 包内扩展路由复用同一错误状态与重试合同；不增加公共协议出口。 */
+export function archiveHttpErrorPolicy(code: WireErrorCode): (typeof errorMap)[WireErrorCode] {
+  return errorMap[code];
+}
+export class ArchiveHttpError extends Error {
+  constructor(readonly code: WireErrorCode) { super(code); this.name = 'ArchiveHttpError'; }
+}
+function fail(code: WireErrorCode): never { throw new ArchiveHttpError(code); }
+function parse<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value); if (!result.success) fail('invalid_request'); return result.data;
+}
+function output<T>(schema: z.ZodType<T>, value: unknown, maximum: number): T {
+  try {
+    // 输出先走原纯数据编码；不允许 getter/toJSON 或失去原数字约束后伪装合法结果。
+    const plain = decodeArchiveMetadata(encodeArchiveMetadata(value, { maxBytes: maximum }));
+    const result = schema.safeParse(plain); if (result.success) return result.data;
+  } catch { /* 仅回固定内部错误，不暴露宿主路径或异常文本。 */ }
+  return fail('internal_error');
+}
+function recoveryOutput(value: unknown, maximum: number): Sdk2AckRebaseReceipt {
+  try {
+    if (!value || typeof value !== 'object' || types.isProxy(value) || Array.isArray(value) ||
+      ![null, Object.prototype].includes(Object.getPrototypeOf(value))) fail('internal_error');
+    const descriptors = Object.getOwnPropertyDescriptors(value), plain: Record<string, unknown> = {};
+    for (const name of Reflect.ownKeys(descriptors)) {
+      if (typeof name !== 'string') fail('internal_error');
+      const field = descriptors[name]!; if (!field.enumerable || !Object.hasOwn(field, 'value')) fail('internal_error');
+      // 每个旧ACK/receipt保持原控制帽；仅恢复外包拥有独立总字节帽。
+      plain[name] = decodeArchiveMetadata(encodeArchiveMetadata(field.value));
+    }
+    serialize(plain, maximum); return parse(archiveRecoverySchema('AckRebaseReceipt'), plain) as Sdk2AckRebaseReceipt;
+  } catch { return fail('internal_error'); }
+}
+function translated(error: unknown): WireErrorCode {
+  if (error instanceof ArchiveHttpError || error instanceof ArchiveHttpEventError) return error.code;
+  // 原事件库错误保留类身份；任意同名 code 不得成为可透传的 HTTP 诊断。
+  if (error instanceof EventStoreError) {
+    switch (error.code) {
+      case 'stream_cursor_unknown': case 'stream_cursor_expired': case 'stream_gap': case 'capacity_exceeded': return error.code;
+      case 'unavailable': case 'reconciliation_required': return 'source_unavailable';
+      default: return 'internal_error';
+    }
+  }
+  // B 的必需副本尚未耐久是来源暂不可用，不能伪报内部故障或自动重发新 ACK。
+  if (error instanceof ArchiveSourceTransferError && error.code === 'dependency_held') return 'source_unavailable';
+  if (error instanceof SqliteSpoolError || error instanceof MaterialSupplyError ||
+    error instanceof ArchiveRecordJournalError || error instanceof ArchiveSourceTransferError) {
+    switch (error.code) {
+      case 'invalid_input': return 'invalid_request';
+      case 'capacity_exceeded': return 'capacity_exceeded';
+      case 'operation_conflict': case 'entry_conflict': return 'request_id_conflict';
+      case 'stale_generation': return 'stale_generation';
+      case 'epoch_expired': return 'epoch_unavailable';
+      case 'request_expired': return 'request_expired';
+      case 'binding_closed': return 'binding_closed';
+      case 'revision_conflict': case 'head_conflict': return 'binding_conflict';
+      case 'archive_gap': return 'archive_gap';
+      case 'artifact_unavailable': case 'source_unavailable': case 'entry_released': return 'source_unavailable';
+      case 'unsupported_capability': return 'unsupported_capability';
+      default: return 'internal_error';
+    }
+  }
+  return 'internal_error';
+}
+
+/** 页与下载块有独立较大的响应帽；只编码可信输出，不改原正文（正文仍base64原字节）。 */
+function serialize(value: unknown, maxBytes: number): Buffer {
+  const data = JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item === 'number' && (!Number.isSafeInteger(item) || item < 0 || Object.is(item, -0))) throw new TypeError('Invalid response integer');
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      return Object.fromEntries(Object.entries(item).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0));
+    }
+    return item;
+  });
+  if (data === undefined) throw new TypeError('Missing response');
+  const bytes = Buffer.from(data); if (bytes.length > maxBytes) fail('capacity_exceeded'); return bytes;
+}
+function reply(res: ServerResponse, status: number, value: unknown, maxBytes = CONTROL_BYTES): void {
+  if (res.destroyed || res.writableEnded) return;
+  const bytes = serialize(value, maxBytes);
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': bytes.length, 'cache-control': 'no-store' });
+  res.end(bytes);
+}
+function component(value: string): string {
+  try { return decodeURIComponent(value); } catch { return fail('invalid_request'); }
+}
+function query(raw: string, required: readonly string[], optional: readonly string[] = []): Record<string, string> {
+  const result: Record<string, string> = Object.create(null);
+  for (const pair of raw.split('&')) {
+    const equal = pair.indexOf('=');
+    if (equal < 1 || pair.includes('+')) fail('invalid_request');
+    const key = pair.slice(0, equal), value = component(pair.slice(equal + 1));
+    if (![...required, ...optional].includes(key) || Object.hasOwn(result, key) || value === '') fail('invalid_request');
+    result[key] = value;
+  }
+  if (required.some(key => !Object.hasOwn(result, key))) fail('invalid_request');
+  if (result.protocol !== PROTOCOL) fail('protocol_version_mismatch');
+  return result;
+}
+function count(value: string, min: number, max: number): number {
+  if (!/^(0|[1-9][0-9]*)$/.test(value)) fail('invalid_request');
+  return parse(integer(min, max), Number(value));
+}
+function readGenerations(params: Record<string, string>): ArchiveGenerations {
+  return parse(generations, { historyEpoch: params.historyEpoch, deletionGeneration: params.deletionGeneration, projectionRevision: params.projectionRevision });
+}
+function sameGenerations(left: ArchiveGenerations, right: ArchiveGenerations): boolean {
+  return left.historyEpoch === right.historyEpoch && left.deletionGeneration === right.deletionGeneration && left.projectionRevision === right.projectionRevision;
+}
+async function readBody(req: IncomingMessage, maximum: number, recovery = false): Promise<unknown> {
+  const media = req.headers['content-type'] ?? '';
+  if (!/^application\/json(?:\s*;\s*charset\s*=\s*(?:utf-8|"utf-8"))?\s*$/i.test(media) ||
+    (req.headers['content-encoding'] !== undefined && req.headers['content-encoding'].toLowerCase() !== 'identity')) fail('invalid_request');
+  const chunks: Buffer[] = []; let bytes = 0;
+  for await (const part of req) {
+    const chunk = Buffer.isBuffer(part) ? part : Buffer.from(part as Uint8Array); bytes += chunk.length;
+    if (bytes > maximum) fail('payload_too_large'); chunks.push(chunk);
+  }
+  let result: unknown;
+  try {
+    const raw = Buffer.concat(chunks);
+    if (recovery) {
+      const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw); result = JSON.parse(text);
+      // 恢复扩展明确使用规范控制JSON，比较原字节拒绝重复键/替代数字/BOM。
+      if (!serialize(result, maximum).equals(raw)) fail('invalid_request');
+    } else result = decodeArchiveMetadata(raw, { maxBytes: maximum });
+  } catch { return fail('invalid_request'); }
+  if (!result || typeof result !== 'object' || Array.isArray(result)) fail('invalid_request');
+  if ((result as { protocol?: unknown }).protocol !== PROTOCOL) fail('protocol_version_mismatch');
+  return result;
+}
+
+export interface ArchiveHttpBinding {
+  readonly control: ArchiveBindingControl;
+  readonly spool: SqliteArchiveSpool;
+  readonly journal: SqliteArchiveRecordJournal;
+  readonly acknowledger: SqliteArchiveSourceAcknowledger;
+  readonly materials?: SqliteMaterialSupply;
+  /** 显式宿主观察端口；缺席不创建事件库或启用默认观察。 */
+  readonly events?: ArchiveHttpBindingEvents;
+  readView?(): HostResult<ArchiveHttpBindingView>;
+  readArchiveStatus?(): HostResult<ArchiveHttpArchiveStatus>;
+  /** 宿主在原runtime的独占idle证明内受理；HTTP不能提交可序列化proof。 */
+  rebaseAck?(request: Sdk2AckRebaseRequest): HostResult<Sdk2AckRebaseReceipt>;
+  /** 必须沿真实 runtime 关闭管道；原受理回执不代表档案已排空或已退役。 */
+  close?(request: ArchiveBindingCloseRequest): HostResult<ArchiveBindingReceipt>;
+}
+export interface ArchiveHttpHost {
+  readonly applicationScopeId: string;
+  /** 请求不能提供文件路径或端口。宿主每次查当前权限；null与无权保持同一外部结果。 */
+  resolve(endUserId: string, bindingId: string): ArchiveHttpBinding | null;
+  /** 已认证主体的原能力/epoch快照；GET不得初始化或续期。 */
+  capabilities?(endUserId: string): HostResult<ArchiveHttpCapabilities>;
+  /** 同时核当前用户与原会话归属；返回稳定原端口，未知与无权同为null。 */
+  resolveSession?(endUserId: string, sessionId: string): ArchiveHttpSession | null;
+  readonly controlBytes?: number;
+}
+
+export function createArchiveHttpRoutes(options: { host: ArchiveHttpHost; admission: AdmissionController;
+  authenticate: RequestAuthenticator['authenticate']; track(work: Promise<void>): void }) {
+  const maxControl = options.host.controlBytes ?? CONTROL_BYTES;
+  parse(integer(1024, CONTROL_BYTES), maxControl); parse(id, options.host.applicationScopeId);
+  let inflight = 0;
+  return (req: IncomingMessage, res: ServerResponse): boolean => {
+    const raw = req.url ?? '';
+    if (!raw.startsWith('/v3/sdk2/bindings') && !raw.startsWith('/v3/sdk2/operations') &&
+      !raw.startsWith('/v3/sdk2/capabilities') && !raw.startsWith('/v3/sdk2/sessions/')) return false;
+    let occupied = false, reserved = false, reservedBytes = maxControl, requestId: string = randomUUID();
+    const work = (async () => {
+      if (inflight >= 128 || options.admission.overloaded()) fail('capacity_exceeded');
+      inflight++; occupied = true;
+      if (Buffer.byteLength(raw) > 8192) fail('payload_too_large');
+      if (raw.includes('#')) fail('invalid_request');
+      const question = raw.indexOf('?'), path = question < 0 ? raw : raw.slice(0, question), rawQuery = question < 0 ? '' : raw.slice(question + 1);
+      const segments = path.split('/').slice(3).map(component);
+      const method = req.method ?? 'GET';
+      if (method !== 'GET' && method !== 'POST') fail('invalid_request');
+      if (method === 'GET' && (req.headers['transfer-encoding'] !== undefined || (req.headers['content-length'] !== undefined && req.headers['content-length'] !== '0'))) fail('invalid_request');
+      if (method === 'POST' && question >= 0) fail('invalid_request');
+      const recovery = method === 'POST' && segments.length === 4 && segments[0] === 'bindings' && segments[2] === 'archive' && segments[3] === 'ack-rebases';
+      if (recovery)
+        reservedBytes += SDK2_ACK_RECOVERY_LIMITS.requestEnvelopeBytes;
+      if (method === 'POST') {
+        if (!options.admission.reserveBody(reservedBytes).admitted) fail('capacity_exceeded'); reserved = true;
+      }
+      const body = method === 'POST' ? await readBody(req, reservedBytes, recovery) : undefined;
+      const authenticate = async (expectedUser?: string) => {
+        let authenticated: Awaited<ReturnType<AgentSessionsOptions['authenticate']>>;
+        try { authenticated = await options.authenticate(req, res); } catch (error) {
+          if (error instanceof AuthenticationUnavailableError) return fail(error.code === 'overloaded' ? 'capacity_exceeded' : 'source_unavailable');
+          return fail('unauthorized');
+        }
+        if (!authenticated?.endUserId || (expectedUser !== undefined && authenticated.endUserId !== expectedUser)) fail('unauthorized');
+        if (req.aborted || res.destroyed || res.writableEnded) fail('unauthorized');
+        return authenticated.endUserId;
+      };
+      const admit = async () => {
+        const user = await authenticate();
+        if (!(await options.admission.rateLimit(req, user)).admitted) fail('capacity_exceeded');
+        // rateLimit也是异步宿主边界；在任何资源/业务访问之前复核当前身份。
+        await authenticate(user); return user;
+      };
+      if (segments.length === 1 && segments[0] === 'capabilities' && method === 'GET') {
+        if (question >= 0) fail('invalid_request');
+        const user = await admit(), read = options.host.capabilities;
+        if (!read) fail('unsupported_capability');
+        const value = await read.call(options.host, user); await authenticate(user);
+        if (options.host.capabilities !== read) fail('forbidden');
+        reply(res, 200, output(discovery, value, maxControl), maxControl); return;
+      }
+      const sessionTarget = segments.length === 3 && segments[0] === 'sessions' && segments[2] === 'binding-target' && method === 'GET';
+      const creating = segments.length === 1 && segments[0] === 'bindings' && method === 'POST';
+      let creationQuery: Record<string, string> | undefined;
+      if (segments.length === 1 && segments[0] === 'operations' && method === 'GET') {
+        const candidate = query(rawQuery, ['protocol', 'operation', 'operationEpoch', 'requestId'], ['bindingId', 'sessionId']);
+        if (candidate.operation === 'binding-create') {
+          if (candidate.bindingId !== undefined || candidate.sessionId === undefined) fail('invalid_request');
+          creationQuery = candidate;
+        } else if (candidate.sessionId !== undefined || candidate.bindingId === undefined) fail('invalid_request');
+      }
+      if (sessionTarget || creating || creationQuery) {
+        let sessionId: string, createInput: ArchiveBindingCreateRequest | undefined, queryInput: ArchiveBindingIdentity | undefined;
+        if (sessionTarget) { query(rawQuery, ['protocol']); sessionId = parse(legacyId, segments[1]); }
+        else if (creating) { createInput = parse(createBinding, body); sessionId = createInput.target.sessionId; requestId = createInput.request.requestId; }
+        else {
+          sessionId = parse(legacyId, creationQuery!.sessionId);
+          queryInput = parse(identity, { operationEpoch: creationQuery!.operationEpoch, requestId: creationQuery!.requestId }); requestId = queryInput.requestId;
+        }
+        const user = await admit(), resolveSession = options.host.resolveSession;
+        if (!resolveSession) fail('unsupported_capability');
+        const port = resolveSession.call(options.host, user, sessionId); if (!port) fail('forbidden');
+        const reauthorize = async () => {
+          await authenticate(user);
+          if (options.host.resolveSession !== resolveSession || resolveSession.call(options.host, user, sessionId) !== port) fail('forbidden');
+        };
+        if (sessionTarget) {
+          const read = port.readTarget, value = await read.call(port); await reauthorize();
+          if (port.readTarget !== read) fail('forbidden');
+          const view = output(bindingTarget, value, maxControl);
+          if (view.target.sessionId !== sessionId) fail('forbidden');
+          reply(res, 200, view, maxControl);
+        } else if (createInput) {
+          const create = port.create; if (!create) fail('unsupported_capability');
+          const value = await create.call(port, createInput); await reauthorize();
+          if (port.create !== create) fail('forbidden');
+          const view = output(bindingView, value, maxControl);
+          if (view.target.sessionId !== sessionId || view.scope.applicationScopeId !== options.host.applicationScopeId || view.scope.endUserId !== user) fail('forbidden');
+          reply(res, 201, view, maxControl);
+        } else {
+          const read = port.queryCreate; if (!read) fail('unsupported_capability');
+          const value = await read.call(port, queryInput!); await reauthorize();
+          if (port.queryCreate !== read) fail('forbidden');
+          if (value === null) fail('receipt_expired');
+          const receipt = output(mutationReceipt, value, maxControl);
+          if (receipt.operation !== 'binding-create' || receipt.request.operationEpoch !== queryInput!.operationEpoch || receipt.request.requestId !== queryInput!.requestId) fail('internal_error');
+          reply(res, 200, receipt, maxControl);
+        }
+        return;
+      }
+      const generationKeys = ['historyEpoch', 'deletionGeneration', 'projectionRevision'];
+      let bindingId: string;
+      let operation: 'records' | 'artifact' | 'ack' | 'ack-rebase' | 'upload' | 'upload-status' | 'response' | 'status' | 'operation' | 'events' | 'view' | 'archive-status' | 'close';
+      let lastEventId: string | undefined;
+      let params: Record<string, string> = Object.create(null);
+      let input: unknown = body;
+      if (segments.length === 1 && segments[0] === 'operations' && method === 'GET') {
+        params = query(rawQuery, ['protocol', 'operation', 'bindingId', 'operationEpoch', 'requestId']);
+        bindingId = parse(id, params.bindingId); parse(identity, { operationEpoch: params.operationEpoch, requestId: params.requestId });
+        if (!['archive-ack', 'material-response', 'binding-close'].includes(params.operation!)) fail('unsupported_capability');
+        requestId = params.requestId!; operation = 'operation';
+      } else {
+        if (segments[0] !== 'bindings') fail('invalid_request'); bindingId = parse(id, segments[1]);
+        if (segments.length === 2 && method === 'GET') { query(rawQuery, ['protocol']); operation = 'view'; }
+        else if (segments.length === 4 && segments[2] === 'archive' && segments[3] === 'status' && method === 'GET') {
+          query(rawQuery, ['protocol']); operation = 'archive-status';
+        } else if (segments.length === 3 && segments[2] === 'close' && method === 'POST') {
+          input = parse(closeBinding, body); operation = 'close';
+        } else if (segments.length === 3 && segments[2] === 'events' && method === 'GET') {
+          params = query(rawQuery, ['protocol']);
+          const values: string[] = [];
+          for (let index = 0; index < req.rawHeaders.length; index += 2) {
+            if (req.rawHeaders[index]!.toLowerCase() === 'last-event-id') values.push(req.rawHeaders[index + 1]!);
+          }
+          if (values.length > 1) fail('invalid_request');
+          if (values.length === 1) lastEventId = parse(id, values[0]);
+          operation = 'events';
+        } else if (segments.length === 4 && segments[2] === 'archive' && segments[3] === 'records' && method === 'GET') {
+          params = query(rawQuery, ['protocol', ...generationKeys, 'limit', 'maxBytes'], ['afterSequence']);
+          input = { generations: readGenerations(params), afterSequence: params.afterSequence === undefined ? null : parse(seq, params.afterSequence),
+            limit: count(params.limit!, 1, 128), maxBytes: count(params.maxBytes!, 1024, 1048576) }; operation = 'records';
+        } else if (segments.length === 5 && segments[2] === 'archive' && segments[3] === 'artifacts' && method === 'GET') {
+          params = query(rawQuery, ['protocol', ...generationKeys, 'offset', 'maxBytes']);
+          input = { generations: readGenerations(params), artifactId: parse(id, segments[4]), offset: count(params.offset!, 0, 33554431), maxBytes: count(params.maxBytes!, 1, 262144) }; operation = 'artifact';
+        } else if (segments.length === 4 && segments[2] === 'archive' && segments[3] === 'acks' && method === 'POST') {
+          input = parse(ack, body); operation = 'ack';
+        } else if (segments.length === 4 && segments[2] === 'archive' && segments[3] === 'ack-rebases' && method === 'POST') {
+          input = parse(archiveRecoverySchema('AckRebaseRequest'), body); operation = 'ack-rebase';
+        } else if (segments.length === 3 && segments[2] === 'material-responses' && method === 'POST') {
+          input = parse(response, body); operation = 'response';
+        } else if (segments[2] === 'materials' && (segments.length === 4 || segments.length === 6 || segments.length === 7)) {
+          parse(id, segments[3]); if (segments.length > 4) { if (segments[4] !== 'uploads') fail('invalid_request'); parse(id, segments[5]); }
+          if (segments.length === 7 && segments[6] === 'chunks' && method === 'POST') { input = parse(upload, body); operation = 'upload'; }
+          else if (method === 'GET' && segments.length !== 7) { query(rawQuery, ['protocol']); operation = segments.length === 4 ? 'status' : 'upload-status'; }
+          else return fail('invalid_request');
+        } else return fail('unsupported_capability');
+      }
+      if (method === 'POST') {
+        const item = input as { bindingId: string; materialRequestId?: string; artifactId?: string; request?: { requestId: string } };
+        if (item.bindingId !== bindingId || (operation === 'upload' && (item.materialRequestId !== segments[3] || item.artifactId !== segments[5]))) fail('invalid_request');
+        if (item.request) requestId = item.request.requestId;
+      }
+      if (operation === 'upload') {
+        const chunk = input as z.infer<typeof upload>; const bytes = Buffer.from(chunk.base64, 'base64');
+        // 此处只判断入站字节；后续介质损坏仍保留未知/需对账，不能一概冒充客户端错误。
+        if (bytes.length !== chunk.bytes || bytes.toString('base64') !== chunk.base64 || hashArchiveRaw(bytes) !== chunk.chunkSha256) fail('invalid_request');
+      }
+      const identityValue = { endUserId: await admit() };
+      const ports = options.host.resolve(identityValue.endUserId, bindingId); if (!ports) fail('forbidden');
+      const control = ports.control.read();
+      if (!control || control.registration.bindingId !== bindingId || control.registration.scope.endUserId !== identityValue.endUserId ||
+        control.registration.scope.applicationScopeId !== options.host.applicationScopeId) fail('forbidden');
+      if (control.state === 'unbound') fail('binding_closed');
+      if (operation === 'view' || operation === 'archive-status' || operation === 'close' || operation === 'ack-rebase') {
+        const reauthorize = async () => {
+          await authenticate(identityValue.endUserId);
+          if (options.host.resolve(identityValue.endUserId, bindingId) !== ports) fail('forbidden');
+          const current = ports.control.read();
+          if (!current || current.registration.bindingId !== bindingId || current.registration.scope.endUserId !== identityValue.endUserId ||
+            current.registration.scope.applicationScopeId !== options.host.applicationScopeId) fail('forbidden');
+        };
+        if (operation === 'view') {
+          const read = ports.readView; if (!read) fail('unsupported_capability');
+          const value = await read.call(ports); await reauthorize(); if (ports.readView !== read) fail('forbidden');
+          const view = output(bindingView, value, maxControl);
+          if (view.bindingId !== bindingId || view.scope.applicationScopeId !== options.host.applicationScopeId || view.scope.endUserId !== identityValue.endUserId ||
+            view.target.sessionId !== control.registration.sessionId) fail('forbidden');
+          reply(res, 200, view, maxControl);
+        } else if (operation === 'archive-status') {
+          if (!control.acceptedCapabilities.includes('archive-transfer-v1')) fail('unsupported_capability');
+          const read = ports.readArchiveStatus; if (!read) fail('unsupported_capability');
+          const value = await read.call(ports); await reauthorize(); if (ports.readArchiveStatus !== read) fail('forbidden');
+          const status = output(archiveStatus, value, maxControl);
+          if (status.bindingId !== bindingId || status.sourceId !== control.registration.sourceId || status.sourceGeneration !== control.registration.sourceGeneration) fail('forbidden');
+          reply(res, 200, status, maxControl);
+        } else if (operation === 'ack-rebase') {
+          if (!control.acceptedCapabilities.includes('archive-transfer-v1')) fail('unsupported_capability');
+          const recover = ports.rebaseAck; if (!recover) fail('unsupported_capability');
+          const request = input as Sdk2AckRebaseRequest;
+          const value = await recover.call(ports, request); await reauthorize(); if (ports.rebaseAck !== recover) fail('forbidden');
+          const maximum = 2 * maxControl + SDK2_ACK_RECOVERY_LIMITS.responseEnvelopeBytes;
+          const result = recoveryOutput(value, maximum);
+          const equal = (left: unknown, right: unknown) => encodeArchiveMetadata(left).toString() === encodeArchiveMetadata(right).toString();
+          if (result.bindingId !== bindingId || !equal(result.previous, request.previous) || !equal(result.request, request.request) ||
+            !equal(result.next.request, request.request) || BigInt(result.next.expectedRevision) <= BigInt(request.previous.expectedRevision) ||
+            !equal({ ...result.next, request: request.previous.request, expectedRevision: request.previous.expectedRevision }, request.previous) ||
+            result.receipt.operation !== 'archive-ack' || !equal(result.receipt.request, result.next.request) || result.receipt.bindingId !== bindingId) fail('internal_error');
+          reply(res, 200, result, maximum);
+        } else {
+          const close = ports.close; if (!close) fail('unsupported_capability');
+          const closeInput = input as ArchiveBindingCloseRequest;
+          const value = await close.call(ports, closeInput); await reauthorize(); if (ports.close !== close) fail('forbidden');
+          const receipt = output(mutationReceipt, value, maxControl);
+          if (receipt.bindingId !== bindingId || receipt.operation !== 'binding-close' || receipt.request.operationEpoch !== closeInput.request.operationEpoch || receipt.request.requestId !== closeInput.request.requestId) fail('internal_error');
+          reply(res, 200, receipt, maxControl);
+        }
+        return;
+      }
+      if (operation === 'events') {
+        const port = ports.events; if (!port) fail('unsupported_capability');
+        const endUserId = identityValue.endUserId;
+        if (req.aborted || res.destroyed || res.writableEnded) return;
+        if (!options.admission.tryAdmitSse(endUserId).admitted) fail('capacity_exceeded');
+        res.once('close', () => options.admission.releaseSse(endUserId));
+        req.socket.setTimeout(0);
+        const authorize = async () => {
+          let currentIdentity: Awaited<ReturnType<AgentSessionsOptions['authenticate']>>;
+          try { currentIdentity = await options.authenticate(req, res); } catch (error) {
+            if (error instanceof AuthenticationUnavailableError) return fail(error.code === 'overloaded' ? 'capacity_exceeded' : 'source_unavailable');
+            return fail('unauthorized');
+          }
+          if (!currentIdentity?.endUserId || currentIdentity.endUserId !== endUserId) fail('unauthorized');
+          const currentPorts = options.host.resolve(endUserId, bindingId);
+          if (!currentPorts || currentPorts.events !== port || currentPorts.control !== ports.control) fail('forbidden');
+          const current = currentPorts.control.read();
+          if (!current || current.registration.bindingId !== bindingId || current.registration.scope.endUserId !== endUserId ||
+            current.registration.scope.applicationScopeId !== options.host.applicationScopeId) fail('forbidden');
+          if (current.state === 'unbound') fail('binding_closed');
+          // 绑定/代际/当前应用权限及安装事实的细核仍由原宿主events端口持有，不由路由重造authority。
+        };
+        await sendArchiveHttpEvents({ req, res, port, scope: { applicationScopeId: options.host.applicationScopeId, endUserId, bindingId },
+          ...(lastEventId === undefined ? {} : { lastEventId }), authorize });
+        return;
+      }
+      const materials = (): SqliteMaterialSupply => {
+        const supply = ports.materials;
+        if (!control.acceptedCapabilities.includes('context-materials-v1') || !supply) fail('unsupported_capability');
+        if (supply.bindingId !== bindingId || !control.registration.relatedBindingIds.includes(supply.storageBindingId)) fail('forbidden');
+        const owner = ports.spool.bindingIdentity(supply.storageBindingId);
+        if (owner.applicationScopeId !== options.host.applicationScopeId || owner.endUserId !== identityValue.endUserId) fail('forbidden');
+        return supply;
+      };
+      if (['records', 'artifact', 'ack'].includes(operation) && !control.acceptedCapabilities.includes('archive-transfer-v1')) fail('unsupported_capability');
+      let result: unknown; let status = 200; let responseMax = maxControl;
+      if (operation === 'records') {
+        const request = input as Parameters<SqliteArchiveRecordJournal['list']>[0];
+        if (!sameGenerations(request.generations, control.target.generations)) fail('stale_generation');
+        result = ports.journal.list(request); responseMax = request.maxBytes;
+      } else if (operation === 'artifact') {
+        const request = input as Parameters<SqliteArchiveRecordJournal['readArtifact']>[0];
+        if (!sameGenerations(request.generations, control.target.generations)) fail('stale_generation');
+        const chunk = ports.journal.readArtifact(request);
+        result = { protocol: PROTOCOL, bindingId, artifactId: chunk.artifact.artifactId, sourceId: chunk.artifact.sourceId,
+          generations: request.generations, offset: chunk.offset, bytes: chunk.body.byteLength, totalBytes: chunk.artifact.bytes,
+          sha256: chunk.artifact.sha256, chunkSha256: chunk.chunkSha256, base64: Buffer.from(chunk.body).toString('base64') };
+        responseMax = ARTIFACT_RESPONSE_BYTES;
+      } else if (operation === 'ack') result = ports.acknowledger.acknowledge(input as z.infer<typeof ack>);
+      else if (operation === 'upload') result = materials().uploadChunk(input as z.infer<typeof upload>);
+      else if (operation === 'response') { result = materials().respond(input as z.infer<typeof response>); status = 202; }
+      else if (operation === 'status') result = materials().status(segments[3]!);
+      else if (operation === 'upload-status') result = materials().uploadStatus(segments[3]!, segments[5]!);
+      else {
+        const request = { operationEpoch: params.operationEpoch!, requestId: params.requestId! };
+        result = params.operation === 'material-response' ? materials().queryResponse(request)
+          : ports.control.query(params.operation as 'archive-ack' | 'binding-close', request)?.receipt;
+        if (!result) fail('receipt_expired');
+      }
+      if (!result || typeof result !== 'object' || (result as { bindingId?: string }).bindingId !== bindingId) throw new Error('Mismatched host binding');
+      reply(res, status, result, responseMax);
+    })().catch(error => {
+      if (res.headersSent || res.destroyed || res.writableEnded) return;
+      const code = translated(error), [status, retryAction] = errorMap[code];
+      if (status === 429 || status === 503) res.setHeader('retry-after', '5');
+      reply(res, status, { protocol: PROTOCOL, requestId, code, status, message: code, retryAction });
+    }).finally(() => { if (occupied) inflight--; if (reserved) options.admission.releaseBody(reservedBytes); });
+    options.track(work); return true;
+  };
+}

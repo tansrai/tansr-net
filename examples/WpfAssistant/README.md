@@ -20,7 +20,9 @@ dotnet run --project examples/WpfAssistant/WpfAssistant.csproj
 
 可选本地 Serve 使用同一 `ExampleConnection`：配置 `TANSR_LOCAL_SERVE_EXE`（受信独立CLI/Serve安装物）、`TANSR_LOCAL_SERVE_SHA256`、`TANSR_LOCAL_WORKSPACE`；可选 `TANSR_LOCAL_SERVE_PORT`，专用Serve入口用 `TANSR_LOCAL_SERVE_DIRECT=1`。需要透传的运行环境名称必须逐个列入 `TANSR_LOCAL_ENV_NAMES`；随机 Serve token 由SDK管理，不使用票据输入框，不打印密钥。此模式会启动本机子进程，退出等待回收；“仅断开本机连接”仍会停止本实例拥有的本地Serve进程，远端Serve模式不会停止远端服务。安装、自动下载和升级UI仍未实现。
 
-当前明确缺口：同轮输入编辑器、动态模型/思考切换、系统提示词治理 UI、完整长期记忆管理/迁移、档案离线阅读与设备执行器的默认可信装配、MCP/Skills/子代理专用管理、Serve安装/升级UI。已提供NativeDeviceHost公开SDK装配示例，但尚未假设业务应用的可信scope和工具摘要。麦克风、视频解码器、真实付费ASR/TTS及大媒体SSE端到端仍需实际环境验收；客户端可配32MiB不证明Serve订阅缓冲已承载该大小。现有编译或局部测试不关闭NET-05完整交付。
+本轮已接同轮输入编辑器、自动本机草稿及离线呈现回看，公开 preview 的模型/思考与记忆控制有独立原生窗口。原输入键与目标在发送前保存，未知结果只查原键；输入不截断，不取消/重建会话。文件位置、可信 scope 装配、回执语义与恢复操作见 [共享说明](../Shared/session-controls.md)。未配置 preview 时窗口明确显示未启用。原操作日志与离线呈现为明文本机应用数据，不含票据。
+
+当前明确缺口：系统提示词治理 UI、长期记忆完整管理/迁移、带当前授权的共享档案离线阅读与设备执行器默认可信装配、MCP/Skills/子代理专用管理、Serve安装/升级UI。已提供NativeDeviceHost公开SDK装配示例，但尚未假设业务应用的可信scope和工具摘要。麦克风、视频解码器、真实付费ASR/TTS及大媒体SSE端到端仍需实际环境验收；客户端可配32MiB不证明Serve订阅缓冲已承载该大小。现有编译或局部测试不关闭NET-05完整交付。
 
 ## 可选 Serve 智能体 → 原生 MCP 工具
 

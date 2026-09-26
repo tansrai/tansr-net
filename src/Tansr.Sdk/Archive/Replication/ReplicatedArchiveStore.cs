@@ -8,7 +8,7 @@ using S = Tansr.Sdk.Archive.Replication.ArchiveSyncValidation;
 namespace Tansr.Sdk.Archive.Replication;
 
 /// <summary>两份同源耐久介质都核实后才返回原 ACK。部分提交只用原输入恢复，不降级为单份成功。</summary>
-public sealed class ReplicatedArchiveStore : IArchiveStore
+public sealed partial class ReplicatedArchiveStore : IRecoverableArchiveStore
 {
     private static readonly ConditionalWeakTable<object, object> ActiveStores = new ConditionalWeakTable<object, object>();
     private static readonly object ActiveGate = new object();

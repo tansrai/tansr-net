@@ -1,11 +1,13 @@
 param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [Parameter(Mandatory = $true)][string]$CliRoot
+    [Parameter(Mandatory = $true)][string]$CliRoot,
+    [Parameter(Mandatory = $true)][string]$RecoveryCliRoot
 )
 $ErrorActionPreference = 'Stop'
 if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw '此验收入口需要 Windows。' }
 $sourceRoot = Split-Path -Parent $PSScriptRoot
 $cliSource = (Resolve-Path -LiteralPath $CliRoot).Path
+$recoverySource = (Resolve-Path -LiteralPath $RecoveryCliRoot).Path
 if (-not (Test-Path -LiteralPath (Join-Path $cliSource 'node_modules/tsx/dist/loader.mjs') -PathType Leaf)) {
     throw 'CLI 源码目录缺少已安装的 tsx；先按其锁文件准备依赖。原 Node 双向消费不能跳过。'
 }
@@ -41,11 +43,12 @@ $candidateDirectory = Join-Path $target 'mcp-consumer'
 $results = Join-Path $target 'results'
 $oldMcp = [Environment]::GetEnvironmentVariable('TANSR_TEST_MCP_EXE', 'Process')
 $oldCli = [Environment]::GetEnvironmentVariable('TANSR_TEST_CLI_ROOT', 'Process')
+$oldRecoveryCli = [Environment]::GetEnvironmentVariable('TANSR_TEST_RECOVERY_CLI_ROOT', 'Process')
 $publishAttempted = $false
 $defaultRestoreAttempted = $false
 $manifest = [ordered]@{
     task = 'NET-05'; scope = 'Windows tests and published native MCP candidate'; startedAt = (Get-Date).ToUniversalTime().ToString('o')
-    sourceRoot = $sourceRoot; cliRoot = $cliSource; outputDirectory = $target; nugetLockFilePath = 'obj/mcp-publish.packages.lock.json'
+    sourceRoot = $sourceRoot; cliRoot = $cliSource; recoveryCliRoot = $recoverySource; outputDirectory = $target; nugetLockFilePath = 'obj/mcp-publish.packages.lock.json'
     publishExitCode = $null; restoreExitCode = $null; testExitCode = $null; candidate = $null; candidateSha256 = $null; outcome = 'incomplete'
     limitation = 'SDK1 MCP socket fixture is controlled; this gate does not prove real Serve model, paid media, microphone or codec parity.'
 }
@@ -69,6 +72,7 @@ try {
     if ($manifest.restoreExitCode -ne 0) { throw '产品默认锁定资产恢复失败。' }
     [Environment]::SetEnvironmentVariable('TANSR_TEST_MCP_EXE', $candidate, 'Process')
     [Environment]::SetEnvironmentVariable('TANSR_TEST_CLI_ROOT', $cliSource, 'Process')
+    [Environment]::SetEnvironmentVariable('TANSR_TEST_RECOVERY_CLI_ROOT', $recoverySource, 'Process')
     & dotnet test $testProject -c Release --no-restore --results-directory $results --logger 'trx;LogFileName=windows.trx' 2>&1 |
         Tee-Object -FilePath (Join-Path $target 'windows-tests.log')
     $manifest.testExitCode = $LASTEXITCODE
@@ -79,6 +83,7 @@ try {
 finally {
     [Environment]::SetEnvironmentVariable('TANSR_TEST_MCP_EXE', $oldMcp, 'Process')
     [Environment]::SetEnvironmentVariable('TANSR_TEST_CLI_ROOT', $oldCli, 'Process')
+    [Environment]::SetEnvironmentVariable('TANSR_TEST_RECOVERY_CLI_ROOT', $oldRecoveryCli, 'Process')
     # 发布中途失败也可能已写入 RID 资产；只做一次默认恢复，不自动重发发布或测试。
     try {
         if ($publishAttempted -and -not $defaultRestoreAttempted) {

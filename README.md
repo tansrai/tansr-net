@@ -51,6 +51,8 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 
 ## 示例和开发
 
+终端分块输出、同会话配置／记忆管理和 ACK 恢复已有显式候选消费入口；参见[终端服务预览接入](doc/terminal-services.md)。预览与稳定协议、管理命令与完整记忆本地化、代码实现与正式发行分别记录。
+
 - [WPF](examples/WpfAssistant/README.md)：现代 Windows UI。
 - [WinForms](examples/WinFormsAssistant/README.md)：.NET Framework 4.8。
 - [控制台](examples/ConsoleAssistant/README.md)：原生 .NET 宿主。
@@ -60,7 +62,7 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 dotnet restore Tansr.Sdk.slnx --locked-mode
 dotnet build Tansr.Sdk.slnx -c Release --no-restore
 dotnet test tests/Tansr.Sdk.Tests -c Release --no-build
-./scripts/test-windows.ps1 -OutputDirectory J:/tansr/archive/NET-05-windows-unique-run -CliRoot J:/tansr/tansr-cli
+./scripts/test-windows.ps1 -OutputDirectory J:/tansr/archive/NET-05-windows-unique-run -CliRoot J:/tansr/tansr-cli -RecoveryCliRoot J:/tansr/worktrees/cli-SRV-01-terminal-services
 dotnet format Tansr.Sdk.slnx --verify-no-changes --no-restore
 ```
 

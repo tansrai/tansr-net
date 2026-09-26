@@ -11,9 +11,10 @@ using S = Tansr.Sdk.Archive.Replication.ArchiveSyncValidation;
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>原 SDK2 source/cache 同步文件族的本地档案介质。只有 source 耐久接收才生成 ACK；密钥、权限和删除修订不从旧库自证。</summary>
-public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
+public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverableArchiveStore, IDisposable
 {
     public const string Format = "sdk2-archive-sync-sqlite-v1";
+    public const string RecoveryFormat = "sdk2-archive-sync-recovery-sqlite-v1";
     private const int Reserve = 4096;
     private static readonly string[] Schema =
     {
@@ -30,6 +31,8 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
         "CREATE TABLE sync_state (id INTEGER PRIMARY KEY CHECK(id=1), revision TEXT NOT NULL) STRICT",
     };
     private const string EncryptionSchema = "CREATE TABLE encryption (id INTEGER PRIMARY KEY CHECK(id=1), key_check BLOB NOT NULL) STRICT";
+    private const string RecoverySchema = "CREATE TABLE ack_rebases (request TEXT PRIMARY KEY, previous_request TEXT NOT NULL UNIQUE, intent TEXT NOT NULL, result TEXT, original_receipt TEXT, reserve BLOB NOT NULL) STRICT";
+    private const string RecoveryIndex = "CREATE UNIQUE INDEX ack_rebases_pending ON ack_rebases((1)) WHERE result IS NULL AND original_receipt IS NULL";
     private readonly object _gate = new object();
     private readonly SqliteConnection _connection;
     private readonly StorageFileIdentity _parent, _file;
@@ -41,23 +44,28 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
     private readonly Func<string> _retention;
     private readonly Action<JsonElement> _authorizeRetention;
     private readonly ArchiveBodyCipher? _cipher;
-    private readonly string _metadata;
+    private string _metadata;
     private readonly bool _historical;
+    private bool _recovery;
     private bool _closed, _busy, _poisoned, _uncertain;
     private StoreState? _known;
 
     private SqliteArchiveStore(SqliteConnection connection, StorageFileIdentity parent, StorageFileIdentity file,
-        SqliteArchiveStoreOptions options, JsonElement identity, string metadata, ArchiveBodyCipher? cipher, bool historical)
+        SqliteArchiveStoreOptions options, JsonElement identity, string metadata, ArchiveBodyCipher? cipher, bool historical, bool recovery)
     {
         _connection = connection; _parent = parent; _file = file; _identity = identity; _metadata = metadata; _cipher = cipher;
         _replica = options.Replica.Clone(); _syncRole = options.SyncRole;
         _limits = new ArchiveStoreLimits { MaxRecords = options.Limits.MaxRecords, MaxArtifacts = options.Limits.MaxArtifacts, MaxStoredBytes = options.Limits.MaxStoredBytes, MaxBatchBytes = options.Limits.MaxBatchBytes };
         _context = options.ReadContext; _retention = options.ReadRetentionRevision; _authorizeRetention = options.AuthorizeRetention;
-        _historical = historical;
+        _historical = historical; _recovery = recovery;
     }
 
     public static Task<SqliteArchiveStore> OpenAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
         => OpenCore(options, false, cancellationToken);
+
+    /// <summary>显式选择原 Node 恢复文件族；MigrateV1 只接受完整审计通过的旧明文 source 库。</summary>
+    public static Task<SqliteArchiveStore> OpenRecoverableAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
+        => OpenCore(options, false, cancellationToken, true);
 
     internal static Task<SqliteArchiveStore> OpenHistoryAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken)
         => OpenCore(options, true, cancellationToken);
@@ -67,20 +75,22 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
         A.Need(_historical, "invalid_input"); return new ArchiveHistoryView(this, current, _identity, _context);
     }
 
-    private static Task<SqliteArchiveStore> OpenCore(SqliteArchiveStoreOptions options, bool historical, CancellationToken cancellationToken)
+    private static Task<SqliteArchiveStore> OpenCore(SqliteArchiveStoreOptions options, bool historical, CancellationToken cancellationToken, bool recovery = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (options == null || options.ReadContext == null || options.ReadRetentionRevision == null || options.AuthorizeRetention == null || options.Limits == null) throw new StorageException("invalid_input");
         var value = options; var limits = value.Limits;
-        A.Need(limits.MaxRecords >= 1 && limits.MaxRecords <= 1000000 && limits.MaxArtifacts >= 1 && limits.MaxArtifacts <= 1000000 && limits.MaxStoredBytes >= 1 && limits.MaxStoredBytes <= 1073741824 && limits.MaxBatchBytes >= 1 && limits.MaxBatchBytes <= 67108864 && value.MaxPages >= 8 && value.MaxPages <= 262144 && (value.Mode == StorageOpenMode.Create || value.Mode == StorageOpenMode.Reopen), "invalid_input");
+        A.Need(limits.MaxRecords >= 1 && limits.MaxRecords <= 1000000 && limits.MaxArtifacts >= 1 && limits.MaxArtifacts <= 1000000 && limits.MaxStoredBytes >= 1 && limits.MaxStoredBytes <= 1073741824 && limits.MaxBatchBytes >= 1 && limits.MaxBatchBytes <= 67108864 && value.MaxPages >= 8 && value.MaxPages <= 262144 && (value.Mode == StorageOpenMode.Create || value.Mode == StorageOpenMode.Reopen || recovery && value.Mode == StorageOpenMode.MigrateV1), "invalid_input");
         string path = StorageFileIdentity.FullPath(value.Path); var identity = A.Identity(value.Identity); var replica = A.Copy(value.Replica);
         A.Fields(replica, "replicationId", "role"); WireJson.ValidateNamed("Id", replica.GetProperty("replicationId")); A.Need(new[] { "primary", "replica" }.Contains(A.String(replica, "role")), "invalid_input");
         A.Need(value.SyncRole == "source" || value.SyncRole == "cache", "invalid_input");
+        A.Need(!recovery || value.KeyProvider == null && !historical && value.SyncRole == "source", "invalid_input");
+        bool migrating = recovery && value.Mode == StorageOpenMode.MigrateV1;
         // 固定调用方配置后才访问文件，外部对象之后的修改不能改变库身份或配额。
         var fixedOptions = new SqliteArchiveStoreOptions
         {
             Path = path,
-            Mode = historical ? StorageOpenMode.Reopen : value.Mode,
+            Mode = historical || migrating ? StorageOpenMode.Reopen : value.Mode,
             Identity = identity,
             Replica = replica,
             SyncRole = value.SyncRole,
@@ -99,9 +109,9 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
             foreach (string suffix in new[] { "-wal", "-shm", "-journal" }) if (File.Exists(path + suffix))
             { A.Need(fixedOptions.Mode != StorageOpenMode.Create, "identity_mismatch"); using var sidecar = StorageFileIdentity.Open(path + suffix, false, metadataOnly: historical); }
             file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create, metadataOnly: historical);
-            string metadata = Metadata(fixedOptions, parent, file, cipher);
+            string metadata = Metadata(fixedOptions, parent, file, cipher, recovery && !migrating);
             connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = historical ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
-            var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher, historical);
+            var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher, historical, recovery && !migrating);
             // 历史只读连接不改 journal_mode、page_size、max_page_count 或原 metadata。
             store.Exec(historical ? "PRAGMA busy_timeout=0; PRAGMA query_only=ON; PRAGMA foreign_keys=ON" : "PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
             if (fixedOptions.Mode == StorageOpenMode.Create)
@@ -110,6 +120,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
                 store.Transaction(() =>
                 {
                     foreach (string sql in Schema) store.Exec(sql);
+                    if (store._recovery) { store.Exec(RecoverySchema); store.Exec(RecoveryIndex); }
                     store.Exec("INSERT INTO metadata VALUES(1,$json)", ("$json", metadata));
                     store.Exec("INSERT INTO sync_state VALUES(1,'0')");
                     if (cipher != null) { store.Exec(EncryptionSchema); store.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.CreateCheck())); }
@@ -123,6 +134,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
             if (historical) A.Need(store.Number("PRAGMA page_count") <= fixedOptions.MaxPages, "capacity_exceeded");
             else A.Need(store.Number("PRAGMA max_page_count=" + fixedOptions.MaxPages.ToString(CultureInfo.InvariantCulture)) == fixedOptions.MaxPages, "capacity_exceeded");
             store.CheckFixed(); store.Audit(); A.Need(A.Equal(scope, Scope(fixedOptions.ReadContext, identity)), "context_changed");
+            if (migrating) store.EnableRecovery(cancellationToken);
             return Task.FromResult(store);
         }
         catch (Exception error)
@@ -155,7 +167,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
             var state = State(); A.Need(state.Pending == null, "pending_ack");
             long previous = state.Head == null ? 0 : A.SequenceOf(A.Parse(state.Head), "sequence");
             A.Need(previous != long.MaxValue && A.SequenceOf(records[0], "sequence") == previous + 1);
-            A.Need(Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) == 0, "receipt_mismatch");
+            A.Need(!ReservedRecoveryKey(request) && Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) == 0, "receipt_mismatch");
             foreach (var pair in references)
             {
                 var existing = Artifact(pair.Value, false);
@@ -299,6 +311,15 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
             Transaction(() =>
             {
                 Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE request=$request", ("$receipt", text), ("$reserve", Reserve - A.Bytes(text)), ("$request", request));
+                if (_recovery)
+                {
+                    string? intentText = (string?)Scalar("SELECT intent FROM ack_rebases WHERE previous_request=$request AND result IS NULL AND original_receipt IS NULL", ("$request", request));
+                    if (intentText != null)
+                    {
+                        var intent = RecoveryRequest(A.Parse(intentText));
+                        Exec("UPDATE ack_rebases SET original_receipt=$receipt,reserve=zeroblob($reserve) WHERE previous_request=$request", ("$receipt", text), ("$reserve", RecoveryReserve(intent) - A.Bytes(text)), ("$request", request));
+                    }
+                }
                 Exec("UPDATE state SET pending=NULL WHERE id=1"); Reaccount();
             }, check); return null;
         }, cancellationToken); return Task.CompletedTask;
@@ -406,7 +427,8 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
                 {
                     A.Need(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested(); CheckFixed(); A.Need(!_poisoned, "reentrant");
                     // VerifyCheck 会调用宿主供钥函数，之后必须重新核授权；不能在最后一次回调后交出旧主体正文或提交。
-                    A.Need(A.Equal(scope, Scope(_context, _identity)) && trusted == Sequence.Parse(_retention()).Value, "context_changed");
+                    string currentRetention = Sequence.Parse(_retention()).Value;
+                    A.Need(A.Equal(scope, Scope(_context, _identity)) && trusted == currentRetention, "context_changed");
                     A.Need(!_poisoned, "reentrant"); string local = LocalRevision(); A.Need(allowStale || _historical ? Sequence.Parse(local).ToInt64() <= Sequence.Parse(trusted).ToInt64() : local == trusted, "context_changed");
                     cancellationToken.ThrowIfCancellationRequested();
                 }
@@ -433,6 +455,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
     private void CheckFixed()
     {
         _parent.Check(); _file.Check(); var expected = _cipher == null ? Schema : Schema.Concat(new[] { EncryptionSchema }).ToArray();
+        if (_recovery) expected = expected.Concat(new[] { RecoverySchema, RecoveryIndex }).ToArray();
         A.Need(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == expected.Length && Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND (length(CAST(sql AS BLOB))>4096 OR length(CAST(name AS BLOB))>128)") == 0);
         using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 14"))
         using (var reader = command.ExecuteReader()) { var found = new HashSet<string>(StringComparer.Ordinal); while (reader.Read()) { A.Need(!reader.IsDBNull(0) && expected.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); } A.Need(found.Count == expected.Length); }
@@ -442,6 +465,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
 
     private void Audit()
     {
+        A.Need(Scalar("PRAGMA foreign_key_check") == null);
         foreach (string table in new[] { "metadata", "state", "sync_state" }) A.Need(Number("SELECT count(*) FROM " + table) == 1);
         A.Need(Number("SELECT count(*) FROM records WHERE length(CAST(json AS BLOB))>1048576 OR length(CAST(record_id AS BLOB))>128") == 0);
         A.Need(Number("SELECT count(*) FROM artifacts WHERE length(CAST(json AS BLOB))>1048576 OR length(body)>67117056 OR length(CAST(id AS BLOB))>128") == 0);
@@ -504,6 +528,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
         A.Need(Sequence.Parse(LocalRevision()).ToInt64() == revision);
         A.Need(Number("SELECT count(*) FROM tombstones") == tombstones.Count);
         A.Need(Number("SELECT count(*) FROM tombstones t JOIN records r ON t.record_id=r.record_id OR t.sequence=r.sequence WHERE t.record_id<>r.record_id OR t.sequence<>r.sequence OR json_extract(r.json,'$.recordDigest')<>t.digest") == 0);
+        if (_recovery) AuditRecoveries(state);
         _known = state;
     }
 
@@ -556,7 +581,7 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
             Sum("operations", "length(CAST(request AS BLOB))+length(CAST(ack AS BLOB))+COALESCE(length(CAST(receipt AS BLOB)),0)+length(reserve)") +
             Sum("checkpoints", "16+length(CAST(request AS BLOB))+length(CAST(json AS BLOB))") + Sum("retention", "8+length(CAST(request_id AS BLOB))+length(CAST(json AS BLOB))") +
             Sum("tombstones", "8+length(CAST(record_id AS BLOB))+length(CAST(digest AS BLOB))") + Sum("record_artifacts", "length(CAST(artifact_id AS BLOB))+length(CAST(record_id AS BLOB))") +
-            Sum("sync_state", "length(CAST(revision AS BLOB))") + (_cipher == null ? 0 : Sum("encryption", "length(key_check)"));
+            Sum("sync_state", "length(CAST(revision AS BLOB))") + (_cipher == null ? 0 : Sum("encryption", "length(key_check)")) + RecoveryAccount();
     }
     private StoreState State()
     {
@@ -573,9 +598,9 @@ public sealed class SqliteArchiveStore : ISyncArchiveStore, IDisposable
         JsonElement scope; try { scope = A.Copy(read(), "Scope", 65536); } catch { throw new StorageException("context_changed"); }
         A.Need(A.Equal(A.Without(scope, "authorizationRevision"), identity.GetProperty("scope")), "identity_mismatch"); return scope;
     }
-    private static string Metadata(SqliteArchiveStoreOptions options, StorageFileIdentity parent, StorageFileIdentity file, ArchiveBodyCipher? cipher) => A.Text(A.Object(w =>
+    private static string Metadata(SqliteArchiveStoreOptions options, StorageFileIdentity parent, StorageFileIdentity file, ArchiveBodyCipher? cipher, bool recovery) => A.Text(A.Object(w =>
     {
-        w.WriteString("format", cipher == null ? Format : ArchiveBodyCipher.Format); w.WriteStartObject("identity"); foreach (var property in options.Identity.EnumerateObject()) property.WriteTo(w);
+        w.WriteString("format", recovery ? RecoveryFormat : cipher == null ? Format : ArchiveBodyCipher.Format); w.WriteStartObject("identity"); foreach (var property in options.Identity.EnumerateObject()) property.WriteTo(w);
         A.Property(w, "replica", options.Replica); w.WriteString("syncRole", options.SyncRole); if (cipher != null) w.WriteString("keyId", cipher.KeyId); w.WriteEndObject();
         w.WriteStartObject("limits"); w.WriteNumber("maxRecords", options.Limits.MaxRecords); w.WriteNumber("maxArtifacts", options.Limits.MaxArtifacts); w.WriteNumber("maxStoredBytes", options.Limits.MaxStoredBytes); w.WriteNumber("maxBatchBytes", options.Limits.MaxBatchBytes); w.WriteEndObject();
         w.WriteNumber("maxPages", options.MaxPages); w.WriteNumber("pageSize", 4096); w.WriteStartObject("physical"); w.WriteStartObject("directory"); w.WriteString("dev", parent.Device); w.WriteString("ino", parent.Inode); w.WriteEndObject(); w.WriteStartObject("file"); w.WriteString("dev", file.Device); w.WriteString("ino", file.Inode); w.WriteEndObject(); w.WriteEndObject();

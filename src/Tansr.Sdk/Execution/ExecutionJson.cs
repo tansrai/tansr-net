@@ -45,7 +45,7 @@ internal static class ExecutionJson
             Check(Equal(operation.GetProperty("binding").GetProperty("target").GetProperty("interpreter"), args.GetProperty("interpreter")));
         if (Text(request, "operation") == "tool.invoke")
         {
-            Check(Text(operation, "toolName") == Text(args, "name"));
+            Check(Terminal.TerminalCandidateContract.ValidToolInvocation(operation));
             var json = System.Text.Encoding.UTF8.GetBytes(Text(args, "argsJson"));
             Check(WireJson.Parse(json, 32768, 32).ValueKind == JsonValueKind.Object);
         }

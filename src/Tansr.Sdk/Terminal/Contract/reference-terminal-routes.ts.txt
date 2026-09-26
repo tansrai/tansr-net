@@ -12,7 +12,7 @@ import { TerminalCapabilityError } from './terminal-capabilities.js';
 import { TerminalOutputError } from './terminal-output.js';
 import { parseTerminalContract } from './terminal-contract.generated.js';
 import type { TerminalErrorCode, TerminalErrorResponse, TerminalExecutorEvent, TerminalOutputEvent,
-  TerminalBindingRequest, TerminalCapabilitiesResponse, TerminalOutputBatchRequest, TerminalOperationReference,
+  TerminalBindingRequest, TerminalBindingResponse, TerminalCapabilitiesResponse, TerminalOutputBatchRequest, TerminalOperationReference,
   TerminalSessionContract, TerminalSessionReference } from './terminal-contract.generated.js';
 import type { TerminalExecutionService } from './terminal-execution.js';
 
@@ -28,6 +28,7 @@ export interface TerminalControlRouteContext {
 export interface TerminalRoutesDeps {
   readonly serviceFor: (contract: TerminalSessionContract) => TerminalExecutionService | undefined;
   readonly capabilities: () => TerminalCapabilitiesResponse;
+  readonly bindControl?: (user: string, authority: AgentExecutionAuthority, request: TerminalBindingRequest, signal: AbortSignal) => Promise<TerminalBindingResponse>;
   readonly authenticate: RequestAuthenticator['authenticate'];
   readonly authorize: (req: IncomingMessage, res: ServerResponse, user: string, contract: TerminalSessionContract) => Promise<AgentExecutionAuthority>;
   readonly admission: AdmissionController;
@@ -217,8 +218,10 @@ export function createTerminalRoutesHandler(deps: TerminalRoutesDeps):
       if (await identity(req, res) !== user) fail('unauthorized');
       if (binding) {
         const input = parse<TerminalBindingRequest>('BindingRequest', value), contract = input.session.sessionContract;
-        const service = serviceFor(contract), authority = await deps.authorize(req, res, user, contract);
-        response(res, 'BindingResponse', await service.bind(user, authority, input, signal));
+        const service = deps.serviceFor(contract), authority = await deps.authorize(req, res, user, contract);
+        const result = service ? await service.bind(user, authority, input, signal) : await deps.bindControl?.(user, authority, input, signal);
+        if (!result) fail('unsupported_capability');
+        response(res, 'BindingResponse', result);
       } else {
         const input = parse<TerminalOutputBatchRequest>('OutputBatchRequest', value), contract = input.session.sessionContract;
         if (input.executorId !== decodeURIComponent(executor![1]!)) fail('invalid_request');

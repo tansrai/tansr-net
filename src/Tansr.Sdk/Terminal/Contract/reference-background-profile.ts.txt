@@ -1,0 +1,20 @@
+/** 内部保留profile的唯一精确识别；不能借普通业务工具或Shell权限出版记忆。 */
+import type { Sdk2ExecutionOperation } from '../sdk2/wire-types-generated.js';
+import { validateTerminalNamed } from './wire-codec.js';
+import { TERMINAL_BACKGROUND_TOOL_NAME, TERMINAL_BACKGROUND_TOOL_DEFINITION_SHA256,
+  TERMINAL_MEMORY_PUBLICATION_TOOL_NAME, TERMINAL_MEMORY_PUBLICATION_TOOL_DEFINITION_SHA256 } from './wire-schema-generated.js';
+
+export function validTerminalToolInvocation(operation: Sdk2ExecutionOperation): boolean {
+  if (operation.request.operation !== 'tool.invoke') return false;
+  const args = operation.request.args;
+  if (args.name === TERMINAL_MEMORY_PUBLICATION_TOOL_NAME) {
+    if (operation.toolName !== 'MemoryPublication' || args.definitionDigest !== TERMINAL_MEMORY_PUBLICATION_TOOL_DEFINITION_SHA256 ||
+      new TextEncoder().encode(args.argsJson).byteLength > 32768) return false;
+    try { validateTerminalNamed('MemoryPublicationRequest', JSON.parse(args.argsJson)); return true; } catch { return false; }
+  }
+  if (args.name !== TERMINAL_BACKGROUND_TOOL_NAME) return operation.toolName === args.name;
+  if (operation.toolName !== 'Shell' || args.definitionDigest !== TERMINAL_BACKGROUND_TOOL_DEFINITION_SHA256 ||
+    new TextEncoder().encode(args.argsJson).byteLength > 32768) return false;
+  try { validateTerminalNamed('BackgroundRequest', JSON.parse(args.argsJson)); return true; }
+  catch { return false; }
+}

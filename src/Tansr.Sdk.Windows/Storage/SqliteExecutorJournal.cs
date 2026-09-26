@@ -300,7 +300,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         if (op.GetProperty("request").GetProperty("operation").GetString() == "tool.invoke")
         {
             var args = op.GetProperty("request").GetProperty("args");
-            Require(op.GetProperty("toolName").GetString() == args.GetProperty("name").GetString());
+            Require(Tansr.Sdk.Terminal.TerminalCandidateContract.ValidToolInvocation(op));
             Require(WireJson.Parse(Encoding.UTF8.GetBytes(args.GetProperty("argsJson").GetString()!)).ValueKind == JsonValueKind.Object);
         }
         return op;

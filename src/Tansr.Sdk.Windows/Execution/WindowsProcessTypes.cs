@@ -50,6 +50,11 @@ public sealed class WindowsProcessRequest
     public TimeSpan OutputCallbackTimeout { get; set; } = TimeSpan.FromSeconds(5);
 
     public TimeSpan CleanupTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
+    // 后台适配复用同一原生启动/Job链，见证由宿主内部消费，不是远端可设置参数。
+    internal Action<int>? Started { get; set; }
+    internal bool DrainAfterOutputLimit { get; set; }
+    internal Action? OutputTruncated { get; set; }
 }
 
 public enum WindowsProcessOutputStream

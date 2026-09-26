@@ -1,6 +1,6 @@
 {
   "description": "SRV-01候选结构金样：仅断言两端结构与标量保真；不代表鉴权、跨字段完整性、持久性或完整协议冻结。",
-  "schemaSha256": "5973fde3f029f9c92794cde385e4041a150de0ace476bb2f6ff2c63c2a166dd0",
+  "schemaSha256": "8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896",
   "copiedDefinitions": [
     "Id",
     "LegacyId",
@@ -48,8 +48,8 @@
       "definition": "CapabilitiesResponse",
       "value": {
         "contract": "terminal-services-v1",
-        "schemaRevision": "2026-09-26.candidate-4",
-        "schemaSha256": "5973fde3f029f9c92794cde385e4041a150de0ace476bb2f6ff2c63c2a166dd0",
+        "schemaRevision": "2026-09-26.candidate-7",
+        "schemaSha256": "8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896",
         "sessionContracts": [
           "sdk1",
           "sdk2-offload-v1"
@@ -451,6 +451,54 @@
         "cwd": "",
         "mode": "background",
         "timeoutMs": 300000
+      }
+    },
+    {
+      "id": "memory-domain-hierarchy",
+      "definition": "MemoryIdentifier",
+      "value": "application/user.project"
+    },
+    {
+      "id": "memory-publication-head",
+      "definition": "MemoryPublicationRequest",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "head"
+      }
+    },
+    {
+      "id": "memory-publication-cas-begin",
+      "definition": "MemoryPublicationRequest",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "begin",
+        "transferId": "transfer-1",
+        "expectedEtag": null,
+        "byteLength": 4194304,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "memory-publication-unknown",
+      "definition": "MemoryPublicationResponse",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "query",
+        "transfer": {
+          "transferId": "transfer-1",
+          "status": "unknown",
+          "receivedBytes": null,
+          "etag": null
+        }
       }
     }
   ],
@@ -883,6 +931,52 @@
         "mode": "background",
         "timeoutMs": 1000,
         "requestDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "memory-control-character",
+      "definition": "MemoryIdentifier",
+      "value": "bad\nname"
+    },
+    {
+      "id": "memory-publication-size-limit",
+      "definition": "MemoryPublicationRequest",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "begin",
+        "transferId": "transfer-1",
+        "expectedEtag": null,
+        "byteLength": 4194305,
+        "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      }
+    },
+    {
+      "id": "memory-publication-scope-injection",
+      "definition": "MemoryPublicationRequest",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "head",
+        "applicationScopeId": "other-app"
+      }
+    },
+    {
+      "id": "memory-publication-read-limit",
+      "definition": "MemoryPublicationRequest",
+      "value": {
+        "contract": "terminal-services-v1",
+        "sourceId": "device-memory",
+        "sourceGeneration": "9007199254740993",
+        "domainKey": "app/user",
+        "action": "read",
+        "etag": "etag",
+        "offset": 0,
+        "length": 12289
       }
     }
   ],

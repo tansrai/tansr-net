@@ -13,6 +13,8 @@
     <EmbeddedResource Include="../../contract/sdk2-ext-v1.schema.json" LogicalName="Tansr.Sdk.Protocol.sdk2-ext-v1.schema.json" />
     <EmbeddedResource Include="Cache/Contract/sdk2-cache-v1.schema.json" LogicalName="Tansr.Sdk.Cache.sdk2-cache-v1.schema.json" />
     <EmbeddedResource Include="Terminal/Contract/terminal-services-v1.schema.json" LogicalName="Tansr.Sdk.Terminal.terminal-services-v1.schema.json" />
+    <EmbeddedResource Include="Terminal/Contract/sdk2-archive-recovery-v1.schema.json" LogicalName="Tansr.Sdk.Protocol.sdk2-archive-recovery-v1.schema.json" />
     <InternalsVisibleTo Include="Tansr.Sdk.Tests" />
+    <InternalsVisibleTo Include="Tansr.Sdk.IntegrationTests" />
   </ItemGroup>
 </Project>

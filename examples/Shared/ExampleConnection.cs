@@ -1,4 +1,5 @@
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Terminal;
 #if WINDOWS || NETFRAMEWORK
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
@@ -11,6 +12,7 @@ internal sealed class ExampleConnection
     private ExampleConnection(TansrClient client) { Client = client; }
     internal TansrClient Client { get; }
     internal bool OwnsLocalServe { get; private set; }
+    internal TerminalSessionControl? SessionControl { get; private set; }
     private NativeMcpToolConnection? _mcp;
     internal IReadOnlyList<NativeToolBinding> NativeTools => _mcp?.Bindings ?? Array.Empty<NativeToolBinding>();
 #if WINDOWS || NETFRAMEWORK
@@ -19,13 +21,24 @@ internal sealed class ExampleConnection
 #endif
     internal static async Task<ExampleConnection> ConnectAsync(string? endpoint, Func<CancellationToken, Task<string>> tokenProvider, bool allowHttp, CancellationToken ct = default)
     {
+        var scope = TrustedExampleScope.FromEnvironment();
+        var preview = Environment.GetEnvironmentVariable("TANSR_TERMINAL_PREVIEW") == "1";
+        if (preview && scope == null) throw new InvalidOperationException("terminal_preview_requires_trusted_scope_file");
         var executable = Environment.GetEnvironmentVariable("TANSR_LOCAL_SERVE_EXE");
         if (string.IsNullOrWhiteSpace(executable))
         {
             if (string.IsNullOrWhiteSpace(endpoint)) throw new InvalidOperationException("TANSR_SERVE_URL_required");
             var connection = new ExampleConnection(new TansrClient(new TansrClientOptions
-            { BaseUri = new Uri(endpoint), TokenProvider = tokenProvider, AllowInsecureLoopback = allowHttp, MaxResponseBytes = 32 * 1024 * 1024, MaxEventBytes = 32 * 1024 * 1024 }));
-            try { connection._mcp = await NativeMcpToolConnection.OpenConfiguredAsync(ct); return connection; }
+            {
+                BaseUri = new Uri(endpoint),
+                TokenProvider = tokenProvider,
+                AllowInsecureLoopback = allowHttp,
+                MaxResponseBytes = 32 * 1024 * 1024,
+                MaxEventBytes = 32 * 1024 * 1024,
+                PrincipalProvider = scope == null ? null : scope.ReadPrincipal,
+                ExecutionScopeProvider = scope == null ? null : scope.ReadScope
+            }));
+            try { if (preview) connection.SessionControl = new TerminalSessionControl(connection.Client, true); connection._mcp = await NativeMcpToolConnection.OpenConfiguredAsync(ct); return connection; }
             catch { await connection.CloseAsync(); throw; }
         }
 #if WINDOWS || NETFRAMEWORK
@@ -45,7 +58,9 @@ internal sealed class ExampleConnection
                 if (value != null) options.Environment.Add(key, value);
             }
             serve = await LocalServeHost.StartAsync(options, ct);
-            ownedConnection = new ExampleConnection(serve.CreateClient(maximumResponseBytes: 32 * 1024 * 1024, maximumEventBytes: 32 * 1024 * 1024)) { _serve = serve, _workspace = workspace, OwnsLocalServe = true };
+            ownedConnection = new ExampleConnection(serve.CreateClient(principalProvider: scope == null ? null : scope.ReadPrincipal, executionScopeProvider: scope == null ? null : scope.ReadScope,
+                maximumResponseBytes: 32 * 1024 * 1024, maximumEventBytes: 32 * 1024 * 1024)) { _serve = serve, _workspace = workspace, OwnsLocalServe = true };
+            if (preview) ownedConnection.SessionControl = new TerminalSessionControl(ownedConnection.Client, true);
             ownedConnection._mcp = await NativeMcpToolConnection.OpenConfiguredAsync(ct); return ownedConnection;
         }
         catch

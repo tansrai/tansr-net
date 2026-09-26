@@ -1,0 +1,90 @@
+/** Serve 配置与长期记忆控制；沿同一个终端客户端的身份、取消及有界传输。 */
+import { clientFail, encodeControl, equalControl, freezeControl } from '../sdk2/wire-codec.js';
+import type { Sdk2SessionRequestOptions } from '../sdk2/session-client.js';
+import { requestTerminalControl, type TerminalClient } from './client.js';
+import { validateTerminalNamed } from './wire-codec.js';
+import type * as W from './wire-types-generated.js';
+
+export type TerminalMemoryStatusQuery = Pick<W.TerminalMemoryCommandRequest, 'requestId' | 'operationId'>;
+const CONTRACT = 'terminal-services-v1' as const;
+function snapshot<T>(name: string, value: unknown): T {
+  return freezeControl(validateTerminalNamed<T>(name, JSON.parse(encodeControl(value))));
+}
+function sessionPath(session: W.TerminalSessionReference): string {
+  return '/sessions/' + segment(session.sessionId);
+}
+function segment(value: string): string {
+  // WHATWG URL 会归一化完整点段；不能向另一条路由发送控制请求。
+  if (value === '.' || value === '..') clientFail('invalid_request');
+  return encodeURIComponent(value);
+}
+function query(session: W.TerminalSessionReference, extra: Record<string, string> = {}): string {
+  return '?' + new URLSearchParams({ contract: CONTRACT, sessionContract: session.sessionContract, ...extra });
+}
+function sameSession(value: { readonly session: W.TerminalSessionReference }, session: W.TerminalSessionReference): void {
+  if (!equalControl(value.session, session)) clientFail();
+}
+
+/**
+ * 与 TerminalClient 共用实例，不自行刷新身份或创建另一份会话。
+ * 写入不自动重试：结果未知时，由调用者保留原 requestId/operationId 查询或重放。
+ * 接口保留服务端 changed/replayed、pending/unknown/committed/failed 与耐久/消费事实。
+ */
+export class TerminalControlClient {
+  readonly #client: TerminalClient;
+  constructor(client: TerminalClient) { this.#client = client; }
+
+  async configuration(session: W.TerminalSessionReference, options?: Sdk2SessionRequestOptions): Promise<W.TerminalConfigurationResponse> {
+    const selected = snapshot<W.TerminalSessionReference>('SessionReference', session);
+    const value = await requestTerminalControl<W.TerminalConfigurationResponse>(this.#client, 'GET',
+      sessionPath(selected) + '/configuration' + query(selected), undefined, 'ConfigurationResponse', options);
+    sameSession(value, selected); return value;
+  }
+
+  /** 原会话内 CAS；忙时拒绝，成功回执保留原配置 revision，不能通过重建会话重试。 */
+  async configure(request: W.TerminalConfigurationRequest, options?: Sdk2SessionRequestOptions): Promise<W.TerminalConfigurationCommitResponse> {
+    const source = snapshot<W.TerminalConfigurationRequest>('ConfigurationRequest', request);
+    if (Object.keys(source.changes).length === 0) clientFail('invalid_request');
+    const value = await requestTerminalControl<W.TerminalConfigurationCommitResponse>(this.#client, 'POST',
+      sessionPath(source.session) + '/configuration', source, 'ConfigurationCommitResponse', options);
+    sameSession(value, source.session);
+    if (value.requestId !== source.requestId || value.configuration.revision !== source.expectedRevision + 1 ||
+      source.changes.model !== undefined && value.configuration.model !== source.changes.model ||
+      source.changes.thinking !== undefined && !equalControl(value.configuration.thinking, source.changes.thinking)) clientFail();
+    return value;
+  }
+
+  async memoryState(session: W.TerminalSessionReference, options?: Sdk2SessionRequestOptions): Promise<W.TerminalMemoryStateResponse> {
+    const selected = snapshot<W.TerminalSessionReference>('SessionReference', session);
+    const value = await requestTerminalControl<W.TerminalMemoryStateResponse>(this.#client, 'GET',
+      sessionPath(selected) + '/memory' + query(selected), undefined, 'MemoryStateResponse', options);
+    sameSession(value, selected); return value;
+  }
+
+  /** pin/remember/forget 使用原来源代际和 revision；unknown 不是失败或已消费。 */
+  async memoryCommand(request: W.TerminalMemoryCommandRequest, options?: Sdk2SessionRequestOptions): Promise<W.TerminalMemoryReceiptResponse> {
+    const source = snapshot<W.TerminalMemoryCommandRequest>('MemoryCommandRequest', request);
+    const value = await requestTerminalControl<W.TerminalMemoryReceiptResponse>(this.#client, 'POST',
+      sessionPath(source.session) + '/memory/commands', source, 'MemoryReceiptResponse', options);
+    sameSession(value, source.session);
+    if (value.receipt === null || ['requestId', 'operationId', 'sourceId', 'sourceGeneration', 'expectedRevision'].some(
+      key => value.receipt![key as keyof W.TerminalMemoryReceipt] !== source[key as keyof W.TerminalMemoryCommandRequest])) clientFail();
+    return value;
+  }
+
+  /** 仅查询原 operation；null 表示该来源没有回执，不自动改键重发。 */
+  async memoryCommandStatus(session: W.TerminalSessionReference, reference: TerminalMemoryStatusQuery,
+    options?: Sdk2SessionRequestOptions): Promise<W.TerminalMemoryReceiptResponse> {
+    const selected = snapshot<W.TerminalSessionReference>('SessionReference', session);
+    const captured = JSON.parse(encodeControl(reference)) as TerminalMemoryStatusQuery;
+    if (captured === null || typeof captured !== 'object' || Array.isArray(captured) ||
+      Object.keys(captured).length !== 2 || !Object.hasOwn(captured, 'operationId') || !Object.hasOwn(captured, 'requestId')) clientFail('invalid_request');
+    validateTerminalNamed('MemoryIdentifier', captured.operationId); validateTerminalNamed('MemoryIdentifier', captured.requestId);
+    const value = await requestTerminalControl<W.TerminalMemoryReceiptResponse>(this.#client, 'GET',
+      sessionPath(selected) + '/memory/commands/' + segment(captured.operationId) + query(selected, { requestId: captured.requestId }),
+      undefined, 'MemoryReceiptResponse', options);
+    sameSession(value, selected);
+    if (value.receipt !== null && (value.receipt.operationId !== captured.operationId || value.receipt.requestId !== captured.requestId)) clientFail();
+    return value;
+  }
+}

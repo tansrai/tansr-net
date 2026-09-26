@@ -11,7 +11,9 @@ internal sealed class TerminalExecutionOutputSink : IExecutionOutputSink, IDispo
     private readonly TerminalCandidateBinding binding;
     private readonly object gate = new();
     private readonly Dictionary<string, Capture> captures = new(StringComparer.Ordinal);
+    private readonly HashSet<Capture> active = new();
     private bool disposed;
+    private Task? closing;
     internal TerminalExecutionOutputSink(TerminalCandidateClient client, TerminalCandidateBinding binding)
     { this.client = client; this.binding = binding; client.AssertBinding(binding); }
     public Task<IExecutionOutputCapture> OpenAsync(JsonElement operation, CancellationToken cancellationToken)
@@ -22,9 +24,13 @@ internal sealed class TerminalExecutionOutputSink : IExecutionOutputSink, IDispo
             if (disposed) throw new ObjectDisposedException(nameof(TerminalExecutionOutputSink));
             var id = TerminalJson.Text(operation, "operationId");
             TerminalJson.Check(!captures.ContainsKey(id), "commit_unknown");
-            TerminalJson.Check(captures.Count < 8, "capacity_exceeded");
+            TerminalJson.Check(captures.Count < 8 && active.Count < 8, "capacity_exceeded");
             var capture = new Capture(client.CreateOutputProducer(binding, operation), () => ReleaseCapture(id));
-            captures.Add(id, capture); return Task.FromResult<IExecutionOutputCapture>(capture);
+            captures.Add(id, capture); active.Add(capture);
+            _ = capture.Completion.ContinueWith(task =>
+            { _ = task.Exception; lock (gate) active.Remove(capture); }, CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            return Task.FromResult<IExecutionOutputCapture>(capture);
         }
     }
     internal Capture? FindCapture(string operationId)
@@ -32,12 +38,23 @@ internal sealed class TerminalExecutionOutputSink : IExecutionOutputSink, IDispo
     // Explicit release discards this memory-only source; a caller must not claim later replayability.
     internal void ReleaseCapture(string operationId)
     { lock (gate) if (captures.TryGetValue(operationId, out var capture)) { captures.Remove(operationId); capture.Release(); } }
+    internal Task CloseAsync()
+    {
+        lock (gate)
+        {
+            if (closing != null) return closing;
+            disposed = true;
+            var retained = captures.Values.Concat(active).Distinct().ToArray();
+            captures.Clear();
+            foreach (var capture in retained) capture.Release();
+            closing = Task.WhenAll(retained.Select(x => x.Completion));
+            return closing;
+        }
+    }
     public void Dispose()
     {
-        Capture[] retained;
-        lock (gate)
-        { if (disposed) return; disposed = true; retained = captures.Values.ToArray(); captures.Clear(); }
-        foreach (var capture in retained) capture.Release();
+        _ = CloseAsync().ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
     internal sealed class Capture : IExecutionOutputCapture
     {
@@ -61,8 +78,19 @@ internal sealed class TerminalExecutionOutputSink : IExecutionOutputSink, IDispo
         {
             // Completion may fault, but the immutable original blocks survive for a read-only
             // reconciliation. This method does not restart either the pump or the native process.
+            cancellationToken.ThrowIfCancellationRequested();
             Dispose();
+            if (!Completion.IsCompleted && cancellationToken.CanBeCanceled)
+            {
+                var cancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                using (cancellationToken.Register(() => cancelled.TrySetResult(true)))
+                {
+                    await Task.WhenAny(Completion, cancelled.Task).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
+                }
+            }
             try { await Completion.ConfigureAwait(false); } catch { }
+            cancellationToken.ThrowIfCancellationRequested();
             lock (gate) if (released) throw new ObjectDisposedException(nameof(Capture));
             return await producer.ReconcileAsync(cancellationToken).ConfigureAwait(false);
         }

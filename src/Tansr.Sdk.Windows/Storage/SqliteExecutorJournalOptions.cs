@@ -18,4 +18,4 @@ public sealed class SqliteExecutorJournalOptions
     public Func<JsonElement> ReadContext { get; set; } = null!;
 }
 
-public enum StorageOpenMode { Create, Reopen }
+public enum StorageOpenMode { Create, Reopen, MigrateV1 }

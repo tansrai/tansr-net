@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $taskRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $manifest = Get-Content -LiteralPath (Join-Path $taskRoot 'contract/manifest.json') -Raw | ConvertFrom-Json
 if ($manifest.format -ne 'tansr-net-contract-lock-v1' -or $manifest.protocol -ne 'sdk2-ext-v1' -or
-    $manifest.terminalServices -ne 'not-frozen-not-implemented') { throw 'Unknown contract lock format.' }
+    $manifest.terminalServices -ne 'separately-pinned-preview') { throw 'Unknown contract lock format.' }
 
 function Resolve-ContractPath([string]$root, [string]$relative) {
     $absoluteRoot = [IO.Path]::GetFullPath($root).TrimEnd([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)

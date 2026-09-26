@@ -3,7 +3,7 @@
   "protocol": "sdk2-ext-v1",
   "sourceRepository": "tansr-cli",
   "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
-  "terminalServices": "not-frozen-not-implemented",
+  "terminalServices": "separately-pinned-preview",
   "files": [
     {
       "snapshot": "contract/sdk2-ext-v1.schema.json",

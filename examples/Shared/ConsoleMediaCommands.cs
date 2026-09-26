@@ -5,7 +5,7 @@ using Tansr.Sdk.Views;
 
 namespace Tansr.Examples;
 
-internal sealed class ConsoleMediaCommands(MediaWorkspace workspace, SessionView view, Action<string> write)
+internal sealed class ConsoleMediaCommands(MediaWorkspace workspace, SessionView view, Action<string> write, Action<string>? draftChanged = null)
 {
     private SpeechBatch? _speech;
     private string? _draft;
@@ -34,6 +34,7 @@ internal sealed class ConsoleMediaCommands(MediaWorkspace workspace, SessionView
             var path = command.Substring(5); var mime = Path.GetExtension(path).ToLowerInvariant() switch
             { ".wav" => "audio/wav", ".mp3" => "audio/mpeg", ".m4a" => "audio/mp4", ".ogg" => "audio/ogg", ".webm" => "audio/webm", ".flac" => "audio/flac", _ => throw new MediaException("audio_format_unsupported") };
             _draft = await workspace.TranscribeAsync(await BoundedFiles.ReadAsync(path, 16 * 1024 * 1024), mime, model, ct);
+            draftChanged?.Invoke(_draft);
             write("transcription_draft（未发送；/send-draft显式发送）\n" + _draft); return true;
         }
         if (command == "/send-draft")

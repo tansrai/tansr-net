@@ -155,7 +155,7 @@ public sealed class WireJsonTests
         Assert.Equal(WireContract.SchemaSha256, WireJson.Sha256(bytes));
         using var fixture = Fixture("manifest.json");
         Assert.Equal(WireContract.SourceRevision, fixture.RootElement.GetProperty("sourceRevision").GetString());
-        Assert.Equal("not-frozen-not-implemented", fixture.RootElement.GetProperty("terminalServices").GetString());
+        Assert.Equal("separately-pinned-preview", fixture.RootElement.GetProperty("terminalServices").GetString());
     }
 
     public static IEnumerable<object[]> SchemaVectors()

@@ -1,0 +1,130 @@
+/** 新命名空间的配置控制复用原会话、owner及Store CAS，不另开一份运行状态。 */
+import { TerminalCapabilityError } from './terminal-capabilities.js';
+import type { TerminalConfigurationRequest, TerminalErrorCode, TerminalSessionReference } from './terminal-contract.generated.js';
+import { parseTerminalRouteValue, terminalRouteQuery, type TerminalControlRouteContext } from './terminal-routes.js';
+import type { AgentConfigureResult, AgentSessionHandle } from './types.js';
+import { getPlatformMemoryLifecycle, getPlatformMemoryCommandRunner, getPlatformMemoryPreparation } from './memory-lifecycle.js';
+import { MemoryManagementError } from './memory-management.js';
+import type { TerminalMemoryCommandRequest } from './terminal-contract.generated.js';
+
+export interface TerminalControlOptions {
+  resolve(user: string, reference: TerminalSessionReference): AgentSessionHandle;
+  /** 复用原执行政策/租约。无执行宿主的SDK1保留原认证及owner控制边界。 */
+  check(user: string, reference: TerminalSessionReference, signal: AbortSignal): Promise<void>;
+}
+function reject(code: TerminalErrorCode): never { throw new TerminalCapabilityError(code); }
+function rejected(result: Extract<AgentConfigureResult, { status: 'rejected' }>): never {
+  const reason = result.reason;
+  switch (reason) {
+    case 'turn_running': return reject('busy');
+    case 'session_ended': return reject('stale_generation');
+    case 'invalid_configuration': return reject('invalid_request');
+    case 'unsupported': return reject('unsupported_capability');
+    case 'context_transition_required': case 'revision_conflict': case 'request_conflict': case 'request_limit': return reject(reason);
+  }
+}
+
+export function createTerminalControlHandler(options: TerminalControlOptions): (context: TerminalControlRouteContext) => Promise<boolean> {
+  return async context => {
+    const memory = /^\/v3\/terminal\/sessions\/([^/]+)\/memory(?:\/commands(?:\/([^/]+))?)?$/.exec(context.pathname);
+    if (memory) return handleMemory(context, options, memory);
+    const route = /^\/v3\/terminal\/sessions\/([^/]+)\/configuration$/.exec(context.pathname);
+    if (!route) return false;
+    if (context.method !== 'GET' && context.method !== 'POST') reject('invalid_request');
+    let reference: TerminalSessionReference, request: TerminalConfigurationRequest | undefined;
+    const id = decodeURIComponent(route[1]!);
+    if (context.method === 'GET') {
+      const query = terminalRouteQuery(context.req, ['contract', 'sessionContract']);
+      reference = parseTerminalRouteValue('SessionReference', { sessionContract: query.get('sessionContract'), sessionId: id });
+    } else {
+      terminalRouteQuery(context.req, []);
+      request = parseTerminalRouteValue<TerminalConfigurationRequest>('ConfigurationRequest', await context.readBody());
+      if (request.session.sessionId !== id || Object.keys(request.changes).length === 0) reject('invalid_request');
+      reference = request.session;
+    }
+    const authority = await context.authorize(reference.sessionContract);
+    if (!authority.controller) reject('forbidden');
+    context.signal.throwIfAborted();
+    const handle = options.resolve(context.endUserId, reference);
+    await options.check(context.endUserId, reference, context.signal);
+    if (handle !== options.resolve(context.endUserId, reference)) reject('stale_generation');
+    context.signal.throwIfAborted();
+    const current = handle.configuration?.();
+    if (!current || !handle.configure) reject('unsupported_capability');
+    if (request === undefined) {
+      context.reply('ConfigurationResponse', { contract: 'terminal-services-v1', session: reference, configuration: current });
+    } else {
+      const result = await handle.configure({ requestId: request.requestId, expectedRevision: request.expectedRevision, changes: request.changes }, { signal: context.signal,
+        beforeCommit: async () => {
+          const currentAuthority = await context.authorize(reference.sessionContract);
+          if (!currentAuthority.controller) reject('forbidden');
+          await options.check(context.endUserId, reference, context.signal);
+          if (handle !== options.resolve(context.endUserId, reference)) reject('stale_generation');
+          context.signal.throwIfAborted();
+        },
+      });
+      if (result.status === 'rejected') rejected(result);
+      context.reply('ConfigurationCommitResponse', { contract: request.contract, requestId: request.requestId,
+        session: reference, status: result.status, configuration: result.configuration });
+    }
+    return true;
+  };
+}
+
+async function handleMemory(context: TerminalControlRouteContext, options: TerminalControlOptions, route: RegExpExecArray): Promise<boolean> {
+  try {
+    const sessionId = decodeURIComponent(route[1]!);
+    const isCommand = context.pathname.endsWith('/memory/commands');
+    const operationId = route[2] === undefined ? undefined : decodeURIComponent(route[2]);
+    if (context.method !== (isCommand ? 'POST' : 'GET')) reject('invalid_request');
+    let reference: TerminalSessionReference, input: TerminalMemoryCommandRequest | undefined, requestId: string | undefined;
+    if (isCommand) {
+      terminalRouteQuery(context.req, []);
+      input = parseTerminalRouteValue<TerminalMemoryCommandRequest>('MemoryCommandRequest', await context.readBody());
+      if (input.session.sessionId !== sessionId) reject('invalid_request');
+      reference = input.session;
+    } else {
+      const query = terminalRouteQuery(context.req, ['contract', 'sessionContract', ...(operationId ? ['requestId'] : [])]);
+      reference = parseTerminalRouteValue('SessionReference', { sessionContract: query.get('sessionContract'), sessionId });
+      if (operationId !== undefined) {
+        parseTerminalRouteValue('MemoryIdentifier', operationId);
+        requestId = parseTerminalRouteValue('MemoryIdentifier', query.get('requestId'));
+      }
+    }
+    const handle = options.resolve(context.endUserId, reference);
+    const check = async () => {
+      const authority = await context.authorize(reference.sessionContract);
+      if (!authority.controller) reject('forbidden');
+      await options.check(context.endUserId, reference, context.signal);
+      if (handle !== options.resolve(context.endUserId, reference)) reject('stale_generation');
+      context.signal.throwIfAborted();
+    };
+    await check();
+    await getPlatformMemoryPreparation(handle)?.prepare(context.signal);
+    await check();
+    const lifecycle = getPlatformMemoryLifecycle(handle), source = lifecycle?.management;
+    if (!lifecycle || !source) reject('unsupported_capability');
+    lifecycle.assertAvailable();
+    if (source.identity.endUserId !== context.endUserId) reject('forbidden');
+    if (input !== undefined) {
+      const runner = getPlatformMemoryCommandRunner(handle);
+      if (!runner) reject('unsupported_capability');
+      const { contract: _contract, session: _session, ...request } = input;
+      const receipt = await runner(request, { signal: context.signal, beforeCommit: check });
+      await check(); lifecycle.assertAvailable();
+      context.reply('MemoryReceiptResponse', { contract: 'terminal-services-v1', session: reference, receipt });
+    } else if (operationId !== undefined) {
+      const receipt = await source.status(operationId, requestId);
+      await check(); lifecycle.assertAvailable();
+      context.reply('MemoryReceiptResponse', { contract: 'terminal-services-v1', session: reference, receipt });
+    } else {
+      const memory = await source.read();
+      await check(); lifecycle.assertAvailable();
+      context.reply('MemoryStateResponse', { contract: 'terminal-services-v1', session: reference, memory });
+    }
+    return true;
+  } catch (error) {
+    if (error instanceof MemoryManagementError) throw new TerminalCapabilityError(error.code);
+    throw error;
+  }
+}

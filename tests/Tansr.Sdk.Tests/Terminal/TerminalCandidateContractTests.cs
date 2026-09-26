@@ -55,7 +55,7 @@ public sealed class TerminalCandidateContractTests
         foreach (var name in Goldens().GetProperty("copiedDefinitions").EnumerateArray())
             Assert.Equal(WireJson.CanonicalString(original.RootElement.GetProperty("definitions").GetProperty(name.GetString()!)),
                 WireJson.CanonicalString(candidate.RootElement.GetProperty("definitions").GetProperty(name.GetString()!)));
-        Assert.DoesNotContain(assembly.ExportedTypes, type => type.Namespace == "Tansr.Sdk.Terminal");
+        Assert.DoesNotContain(assembly.ExportedTypes, type => type == typeof(TerminalCandidateContract) || type == typeof(EmbeddedWireContract));
     }
     [Fact]
     public void RepresentableBoundaryBlockIsStructurallyValidButCannotOverflowOffset()

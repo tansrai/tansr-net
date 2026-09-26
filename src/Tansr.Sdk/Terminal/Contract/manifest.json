@@ -1,23 +1,36 @@
 {
   "format": "tansr-terminal-candidate-lock-v1",
   "contract": "terminal-services-v1",
-  "revision": "2026-09-26.candidate-4",
+  "revision": "2026-09-26.candidate-7",
   "sourceRepository": "tansr-cli",
   "sourceCommitted": false,
   "sourceBaseCommit": "b2cd6641e1886d9e74439e3b7623be57bc3247ba",
-  "status": "internal-candidate-not-frozen-not-public",
+  "status": "schema-pinned-preview-opt-in",
+  "sourceWorktreeSnapshot": true,
+  "archiveRecovery": {
+    "contract": "sdk2-archive-recovery-v1",
+    "schemaSha256": "f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4",
+    "resourceName": "Tansr.Sdk.Protocol.sdk2-archive-recovery-v1.schema.json",
+    "limits": {
+      "ackBytes": 262144,
+      "requestEnvelopeBytes": 1024,
+      "responseEnvelopeBytes": 4096,
+      "requestBytes": 263168,
+      "responseBytes": 528384
+    }
+  },
   "files": [
     {
       "snapshot": "src/Tansr.Sdk/Terminal/Contract/terminal-services-v1.schema.json",
       "source": "doc/rfc/terminal-services-v1.schema.json",
-      "bytes": 55273,
-      "sha256": "5973fde3f029f9c92794cde385e4041a150de0ace476bb2f6ff2c63c2a166dd0"
+      "bytes": 70442,
+      "sha256": "8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896"
     },
     {
       "snapshot": "tests/Tansr.Sdk.Tests/Terminal/Fixtures/terminal-services-v1.golden.json",
       "source": "doc/rfc/terminal-services-v1.golden.json",
-      "bytes": 56086,
-      "sha256": "c277bbda6e73562d06c3d2d4e3508ecf3934036bb12f1ded49a0afbd16fbb317"
+      "bytes": 58884,
+      "sha256": "a19ee430360ca883723bb5836e8966e51e83f9831c57b1da3c1368cd3ef5e66a"
     },
     {
       "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-wire-codec.ts.txt",
@@ -34,15 +47,98 @@
     {
       "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-capabilities.ts.txt",
       "source": "packages/server/src/v2/terminal-capabilities.ts",
-      "bytes": 5197,
-      "sha256": "431c151a1b12f3bdce1534afac170baf0b1c8b7c525e1df524f454e4cd10fb80"
+      "bytes": 5241,
+      "sha256": "495aad3c23c020ab5d0adbcee91b1d66a817abc8c61921a2b1854810a59026d1"
     },
     {
       "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-routes.ts.txt",
       "source": "packages/server/src/v2/terminal-routes.ts",
-      "bytes": 18918,
-      "sha256": "739d0429738f3a2ed6c73167b98b0ac3bb17810f417a0c7e1484d420eb4f4662"
+      "bytes": 19268,
+      "sha256": "2d6c2f6674c18ddcd98a9e235307e0cf0ebcda86e7eb74801ac0163eef67b533"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-control.ts.txt",
+      "source": "packages/server/src/v2/terminal-control.ts",
+      "bytes": 7920,
+      "sha256": "5e27dbe6d8624767bfc120cba4e1dd7ba14fe7e392469aab3e6dcc1bcd21a051"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-control-client.ts.txt",
+      "source": "packages/api-client/src/terminal/control-client.ts",
+      "bytes": 6283,
+      "sha256": "34e047d0a58c217a43b64dd86e9fd2be4ab9970a3060c3f2fe96b91541ca3fc1"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-schema-generated.ts.txt",
+      "source": "packages/api-client/src/terminal/wire-schema-generated.ts",
+      "bytes": 64401,
+      "sha256": "160c09c5f031effacc4339658990fb7995320198b740f6022017b9f31ff479f7"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-types-generated.ts.txt",
+      "source": "packages/api-client/src/terminal/wire-types-generated.ts",
+      "bytes": 19170,
+      "sha256": "23bcc4197722798f4cb1ee4fdfd7fda720f855f608a9b813c511bb412d17de3a"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-terminal-contract-generated.ts.txt",
+      "source": "packages/server/src/v2/terminal-contract.generated.ts",
+      "bytes": 48744,
+      "sha256": "413eb36fa00b5b4ba3a34a34ea35ebe3643c52152efe9774af6be5eb16159faa"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/sdk2-archive-recovery-v1.schema.json",
+      "source": "doc/rfc/sdk2-archive-recovery-v1.schema.json",
+      "bytes": 12353,
+      "sha256": "f530de1096b4f5d56ea688b7f2cec9ae66deb7d3719db85ab1f48287d3bd7ad4"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-recovery-schema-generated.ts.txt",
+      "source": "packages/api-client/src/sdk2/archive-recovery-schema-generated.ts",
+      "bytes": 6906,
+      "sha256": "0f2ece49ee619041cce2a09888cd5c6fecc0ea23195680566a7c93dd9d8d730e"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-recovery-types-generated.ts.txt",
+      "source": "packages/api-client/src/sdk2/archive-recovery-types-generated.ts",
+      "bytes": 2433,
+      "sha256": "9d034b002297c328af3dea2ce5bb47d8d5601dd140ad4a56e0637c1835a5f522"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-recovery-contract-generated.ts.txt",
+      "source": "packages/server/src/sdk2/archive-recovery-contract.generated.ts",
+      "bytes": 6476,
+      "sha256": "6551a6603f95fe8734e9fa7c65978e468ff5ed8561c35ecc5e487d14f886ef64"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-recovery-wire.ts.txt",
+      "source": "packages/api-client/src/sdk2/recovery-wire.ts",
+      "bytes": 2006,
+      "sha256": "2d69a35e8bc1999923c6666f3c4ec27811f121f8f6ec4334cc94e2775c9460ed"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-archive-http.ts.txt",
+      "source": "packages/server/src/sdk2/archive-http.ts",
+      "bytes": 41303,
+      "sha256": "b87b6f34309a208193b07063692c08abca21bd63ec6eff2a788816c1676ef1a7"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-background-profile.ts.txt",
+      "source": "packages/api-client/src/terminal/background-profile.ts",
+      "bytes": 1463,
+      "sha256": "c3ed72dedbf38da2931c51be947a5b0c3ede956cfac44e49f04bc882709666e4"
+    },
+    {
+      "snapshot": "tests/Tansr.Sdk.Tests/Terminal/Fixtures/sdk2-archive-recovery-v1.golden.json",
+      "source": "doc/rfc/sdk2-archive-recovery-v1.golden.json",
+      "bytes": 36475,
+      "sha256": "614adf2088585a6213d010acde29598d40757d0f2d7b4608f1670ccbde3a5553"
+    },
+    {
+      "snapshot": "src/Tansr.Sdk/Terminal/Contract/reference-RFC-SDK2-ACK-recovery-v1.md",
+      "source": "doc/rfc/RFC-SDK2-ACK-recovery-v1.md",
+      "bytes": 12707,
+      "sha256": "57017df7a1ba2a2ba61d39dabf218252c1159fb1d7f44cb36d1e79f6cc4d2391"
     }
-  ],
-  "sourceWorktreeSnapshot": true
+  ]
 }

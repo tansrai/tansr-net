@@ -1,6 +1,6 @@
 /** SRV-01 内部候选：能力协商只收窄可信宿主快照；不代替身份票和会话归属核验。 */
 import { bindingCanonical } from '@tansr/kernel';
-import { parseTerminalContract, TERMINAL_CONTRACT_SCHEMA_SHA256 } from './terminal-contract.generated.js';
+import { parseTerminalContract, TERMINAL_CONTRACT_SCHEMA_SHA256, TERMINAL_CONTRACT_SCHEMA_REVISION } from './terminal-contract.generated.js';
 import type { TerminalBindingRequest, TerminalBindingResponse, TerminalCapabilitiesResponse,
   TerminalErrorCode, TerminalFeature, TerminalFeatureAvailability, TerminalLimits } from './terminal-contract.generated.js';
 
@@ -33,7 +33,7 @@ function limits(input: TerminalLimits): void {
  * 本函数不读取平台、路径或环境；响应不授予后续执行权限。 */
 export function terminalCapabilities(input: Pick<TerminalCapabilitiesResponse, 'sessionContracts' | 'features' | 'limits'>): TerminalCapabilitiesResponse {
   const value = parse<TerminalCapabilitiesResponse>('CapabilitiesResponse', {
-    ...input, contract: 'terminal-services-v1', schemaRevision: '2026-09-26.candidate-4', schemaSha256: TERMINAL_CONTRACT_SCHEMA_SHA256,
+    ...input, contract: 'terminal-services-v1', schemaRevision: TERMINAL_CONTRACT_SCHEMA_REVISION, schemaSha256: TERMINAL_CONTRACT_SCHEMA_SHA256,
   });
   features(value.features); limits(value.limits); return value;
 }

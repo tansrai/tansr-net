@@ -1,0 +1,25 @@
+/** 独立 ACK 恢复合同；原 ACK 语义及回执摘要仍由旧验证链核对。 */
+import { SDK2_ARCHIVE_RECOVERY_SCHEMA } from './archive-recovery-schema-generated.js';
+import { clientFail, encodeControl, equalControl, validateWireNamed } from './wire-codec.js';
+import { verifyRequest, verifyResponse } from './http-semantics.js';
+import type { Sdk2AckRebaseRequest, Sdk2AckRebaseReceipt } from './archive-recovery-types-generated.js';
+import type { Sdk2Limits, Sdk2Scope } from './wire-types-generated.js';
+
+export function validateRecovery<T>(name: string, input: unknown): T {
+  return validateWireNamed<T>(name, input, SDK2_ARCHIVE_RECOVERY_SCHEMA);
+}
+export async function verifyAckRebaseRequest(input: Sdk2AckRebaseRequest, limits: Sdk2Limits, check: () => void): Promise<void> {
+  if (input.bindingId !== input.previous.bindingId || equalControl(input.request, input.previous.request) ||
+    input.request.operationEpoch !== input.previous.request.operationEpoch) clientFail();
+  encodeControl(input.previous, limits.controlBytes);
+  await verifyRequest('ArchiveAckRequest', input.previous, limits, check);
+}
+export async function verifyAckRebase(result: Sdk2AckRebaseReceipt, input: Sdk2AckRebaseRequest,
+  scope: Sdk2Scope, limits: Sdk2Limits, check: () => void): Promise<void> {
+  if (result.bindingId !== input.bindingId || !equalControl(result.previous, input.previous) || !equalControl(result.request, input.request) ||
+    !equalControl(result.next.request, input.request) || BigInt(result.next.expectedRevision) <= BigInt(input.previous.expectedRevision) ||
+    !equalControl({ ...result.next, request: input.previous.request, expectedRevision: input.previous.expectedRevision }, input.previous)) clientFail();
+  await verifyRequest('ArchiveAckRequest', result.next, limits, check);
+  encodeControl(result.next, limits.controlBytes); encodeControl(result.receipt, limits.controlBytes);
+  await verifyResponse('MutationReceipt', result.receipt, result.next, scope, limits, check);
+}

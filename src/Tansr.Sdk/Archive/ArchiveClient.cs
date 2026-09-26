@@ -8,7 +8,7 @@ using J = Tansr.Sdk.Archive.ArchiveJson;
 namespace Tansr.Sdk.Archive;
 
 /// <summary>复用 TansrClient 认证和取消的原档案 HTTP 客户端，不自动重试写入。</summary>
-public sealed class ArchiveClient : IArchiveClient
+public sealed class ArchiveClient : IArchiveRecoveryClient
 {
     private readonly TansrClient _client;
     private readonly object _gate = new object();
@@ -81,6 +81,14 @@ public sealed class ArchiveClient : IArchiveClient
         return Send(HttpMethod.Get, Binding(input) + "/archive/artifacts/" + J.Segment(J.Text(input, "artifactId")) + J.Query(query.ToArray()), input, "ArtifactReadRequest", "ArtifactChunk", cancellationToken, responseMaximum: 357720);
     }
     public Task<JsonElement> AcknowledgeAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Binding(request) + "/archive/acks", request, "ArchiveAckRequest", "MutationReceipt", cancellationToken);
+    /// <summary>独立恢复合同；输入必须来自接收器 PrepareAckRebaseAsync 的耐久结果，不自动生成恢复键。</summary>
+    public async Task<JsonElement> RebaseAckAsync(JsonElement request, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested(); var input = ArchiveRecoveryContract.Request(request); string binding = J.Text(input, "bindingId");
+        int controlBytes = GetEffectiveLimits(binding).GetProperty("controlBytes").GetInt32(); input = ArchiveRecoveryContract.Request(input, controlBytes); var scope = J.Copy(ReadScope(), "Scope");
+        var response = await _client.SendArchiveRecoveryAsync(input, controlBytes + ArchiveRecoveryContract.RequestEnvelopeBytes, 2 * controlBytes + ArchiveRecoveryContract.ResponseEnvelopeBytes, cancellationToken).ConfigureAwait(false);
+        J.Need(J.Equal(scope, ReadScope()), "context_changed"); return ArchiveRecoveryContract.Receipt(response, input, scope, controlBytes);
+    }
     public Task<JsonElement> UploadMaterialChunkAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, MaterialPath(request) + "/uploads/" + J.Segment(J.Text(request, "artifactId")) + "/chunks", request, "MaterialUploadChunkRequest", "MaterialUploadStatus", cancellationToken);
     public Task<JsonElement> GetMaterialUploadStatusAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Get, MaterialPath(request) + "/uploads/" + J.Segment(J.Text(request, "artifactId")) + "?protocol=sdk2-ext-v1", request, "MaterialUploadStatusRequest", "MaterialUploadStatus", cancellationToken);
     public Task<JsonElement> RespondMaterialsAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Binding(request) + "/material-responses", request, "MaterialResponseRequest", "MaterialReceipt", cancellationToken, 202);

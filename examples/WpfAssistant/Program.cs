@@ -47,6 +47,12 @@ internal sealed class AssistantWindow : Window
     private CancellationTokenSource? _lifetime;
     private Task? _observation;
     private NativeToolHost? _nativeTools;
+    private readonly LocalConversationState _local = LocalConversationState.ForApplication("wpf");
+    private readonly DispatcherTimer _saveTimer = new() { Interval = TimeSpan.FromMilliseconds(750) };
+    private TurnInputEditor? _inputEditor;
+    private ExampleSessionControls? _controls;
+    private string? _localSaveFailure;
+    private int _draftRevision;
     private string? _closeFailure;
     private bool _busy, _closing, _closed;
 
@@ -60,22 +66,26 @@ internal sealed class AssistantWindow : Window
         top.Children.Add(Row(Label("恢复会话 ID（可空）"), _resume, Label("新会话模型（可空）"), _model,
             _connect, Button("更新票据", () => { Volatile.Write(ref _currentToken, _token.Password); _status.Text = "已更新内存票据；下次请求使用新值。"; return Task.CompletedTask; }, false)));
         top.Children.Add(Row(Label("正文呈现"), _textMode, Label("思考呈现"), _thinkingMode,
-            Button("历史", () => ShowAsync("历史", _session!.GetHistoryAsync())),
+            Button("历史", ShowHistoryAsync),
             Button("状态", () => ShowAsync("会话状态", _session!.GetMetadataAsync())),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())),
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
+        top.Children.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync)));
         top.Children.Add(new TextBlock
         {
             Text = "已接通：会话流、图片输入、取消、审批/提问、历史与快照。动态切模/思考、完整记忆管理、设备工具绑定与完整记忆管理仍需宿主可信配置。",
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 5, 0, 7),
         });
+        top.Children.Add(Row(Button("本机离线回看", ShowLocalAsync, false), Button("恢复本机草稿", RestoreLocalDraftAsync, false),
+            Button("保存本机草稿", () => { SaveLocal(); _status.Text = "草稿和呈现已保存在本机用户目录（明文，不含票据）。"; return Task.CompletedTask; }, false)));
         var bottom = new StackPanel(); DockPanel.SetDock(bottom, Dock.Bottom); layout.Children.Add(bottom);
         bottom.Children.Add(_draft);
         bottom.Children.Add(Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
             Button("取消当前工作", async () => { await _session!.CancelAsync(); _status.Text = "取消请求已受理，等待运行终态。"; }),
             new TextBlock { Text = "失败或结果未知时保留草稿；请先查历史，避免重复发送。", VerticalAlignment = VerticalAlignment.Center }));
+        bottom.Children.Add(Row(Button("同轮插入草稿", InsertAsync), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync)));
         bottom.Children.Add(_status);
         var requestPanel = new StackPanel { Width = 310, Margin = new Thickness(12, 0, 0, 0) };
         DockPanel.SetDock(requestPanel, Dock.Right); layout.Children.Add(requestPanel);
@@ -86,6 +96,16 @@ internal sealed class AssistantWindow : Window
         requestPanel.Children.Add(Button("提交问题答案", AnswerAsync));
         layout.Children.Add(_conversation);
         _requests.SelectionChanged += (_, _) => RenderRequest();
+        _draft.TextChanged += (_, _) => { _draftRevision++; _saveTimer.Start(); };
+        _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); try { SaveLocal(); } catch (Exception error) { _status.Text = "本机保存失败，草稿仍在编辑器：" + ErrorText(error); } };
+        try
+        {
+            var saved = _local.Load();
+            if (saved.Endpoint.Length > 0) { _endpoint.Text = saved.Endpoint; _resume.Text = saved.SessionId; }
+            _draft.Text = saved.Draft; _conversation.Text = saved.Presentation;
+            _status.Text = "离线草稿已载入；本机展示不代表当前服务端授权。票据仍需重新输入。";
+        }
+        catch (Exception error) { _status.Text = "本机草稿未载入：" + ErrorText(error); }
         Closing += OnClosing;
         SetEnabled();
     }
@@ -117,10 +137,12 @@ internal sealed class AssistantWindow : Window
         foreach (var button in _sessionButtons) button.IsEnabled = !_busy && _session != null;
         if (_connect != null) _connect.IsEnabled = !_busy && _session == null;
         _textMode.IsEnabled = _thinkingMode.IsEnabled = _session == null;
+        _endpoint.IsEnabled = _resume.IsEnabled = _session == null && !_busy;
     }
 
     private async Task ConnectAsync()
     {
+        SaveLocal();
         Volatile.Write(ref _currentToken, _token.Password);
         var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.IsChecked == true);
         var client = connection.Client;
@@ -128,6 +150,9 @@ internal sealed class AssistantWindow : Window
         try { session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = Empty(_resume.Text), Model = Empty(_model.Text), ClientTools = Empty(_resume.Text) == null ? NativeToolHost.GetDeclarations(connection.NativeTools) : null }); }
         catch { await connection.CloseAsync(); throw; }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
+        var savedInput = _local.Snapshot.Endpoint == _endpoint.Text ? _local.Snapshot.Input : null;
+        _inputEditor = new TurnInputEditor(session, savedInput, _local.SaveInput);
+        _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, _endpoint.Text, session.Id, _local.PathName);
         _lifetime = new CancellationTokenSource();
         _nativeTools = new NativeToolHost(session, "Tansr.WPF", async (title, ct) =>
         {
@@ -141,6 +166,7 @@ internal sealed class AssistantWindow : Window
         _subscription = _view.Subscribe(Render, new DispatcherSynchronizationContext(Dispatcher));
         _observation = ObserveAsync(session, _view, _lifetime.Token);
         _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。";
+        TrySaveForExit();
     }
 
     private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
@@ -154,6 +180,7 @@ internal sealed class AssistantWindow : Window
     {
         _media?.Register(snapshot);
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.ScrollToEnd();
+        _saveTimer.Start();
         var selected = (_requests.SelectedItem as RequestItem)?.Request.Id;
         var keys = snapshot.PendingRequests.Select(x => x.Id).ToArray();
         if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request.Id).SequenceEqual(keys))
@@ -173,8 +200,8 @@ internal sealed class AssistantWindow : Window
 
     private async Task SendAsync()
     {
-        var text = _draft.Text; if (string.IsNullOrWhiteSpace(text)) return;
-        await _session!.SendAsync(text); _view!.AppendUserMessage(text); _draft.Clear();
+        var text = _draft.Text; var revision = _draftRevision; if (string.IsNullOrWhiteSpace(text)) return;
+        SaveLocal(); await _session!.SendAsync(text); _view!.AppendUserMessage(text); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
         _status.Text = "输入已接纳；等待运行、持久化及收尾事实。";
     }
 
@@ -185,11 +212,44 @@ internal sealed class AssistantWindow : Window
         var info = new FileInfo(picker.FileName); if (info.Length > 8 * 1024 * 1024) throw new InvalidOperationException("image_too_large");
         var extension = info.Extension.ToLowerInvariant();
         var mime = extension == ".png" ? "image/png" : extension == ".webp" ? "image/webp" : extension == ".gif" ? "image/gif" : "image/jpeg";
-        var blocks = new List<MessageBlock>(); var text = _draft.Text;
+        var blocks = new List<MessageBlock>(); var text = _draft.Text; var revision = _draftRevision;
         if (!string.IsNullOrWhiteSpace(text)) blocks.Add(MessageBlock.Text(text));
         blocks.Add(MessageBlock.Image(mime, Convert.ToBase64String(await BoundedFiles.ReadAsync(picker.FileName, 8 * 1024 * 1024))));
-        await _session!.SendBlocksAsync(blocks); _view!.AppendUserMessage(text + "\n[image: " + info.Name + "]"); _draft.Clear();
+        SaveLocal(); await _session!.SendBlocksAsync(blocks); _view!.AppendUserMessage(text + "\n[image: " + info.Name + "]"); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
     }
+
+    private void SaveLocal() => _local.Save(_endpoint.Text, _session?.Id ?? _resume.Text, _draft.Text, _conversation.Text);
+    private void TrySaveForExit() { try { SaveLocal(); _localSaveFailure = null; } catch (Exception error) { _localSaveFailure = "本机保存失败：" + ErrorText(error); _status.Text = _localSaveFailure; } }
+    private async Task ShowHistoryAsync()
+    {
+        var history = await _session!.GetHistoryAsync();
+        _local.Save(_endpoint.Text, _session.Id, _draft.Text, _conversation.Text, history.GetRawText());
+        await ShowAsync("服务端历史（已保留本机展示副本）", Task.FromResult(history));
+    }
+    private Task ShowLocalAsync()
+    {
+        var saved = _local.Snapshot;
+        new Window
+        {
+            Owner = this,
+            Title = "本机离线呈现 · " + saved.SavedAt,
+            Width = 850,
+            Height = 560,
+            Content = new TextBox { Text = saved.OfflineText, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto }
+        }.Show();
+        return Task.CompletedTask;
+    }
+    private Task RestoreLocalDraftAsync() { _draft.Text = _local.Snapshot.Draft; _status.Text = "已恢复本机草稿；尚未发送。"; return Task.CompletedTask; }
+    private async Task InsertAsync()
+    {
+        var text = _draft.Text; var revision = _draftRevision; SaveLocal();
+        _status.Text = await _inputEditor!.InsertAsync(text);
+        if (_inputEditor.Current?.Outcome == "accepted" && _draftRevision == revision) _draft.Clear();
+        SaveLocal();
+    }
+    private async Task QueryInputAsync() => _status.Text = await _inputEditor!.QueryAsync();
+    private async Task RetryInputAsync() => _status.Text = await _inputEditor!.RetryOriginalAsync();
+    private Task OpenControlsAsync() { new SessionControlsWindow(_controls) { Owner = this }.Show(); return Task.CompletedTask; }
 
     private void RenderRequest()
     {
@@ -250,6 +310,7 @@ internal sealed class AssistantWindow : Window
 
     private async Task CloseConnectionAsync()
     {
+        TrySaveForExit();
         if (_session == null) return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
         try { await _session.CloseAsync(timeout.Token); }
@@ -261,11 +322,12 @@ internal sealed class AssistantWindow : Window
         _nativeTools?.Dispose(); _nativeTools = null; _subscription?.Dispose(); _view?.Dispose();
         if (_connection != null) await _connection.CloseAsync(); _connection = null;
         _lifetime?.Dispose(); _lifetime = null;
-        _session = null; _client = null; _view = null; _status.Text = "会话关闭请求已确认；未删除历史。";
+        _session = null; _client = null; _view = null; _controls = null; _status.Text = "会话关闭请求已确认；未删除历史。" + _localSaveFailure;
     }
 
     private async Task DetachAsync()
     {
+        TrySaveForExit();
         var ownedLocalServe = _connection?.OwnsLocalServe == true;
         // 不调用 interrupt/close/delete：明确释放本机观察和宿主资源，远端状态仍须以后查询。
         _lifetime?.Cancel();
@@ -282,7 +344,7 @@ internal sealed class AssistantWindow : Window
         finally { _connection = null; _session = null; _client = null; _view = null; }
         _status.Text = (ownedLocalServe ? (cleanupFailure == null ? "已断开并回收本实例启动的本地 Serve；未删除历史。" : "已断开本机连接；本地 Serve 或 MCP 收尾未确认，可退出，未删除历史。") : "已断开本机连接，可正常退出；未关闭或删除远端会话，远端工作可能继续。") +
             (_closeFailure == null ? "" : " 上次远端关闭未确认：" + _closeFailure) +
-            (cleanupFailure == null ? "" : " 本机工具收尾未确认：" + cleanupFailure);
+            (cleanupFailure == null ? "" : " 本机工具收尾未确认：" + cleanupFailure) + _localSaveFailure;
     }
 
     private async void OnClosing(object? sender, CancelEventArgs e)
@@ -290,7 +352,7 @@ internal sealed class AssistantWindow : Window
         if (_closed) return; e.Cancel = true; if (_closing) return;
         if (_busy) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
         _closing = true;
-        try { await CloseConnectionAsync(); _closed = true; Close(); }
+        try { await CloseConnectionAsync(); _saveTimer.Stop(); _closed = true; Close(); }
         catch (Exception error) { _status.Text = "关闭未确认，可重试或选择“仅断开本机连接”后退出：" + ErrorText(error); }
         finally { _closing = false; }
     }

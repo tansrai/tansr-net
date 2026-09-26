@@ -22,9 +22,25 @@ public sealed class WindowsBusinessTool
 {
     public WindowsBusinessTool(string name, string definitionDigest, Func<JsonElement, CancellationToken, Task<JsonElement>> invoke)
     { Name = name; DefinitionDigest = definitionDigest; Invoke = invoke ?? throw new ArgumentNullException(nameof(invoke)); }
+    /// <summary>需要原操作身份的设备服务；上下文只由已授权执行后端构造，模型不能提供工作区对象。</summary>
+    public WindowsBusinessTool(string name, string definitionDigest, Func<JsonElement, WindowsBusinessToolContext, CancellationToken, Task<JsonElement>> invoke)
+    {
+        Name = name; DefinitionDigest = definitionDigest; ContextualInvoke = invoke ?? throw new ArgumentNullException(nameof(invoke));
+        Invoke = (_, _) => throw new InvalidOperationException("此工具必须由受信执行上下文调用。");
+    }
     public string Name { get; }
     public string DefinitionDigest { get; }
     public Func<JsonElement, CancellationToken, Task<JsonElement>> Invoke { get; }
+    internal Func<JsonElement, WindowsBusinessToolContext, CancellationToken, Task<JsonElement>>? ContextualInvoke { get; }
+}
+
+public sealed class WindowsBusinessToolContext
+{
+    internal WindowsBusinessToolContext(JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard)
+    { Operation = operation.Clone(); Workspace = workspace; GuardAsync = guard; }
+    public JsonElement Operation { get; }
+    public WindowsWorkspace Workspace { get; }
+    public Func<CancellationToken, Task> GuardAsync { get; }
 }
 
 public sealed class WindowsExecutionOutputFailure
@@ -160,7 +176,9 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 if (!_tools.TryGetValue(Text(args, "name"), out var tool) || tool.DefinitionDigest != Text(args, "definitionDigest")) throw new ExecutionRejectedException("ENOTSUP");
                 var toolArgs = WireJson.Parse(System.Text.Encoding.UTF8.GetBytes(Text(args, "argsJson")), 32768);
                 if (toolArgs.ValueKind != JsonValueKind.Object) throw new ExecutionRejectedException("EACCES");
-                var toolResult = await tool.Invoke(toolArgs, cancellationToken).ConfigureAwait(false);
+                var toolResult = tool.ContextualInvoke == null
+                    ? await tool.Invoke(toolArgs, cancellationToken).ConfigureAwait(false)
+                    : await tool.ContextualInvoke(toolArgs, new WindowsBusinessToolContext(operation, workspace, guard), cancellationToken).ConfigureAwait(false);
                 var text = toolResult.GetRawText();
                 if (System.Text.Encoding.UTF8.GetByteCount(text) > 32768) throw new InvalidDataException("业务工具结果超过合同限额。");
                 return Result(name, writer => writer.WriteString("resultJson", text));

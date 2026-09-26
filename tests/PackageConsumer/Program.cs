@@ -5,6 +5,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
 using Tansr.Sdk.Windows.Security;
@@ -22,7 +23,16 @@ internal static class Program
             {
                 BaseUri = new Uri("https://example.invalid"),
                 TokenProvider = _ => Task.FromResult("synthetic-no-request"),
-            })) { }
+                ExecutionScopeProvider = () => WireJson.Parse(Encoding.UTF8.GetBytes("{\"applicationScopeId\":\"app\",\"endUserId\":\"user\",\"authorizationRevision\":\"1\"}")),
+            }))
+            {
+                var preview = new TerminalSessionControl(client, enablePreview: true);
+                var change = WireJson.Parse(Encoding.UTF8.GetBytes("{\"thinking\":{\"budget\":2048}}"));
+                var operation = preview.CreateConfigurationOperation("session", "request", 0, change);
+                if (operation.Attempted || operation.Request.GetProperty("session").GetProperty("sessionContract").GetString() != "sdk1") throw new Exception("preview_contract");
+                var restored = preview.RestoreConfigurationOperation(operation.Request, operation.Scope);
+                if (!restored.Attempted || WireJson.CanonicalString(restored.Request) != WireJson.CanonicalString(operation.Request)) throw new Exception("preview_restore");
+            }
             var control = WireJson.Parse(Encoding.UTF8.GetBytes("{\"sequence\":\"9223372036854775807\"}"));
             if (WireJson.CanonicalString(control) != "{\"sequence\":\"9223372036854775807\"}") throw new Exception("wire");
             using (var workspace = new WindowsWorkspace(root))
