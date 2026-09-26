@@ -189,7 +189,7 @@ async function run() {
   const token = randomBytes(32).toString('base64url'), otherToken = randomBytes(32).toString('base64url');
   const artifactRoot = resolve(repository, 'artifacts/serve-integration'); mkdirSync(artifactRoot, { recursive: true });
   const directory = mkdtempSync(resolve(artifactRoot, 'run-'));
-  writeFileSync(resolve(directory, 'owner.json'), JSON.stringify({ task: 'NET-02-public-Serve-integration', createdAt: new Date().toISOString(),
+  writeFileSync(resolve(directory, 'owner.json'), JSON.stringify({ task: process.env.TANSR_SERVE_EVIDENCE_TASK ?? 'NET-Serve-integration', createdAt: new Date().toISOString(),
     purpose: 'Synthetic acceptance data and original SQLite receipts, retained for reconciliation; contains no access tokens.', ...evidence }, null, 2));
   const env = isolatedEnvironment({ TANSR_SERVE_SOURCE: source, TANSR_SERVE_SOURCE_SHA: evidence.revision,
     TANSR_SERVE_TEST_TOKEN: token, TANSR_SERVE_TEST_OTHER_TOKEN: otherToken, TANSR_SERVE_TEST_DIRECTORY: directory, TANSR_SERVE_TEST_EXPIRES: String(Date.now() + 300000) });

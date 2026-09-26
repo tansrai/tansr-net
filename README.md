@@ -51,6 +51,8 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 
 ## 示例和开发
 
+原生窗口提供“提示词来源”，Console 提供 `/prompt`。开发者可用 `await session.ReadApplicationPromptAsync(ct)` 获取只读 `ApplicationPromptState`；先检查 `IsKnown`，再读取 `Policy`/`Source`。该方法显式请求已应用的来源与策略，既有 `GetMetadataAsync`/`ReadMetadataAsync` 默认请求不变。`sdk` 指开发者/Serve 可信宿主段，终端不获得提示词正文或修改权；详见[示例说明](examples/Shared/session-controls.md)。
+
 终端分块输出、同会话配置／记忆管理和 ACK 恢复已有显式候选消费入口；参见[终端服务预览接入](doc/terminal-services.md)。预览与稳定协议、管理命令与完整记忆本地化、代码实现与正式发行分别记录。
 
 - [WPF](examples/WpfAssistant/README.md)：现代 Windows UI。
@@ -77,5 +79,7 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 ## English
 
 Tansr provides a native C# client for Tansr Serve. The core package targets .NET Standard 2.0 and .NET 10; the Windows adapter targets .NET Framework 4.8 and modern Windows .NET. Serve owns the agent runtime, context, memory decisions and authorization. The client provides transport, local execution, durable storage and presentation. Electron keeps its existing embedded Node SDK.
+
+Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 
 This is an unpublished development candidate. It uses the existing REST/SSE and SDK2 contracts. New terminal streaming, memory management and dynamic control contracts are not exposed as stable APIs before Serve and .NET agree on the same schema and fixtures. The examples document their actual capabilities and remaining gaps; successful compilation is not a claim of full Electron parity. See the development record for commands, evidence and release status.

@@ -26,6 +26,7 @@ public sealed class SessionMetadata
             Title = title.GetString();
         }
         Context = Optional(raw, "context"); Media = Optional(raw, "media"); HistoryOrigin = Optional(raw, "historyOrigin");
+        ApplicationPrompt = ApplicationPromptState.FromMetadata(raw);
     }
     private static JsonElement? Optional(JsonElement raw, string key) => raw.TryGetProperty(key, out var value) ? value.Clone() : (JsonElement?)null;
     public string Id { get; }
@@ -40,6 +41,8 @@ public sealed class SessionMetadata
     public JsonElement? Context { get; }
     public JsonElement? Media { get; }
     public JsonElement? HistoryOrigin { get; }
+    /// <summary>仅对合法活动会话来源字段给出已知状态；缺席、失活或非法字段均为 Unknown。</summary>
+    public ApplicationPromptState ApplicationPrompt { get; }
     public JsonElement Raw { get; }
 }
 

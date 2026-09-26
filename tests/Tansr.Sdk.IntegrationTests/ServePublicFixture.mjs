@@ -24,7 +24,10 @@ export async function startPublicFixture({ source, directory, authenticate, cand
     maxReservations: 64, maxEntries: 1024, maxOperations: 1024, maxDatabasePages: 8192 });
   const defaults = defaultAppCapabilities('desktop');
   const capabilities = { ...defaults, execution: { version: 'bound-device-v1', boundDevice: { tools: { read: true } } } };
-  const fake = createFakePlatform({ features: [], bundleExtra: { capabilities, app: { platform: 'desktop' } } });
+  const platformPrompt = 'NET_P05_SYNTHETIC_PLATFORM_PRIVATE_ROLE';
+  const hostPrompt = 'NET_P05_SYNTHETIC_HOST_PRIVATE_ROLE';
+  const fake = createFakePlatform({ features: [], bundleExtra: { capabilities, app: { platform: 'desktop' },
+    ...(candidate ? { systemPrompt: platformPrompt, systemPromptPolicy: 'prepend' } : {}) } });
   const exchanges = [], routes = [];
   let mainExchanges = 0;
   const memoryExchanges = { extraction: 0, consolidation: 0 }, memoryRequests = new Set();
@@ -61,6 +64,11 @@ export async function startPublicFixture({ source, directory, authenticate, cand
         return textResponse(kind === 'extraction' ? 'nothing to save' : 'nothing to consolidate');
       }
       ++mainExchanges;
+      if (candidate) {
+        // Observe the actual applied model system, independently of the metadata projection.
+        assert.equal(request.thread[0]?.role, 'system');
+        assert.deepEqual(request.thread[0].blocks.slice(0, 2).map(block => block.v), [platformPrompt, hostPrompt]);
+      }
       // The public device host explicitly narrows RequestedTools to Read. Memory management is
       // still available through its trusted source, but SearchMemory must not enter this turn.
       // TWP omits tools entirely for the recovery session's explicit empty tool set.
@@ -93,6 +101,7 @@ export async function startPublicFixture({ source, directory, authenticate, cand
   const host = createServeArchiveHost({ applicationScopeId: scope.applicationScopeId, security: 'trusted-single-application',
     agent: { cwd: directory, store: sessionStore, checkpoints: { autoBeforeCompact: false }, ...(candidate ? { configuration: {} } : {}),
       platform: { apiBaseUrl: FAKE_API_BASE, appId: scope.applicationScopeId, appKey: 'synthetic-only-no-real-key', fetchImpl,
+        ...(candidate ? { system: [{ text: hostPrompt }] } : {}),
         ...(candidate ? { memoryFor: owner => owner.endUserId === scope.endUserId ? { kind: 'server-managed', domain: 'net/app/中文',
           rootDir: memoryHost.rootDir, memoryDir: memoryHost.memoryDir, host: memoryHost, management: memory,
           enabled: () => true, balance: () => null, recallSelector: false } : undefined } : {}) },

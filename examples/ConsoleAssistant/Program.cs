@@ -32,7 +32,7 @@ internal static class Program
         if (args.Contains("--help", StringComparer.Ordinal))
         {
             Console.WriteLine("Tansr 原生控制台\n环境：TANSR_SERVE_URL、TANSR_SESSION_TOKEN；可选 TANSR_ALLOW_HTTP_LOOPBACK=1、TANSR_RESUME_SESSION、TANSR_MODEL。\n命令：普通文字发送；/history /meta /compact /checkpoint /checkpoints /cancel /requests /allow <requestId> /deny <requestId> /answer <requestId> <答案JSON数组> /quit。\n无界面 --once <prompt> 会拒绝审批、以明确的无人值守说明回答提问，等待终态后关闭。Ctrl+C / SIGTERM 中断当前工作并有界收尾。票据不写入文件或日志。");
-            Console.WriteLine("草稿：/draft <全文>、/draft-file <UTF8文件>、/draft、/send-draft；同轮：/insert <全文>、/insert-draft、/input-status、/input-retry（原键）；离线：--offline、/offline。多会话：--worker <jobs.jsonl> [--concurrency 1..8]。");
+            Console.WriteLine("草稿：/draft <全文>、/draft-file <UTF8文件>、/draft、/send-draft；同轮：/insert <全文>、/insert-draft、/input-status、/input-retry（原键）；离线：--offline、/offline。多会话：--worker <jobs.jsonl> [--concurrency 1..8]。提示词来源与策略：/prompt（显式只读）。");
             return 0;
         }
         if (args.Length == 1 && args[0] == "--offline")
@@ -133,6 +133,7 @@ internal static class Program
                     else if (await mediaCommands.TryHandleAsync(line, stop.Token)) { }
                     else if (line == "/history") { var history = (await active.GetHistoryAsync(stop.Token)).GetRawText(); SaveLocal(history); Write(history); }
                     else if (line == "/meta") Write((await active.GetMetadataAsync(stop.Token)).GetRawText());
+                    else if (line == "/prompt") Write(ApplicationPromptText.Format(await active.ReadApplicationPromptAsync(stop.Token)));
                     else if (line == "/compact") Write((await active.CompactAsync(cancellationToken: stop.Token)).GetRawText());
                     else if (line == "/checkpoint") Write((await active.CheckpointAsync(cancellationToken: stop.Token)).GetRawText());
                     else if (line == "/checkpoints") Write((await active.ListCheckpointsAsync(stop.Token)).GetRawText());

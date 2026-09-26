@@ -1,6 +1,6 @@
 # NETSDK 实施记录
 
-日期：2026-09-26。状态：前两批本地集成与候选包消费通过；新增 `20260926-NET-03-native-services` 的实现已合流，验收事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。下文保留既有批次事实。
+日期：2026-09-26。状态：前三批本地集成与候选包消费已通过；新增 `20260926-NET-04-prompt-observation` 继续原 NET-02/05 的提示词来源接线，验收事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。下文保留既有批次事实。
 
 ## 责任、源码和边界
 
@@ -214,3 +214,20 @@ SDK 核心包462595字节，SHA256 `51abcca685b14da2256929ab55922d70f8983c58ba98
 本批源码收编到本地 NET `main`；准确最终提交及归档文件校验记入本批 `closure-manifest.json`。NET 仓尚未配置 Git remote，因此没有远端推送、GitHub CI、正式签名或发布事实。保留活动隔离树供后续原卡开发，不清除未知文件或其他会话工作树。
 
 下一批继续原卡剩余项：消费 Serve 提示词来源观察与完整终端记忆出版链，补可信宿主的 hooks/插件/子代理装配与故障边界，完成两种原生 UI 的真实媒体及同场景对照，然后按原24项验收结算。原 NETSDK 方案/计划/验收单的跨仓状态由 Serve 文档单写者同步本回执；不得把旧节“未开始”当成当前实现事实，也不得把本批局部通过当作原完整 DoD 已关闭。
+
+## 20260926-NET-04-prompt-observation：已应用提示词的只读来源
+
+沿原 NET-02/05、P05 实施，不新增卡。起点 `0e56bd6d1fa94946cec925f41f6607863f98cfac`，隔离分支 `lane/net/NET-02-prompt-observation`；证据集中在 `J:/tansr/archive/20260926-NET-04-prompt-observation`。来源观察是原 Serve 元信息的显式加法，保持 terminal candidate-7 与 SDK1 默认请求不变。
+
+- 公开 `AgentSession.ReadApplicationPromptAsync()` 显式请求原会话路径的 `?include=applicationPrompt`；旧 `GetMetadataAsync`/`ReadMetadataAsync` 的签名、默认请求与行为不改。`SessionMetadata.ApplicationPrompt` 使用相同只读类型投影。
+- `ApplicationPromptState` 区分 Unknown 和 None。只有 live:true、恰好两个合法字段、可成立的 policy/source 组合才为已知；缺席/null/未知枚举/附正文/非活动会话均未知。原 HTTP/鉴权/网络/取消与主体不匹配错误继续抛出，不伪装成功未知。
+- WPF/WinForms 增加“提示词来源”，Console 增加 `/prompt`；不要求 terminal preview。共享展示只使用校验后的枚举，不默认输出诊断 Raw。`sdk` 明确指开发者/Serve 可信宿主段，不授予终端修改系统提示词的能力；none 也不代表整个系统提示词为空。
+- 真实 Serve 平台采用 prepend 的 P 段加可信宿主 S 段，同一会话首轮前后来源均为 platform+sdk，模型实际 system 前两段分别为 P、S；旧 metadata 默认仍无新增字段，观察响应仅 policy/source，不含正文。
+
+锁定恢复及 Release 全解决方案（含 net48 WinForms、现代 WPF/Console）0警告0错误。受影响元信息/会话控制池83/83通过，包含新增30项来源验证，0跳过；没有重跑未变的627/252全池。首轮局部29/30的失败为新 SDK2 能力夹具遗漏原 canonical JSON 编码，按原合同修正后纳入83项通过，原红日志保留。
+
+增强后的真实 Serve 集中链4/4通过、0跳过，16.8799秒；旧工具/档案/恢复链同时保留。主模型4次和自动记忆无写提取2次均合成受控，未增加业务轮或付费请求。最后源码快照 `serve-source-snapshot-2.json` SHA256 `46d628564dbc4bebf87c0227d91709354bc6977f584bf87ed2a90fb5e19899da`，3019个文件前后相同；前一份准备快照保留，未冒作实际运行来源。完整日志及回执为 `build.log`、`metadata-accepted.log`、`results/metadata-accepted.trx`、`serve-integration-1.log`、`serve-integration-evidence.json`。
+
+本批典型来源观察不替代 NET-A07 的完整切模、失败回滚、活动轮快照及提示词变更矩阵。**工程完整关闭0/6，剩6，本批新增0，0%；完整验收2/24（A03/A06），剩22，本批新增0，8.3%。** 原16组完整对照仍待实结。完整记忆出版链、扩展装配、真实媒体与原生 UI 对照继续归原卡。
+
+最终源码提交、格式、两包消费、主线收编与归档校验见本批 `closure-manifest.json`；阶段已通过结果不等于已发布。NET 仓没有 remote，不声明远端推送或 NuGet 发布。

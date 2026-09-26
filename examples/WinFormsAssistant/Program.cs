@@ -74,7 +74,7 @@ internal sealed class AssistantForm : Form
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())), Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
         top.Controls.Add(new Label { AutoSize = true, MaximumSize = new Size(1020, 0), Text = "真实入口：会话流、图片、取消、审批/提问、历史与快照。动态切模/思考、完整记忆、设备工具绑定仍需宿主可信配置。" });
-        top.Controls.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync)));
+        top.Controls.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync), Button("提示词来源", ShowApplicationPromptAsync)));
         top.Controls.Add(Row(Button("本机离线回看", ShowLocalAsync, false), Button("恢复本机草稿", RestoreLocalDraftAsync, false),
             Button("保存本机草稿", () => { SaveLocal(); _status.Text = "草稿和呈现已保存在本机用户目录（明文，不含票据）。"; return Task.CompletedTask; }, false)));
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 200 };
@@ -246,6 +246,13 @@ internal sealed class AssistantForm : Form
         if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "question") throw new InvalidOperationException("select_question_request");
         await _session!.AnswerAsync(item.Request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
         _status.Text = "答案已提交；等待服务端关闭请求。";
+    }
+    private async Task ShowApplicationPromptAsync()
+    {
+        var value = await _session!.ReadApplicationPromptAsync(_lifetime!.Token);
+        if (IsDisposed) return;
+        var dialog = new Form { Text = "提示词来源", Width = 700, Height = 260, Owner = this };
+        dialog.Controls.Add(new TextBox { Text = ApplicationPromptText.Format(value).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); dialog.Show(this);
     }
     private async Task ShowAsync(string title, Task<JsonElement> value)
     {

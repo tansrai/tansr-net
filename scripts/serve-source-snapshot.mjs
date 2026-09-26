@@ -51,7 +51,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   assert.equal(process.argv.length, 4, 'Usage: TANSR_SERVE_SOURCE=<candidate> node scripts/serve-source-snapshot.mjs --write <new-manifest-path>');
   assert.equal(process.argv[2], '--write'); assert.ok(process.env.TANSR_SERVE_SOURCE, 'TANSR_SERVE_SOURCE is required.');
   const source = realpathSync(process.env.TANSR_SERVE_SOURCE), files = inventory(source); approvedSchemas(files);
-  const value = { format: 'tansr-serve-source-snapshot-v1', task: 'NET-03-native-services', createdAt: new Date().toISOString(),
+  const value = { format: 'tansr-serve-source-snapshot-v1', task: process.env.TANSR_SERVE_EVIDENCE_TASK ?? 'NET-Serve-integration', createdAt: new Date().toISOString(),
     sourceRoot: source, sourceCommitted: false, sourceBaseCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: source, encoding: 'utf8', windowsHide: true }).trim(), files };
   writeFileSync(resolve(process.argv[3]), JSON.stringify(value, null, 2) + '\n', { flag: 'wx' });
   console.log(JSON.stringify(verifyServeSourceSnapshot(source, resolve(process.argv[3]))));

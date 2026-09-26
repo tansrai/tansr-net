@@ -8,6 +8,12 @@ WPF、WinForms 和 Console 共用公开 SDK。`inputs` 仍是原会话的同轮�
 
 桌面有“本机离线回看”及“恢复本机草稿”；Console `--offline` 不联网就能读取，交互可用 `/offline`、`/draft`、`/draft <全文>`、`/draft-file <UTF8文件>` 和 `/send-draft`。`/asr` 的文本也进入同一草稿。保存的会话 ID 不自动授权恢复；Console 仍需显式 `TANSR_RESUME_SESSION`。这些文件是当时的应用呈现与历史响应副本，可能已经过期或撤权，从不作为模型历史、材料源或 SQLite archive 当前授权。公开 `SqliteArchiveHistory` 需要宿主另装当前可信 authority；该共享档案离线能力仍是缺口。
 
+## 提示词来源（只读）
+
+桌面“提示词来源”与 Console `/prompt` 调用公开 `session.ReadApplicationPromptAsync()`，仅在显式读取时给原 metadata 请求增加 `?include=applicationPrompt`；不要求 terminal preview，也不改变原“状态”或 `/meta` 请求。结果表示 Serve 当前已经应用的应用提示词来源：`platform` 为平台应用设置，`sdk` 为开发者/Serve 可信宿主段，`platform+sdk` 为两者组合，`none` 为两段均未采用。它不是整个系统提示词为空的证明。
+
+`fallback` 在开发者段未设置时采用平台段；`prepend` 将平台段放在开发者段之前。终端只观察来源与策略，不接收正文，也不能借此覆盖可信宿主配置。缺席、不支持、无效组合或会话不再 live 时显示“未知”，不能显示成 none 或假定默认策略。鉴权失败和网络错误仍明确报错，不转换成成功的未知响应。默认展示只用已校验的枚举；原始响应仅供应用按需诊断。
+
 ## 可选配置和记忆 preview
 
 设置 `TANSR_TERMINAL_PREVIEW=1`，并把 `TANSR_TRUSTED_SCOPE_FILE` 指向宿主管理的身份配置，例如其结构为：

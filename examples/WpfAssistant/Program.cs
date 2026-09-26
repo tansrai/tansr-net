@@ -71,7 +71,7 @@ internal sealed class AssistantWindow : Window
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())),
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
             Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
-        top.Children.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync)));
+        top.Children.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync), Button("提示词来源", ShowApplicationPromptAsync)));
         top.Children.Add(new TextBlock
         {
             Text = "已接通：会话流、图片输入、取消、审批/提问、历史与快照。动态切模/思考、完整记忆管理、设备工具绑定与完整记忆管理仍需宿主可信配置。",
@@ -285,6 +285,11 @@ internal sealed class AssistantWindow : Window
     }
 
     private Task ShowAsync(string title, Task<JsonElement> value) => ShowResultAsync(title, value);
+    private async Task ShowApplicationPromptAsync()
+    {
+        var value = await _session!.ReadApplicationPromptAsync(_lifetime!.Token);
+        new Window { Owner = this, Title = "提示词来源", Width = 700, Height = 260, Content = new TextBox { Text = ApplicationPromptText.Format(value), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } }.Show();
+    }
     private async Task ShowResultAsync(string title, Task<JsonElement> value)
     {
         var result = await value;

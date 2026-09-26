@@ -73,7 +73,11 @@ public sealed partial class ServePublicHostIntegrationTests(ITestOutputHelper ou
         try
         {
             await host.StartAsync(ct); Assert.Equal(DeviceSessionState.Ready, host.State);
-            if (candidate) await VerifyTerminalControlAsync(client, session.Id, ct);
+            if (candidate)
+            {
+                await VerifyTerminalControlAsync(client, session.Id, ct);
+                await VerifyApplicationPromptAsync(session, ct);
+            }
             int permissions = 0; var businessEvents = new ConcurrentQueue<AgentEvent>();
             var result = await session.SendAndObserveAsync("Read the original device note once.", new SessionRunOptions { Timeout = TimeSpan.FromSeconds(30) }, async (item, token) =>
             {
@@ -87,6 +91,7 @@ public sealed partial class ServePublicHostIntegrationTests(ITestOutputHelper ou
                 }
             }, ct);
             Assert.False(result.WasAborted); Assert.Equal("turn.completed", result.TerminalEvent.Name);
+            if (candidate) await VerifyApplicationPromptAsync(session, ct);
             Assert.Equal(1, permissions);
             Assert.DoesNotContain(businessEvents, item => item.Name is "tool.failed" or "turn.error" or "turn.aborted");
             Assert.Contains(businessEvents, item => item.Name == "msg.text.delta" && item.Data.GetProperty("text").GetString() == expected);
