@@ -147,7 +147,14 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
         switch (name)
         {
             case "fs.inspect":
-                var entry = workspace.Inspect(Text(args, "path"));
+                WindowsWorkspaceEntry entry;
+                try { entry = workspace.Inspect(Text(args, "path")); }
+                catch (WindowsWorkspaceException error) when (error.Code == "not_found")
+                {
+                    // A missing target is a known read-only observation. Keep all other
+                    // native failures and any uncertain write outcome on the unknown path.
+                    throw new ExecutionRejectedException("ENOENT");
+                }
                 return Result(name, writer =>
                 {
                     writer.WriteString("kind", Kind(entry.Kind)); writer.WriteNumber("size", Math.Max(0, entry.Length));

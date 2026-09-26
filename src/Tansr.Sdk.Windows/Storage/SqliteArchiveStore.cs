@@ -111,7 +111,9 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             { A.Need(fixedOptions.Mode != StorageOpenMode.Create, "identity_mismatch"); using var sidecar = StorageFileIdentity.Open(path + suffix, false, metadataOnly: historical); }
             file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create, metadataOnly: historical);
             string metadata = Metadata(fixedOptions, parent, file, cipher, recovery && !migrating);
-            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = historical ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
+            // Microsoft.Data.Sqlite 的 0 表示无限忙锁重试，而非 PRAGMA busy_timeout=0 的立即拒绝。
+            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = historical ? SqliteOpenMode.ReadOnly : SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 1 }.ToString()); connection.Open();
+            cancellationToken.ThrowIfCancellationRequested();
             var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher, historical, recovery && !migrating);
             // 历史只读连接不改 journal_mode、page_size、max_page_count 或原 metadata。
             store.Exec(historical ? "PRAGMA busy_timeout=0; PRAGMA query_only=ON; PRAGMA foreign_keys=ON" : "PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
@@ -447,7 +449,8 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         try { Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false; if (refresh) _known = State(); committing = false; }
         catch
         {
-            bool unknown = committing; if (begun) { try { Exec("ROLLBACK"); } catch { unknown = true; } }
+            // SQLITE_FULL 等可能在 COMMIT 前自动回滚；不要把“无活动事务”的二次错误误判成未知提交。
+            bool unknown = committing; if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
             throw;
         }

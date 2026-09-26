@@ -109,7 +109,7 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
             }
             file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create); CheckOpening();
             string metadata = Metadata(fixedOptions, parent, file);
-            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
+            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 1 }.ToString()); connection.Open();
             store = new SqliteMemoryPublicationStore(connection, parent, file, fixedOptions, owner, metadata);
             if (fixedOptions.Mode == StorageOpenMode.Reopen)
             {

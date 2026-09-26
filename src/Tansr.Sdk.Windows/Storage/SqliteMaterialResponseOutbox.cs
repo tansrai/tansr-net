@@ -48,7 +48,7 @@ public sealed class SqliteMaterialResponseOutbox : IMaterialResponseOutbox, IDis
             { A.Need(mode != StorageOpenMode.Create, "identity_mismatch"); using var sidecar = StorageFileIdentity.Open(path + suffix, false); }
             file = StorageFileIdentity.Open(path, false, mode == StorageOpenMode.Create);
             string metadata = Metadata(identity, maxPages, parent, file);
-            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString()); connection.Open();
+            connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 1 }.ToString()); connection.Open();
             var outbox = new SqliteMaterialResponseOutbox(connection, parent, file, identity, readContext, metadata);
             outbox.Exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL");
             void CheckOpening()
@@ -147,7 +147,7 @@ public sealed class SqliteMaterialResponseOutbox : IMaterialResponseOutbox, IDis
         catch
         {
             bool unknown = committing;
-            if (begun) { try { Exec("ROLLBACK"); } catch { unknown = true; } }
+            if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
             throw;
         }

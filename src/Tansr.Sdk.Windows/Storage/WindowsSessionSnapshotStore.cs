@@ -101,7 +101,7 @@ public sealed class WindowsSessionSnapshotStore : ISessionSnapshotStore, IDispos
             { using var sidecar = StorageFileIdentity.Open(_path + suffix, false, metadataOnly: true); }
             _file = StorageFileIdentity.Open(_path, false, create: !exists);
             _cipher = new ArchiveBodyCipher(_keys(), CipherIdentity());
-            _connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 0 }.ToString());
+            _connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = _path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 1 }.ToString());
             _connection.Open();
             Execute("PRAGMA busy_timeout=0; PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA trusted_schema=OFF;");
             if (!exists)

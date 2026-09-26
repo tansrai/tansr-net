@@ -78,7 +78,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                 DataSource = fixedOptions.Path,
                 Mode = SqliteOpenMode.ReadWrite,
                 Pooling = false,
-                DefaultTimeout = 0,
+                DefaultTimeout = 1,
             }.ToString());
             connection.Open();
             var journal = new SqliteExecutorJournal(connection, parent, file, fixedOptions, metadata);
@@ -232,7 +232,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         catch
         {
             bool unknown = committing;
-            if (begun) { try { Exec("ROLLBACK"); } catch { unknown = true; } }
+            if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
             throw;
         }
