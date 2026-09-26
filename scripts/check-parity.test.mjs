@@ -10,7 +10,8 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const load = () => JSON.parse(readFileSync(join(root, 'doc/compatibility/public-api-map.json'), 'utf8'));
 
 test('all fixed public entries are inventoried without claiming behavior completion', () => {
-  assert.deepEqual(check(load()), { entries: 681, enumerated: 681, groups: 16, sourceFiles: 11, acceptedBehavior: 0, referencedEvidence: 8 });
+  const map = load();
+  assert.deepEqual(check(map), { entries: 681, enumerated: 681, groups: 16, sourceFiles: 11, acceptedBehavior: 0, referencedEvidence: map.behaviorEvidence.length });
 });
 
 test('dropping a difficult original class member fails the same inventory gate', () => {
@@ -59,6 +60,7 @@ test('an individual reviewed behavior can progress without forcing all groups gr
 
 test('unrun evidence or an absent receipt cannot approve behavior', () => {
   const map = load(), entry = map.entries.find(item => item.group === 'P01');
+  map.behaviorEvidence.find(item => item.id === 'session-version-selection').status = 'ready-not-run';
   Object.assign(entry, { status: 'verified', remaining: '', evidence: ['session-version-selection'], acceptance: ['NET-A04'] });
   assert.throws(() => check(map), /Cannot close with unrun evidence/);
   const second = load(); delete second.behaviorEvidence[0].receipt;

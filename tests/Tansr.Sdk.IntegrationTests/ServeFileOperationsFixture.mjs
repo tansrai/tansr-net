@@ -26,7 +26,7 @@ export async function startFileOperationsFixture({ source, directory, authentica
     bindings: [{ bindingId: 'files', applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId,
       limits: { binding: cap, application: cap, endUser: cap } }], globalLimit: cap,
     maxReservations: 256, maxEntries: 2048, maxOperations: 2048, maxDatabasePages: 8192 });
-  const capabilities = defaultAppCapabilities('desktop'); capabilities.tools.customTools = true;
+  const capabilities = structuredClone(defaultAppCapabilities('desktop')); capabilities.tools.customTools = true;
   capabilities.execution = { version: 'bound-device-v1', boundDevice: { tools: { read: true, write: true, edit: true, list: true, glob: true, grep: true, customTools: true } } };
   const fake = createFakePlatform({ features: [], bundleExtra: { app: { platform: 'desktop' }, capabilities } });
   const requests = new Map(), results = [], operations = [], routes = [];

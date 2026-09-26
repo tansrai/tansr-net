@@ -86,13 +86,22 @@ public sealed class ConsoleAssistantTests
         using var f = new Fixture(); var session = await f.ResumeAsync(); using var stop = new CancellationTokenSource(); using var view = new SessionView();
         f.Handler.EmitStart = false;
         using var tools = CreateTools(session);
+        var lines = new ConcurrentQueue<string>(); var projected = Signal();
+        using var narrator = new SessionNarrator(lines.Enqueue);
+        using var subscription = view.Subscribe(snapshot => { if (snapshot.LastSequence == 43) projected.TrySetResult(true); });
         await ((Task)tools.GetType().GetProperty("Ready", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tools)!).WaitAsync(Deadline);
         var metadataAtReady = f.Handler.MetadataReads; Assert.Equal(1, metadataAtReady);
-        var observation = (Task)ConsoleProgram.GetMethod("ObserveAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session, view, tools, stop.Token, null])!;
+        var observation = (Task)ConsoleProgram.GetMethod("ObserveAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session, view, tools, stop.Token, null, narrator])!;
         await f.Handler.Listening.Task.WaitAsync(Deadline);
         await session.SendAsync("first interactive prompt");
         await session.SubmitInputAsync("input-original", new SessionInputTarget("epoch", "current"), "same turn text");
         await session.SendAsync("second interactive prompt");
+        f.Handler.Events.Push(Frame(42, "turn.started", "current") + Frame(43, "turn.completed", "current", "completed"));
+        await projected.Task.WaitAsync(Deadline);
+        Assert.Equal(1, f.Handler.EventSubscriptions);
+        Assert.Equal(2, lines.Count); Assert.Contains(lines, line => line.Contains("turn started", StringComparison.Ordinal));
+        Assert.Contains(lines, line => line.Contains("turn completed", StringComparison.Ordinal));
+        Assert.Equal("idle", view.Snapshot.Status);
         Assert.Equal(2, f.Handler.Messages); Assert.Equal(1, f.Handler.Inputs); Assert.Equal(metadataAtReady, f.Handler.MetadataReads);
         stop.Cancel(); await observation.WaitAsync(Deadline); Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
     }
@@ -129,7 +138,7 @@ public sealed class ConsoleAssistantTests
     {
         internal readonly Feed Events = new();
         internal readonly TaskCompletionSource<bool> Sent = Signal(), Listening = Signal();
-        internal int Messages, MetadataReads, Inputs, Interrupts, Closes;
+        internal int Messages, MetadataReads, Inputs, Interrupts, Closes, EventSubscriptions;
         internal string? Cursor;
         internal bool EmitStart = true;
         internal Func<CancellationToken, Task>? BeforeAcceptance;
@@ -148,6 +157,7 @@ public sealed class ConsoleAssistantTests
             }
             if (request.Method == HttpMethod.Get && path.EndsWith("/events", StringComparison.Ordinal))
             {
+                Interlocked.Increment(ref EventSubscriptions);
                 Cursor = request.Headers.TryGetValues("Last-Event-ID", out var values) ? values.Single() : null; Listening.TrySetResult(true);
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(Events) { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } } };
             }

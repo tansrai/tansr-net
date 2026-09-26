@@ -23,7 +23,8 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
     bindings: [{ bindingId: 'trusted', applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId,
       limits: { binding: cap, application: cap, endUser: cap } }], globalLimit: cap,
     maxReservations: 128, maxEntries: 1024, maxOperations: 1024, maxDatabasePages: 8192 });
-  const capabilities = defaultAppCapabilities('desktop');
+  // Defaults are shared by the SDK; each synthetic application owns its mutable policy.
+  const capabilities = structuredClone(defaultAppCapabilities('desktop'));
   capabilities.tools.agent = true; capabilities.tools.customTools = true; capabilities.tools.skills = true;
   capabilities.execution = { version: 'bound-device-v1', boundDevice: { tools: { read: true, write: true, skills: true, customTools: true } } };
   const fake = createFakePlatform({ features: [], bundleExtra: { app: { platform: 'desktop' }, capabilities } });

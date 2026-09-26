@@ -36,15 +36,23 @@ const sourceBefore = { sourceSnapshotSha256: sha(snapshotBytes), sourceBaseCommi
   sourceCommitted: sourceRecord.sourceCommitted, mode: 'historical immutable SEA; active source is not executed' };
 assert.equal(await fileSha(sea), expectedSea);
 assert.match(sourceRecord.sourceBaseCommit, /^[a-f0-9]{40}$/);
-const moduleBytes = execFileSync('git', ['show', sourceRecord.sourceBaseCommit + ':examples/serve-demo/trusted-host.cjs'], { cwd: source, windowsHide: true });
+const pinnedModule = process.env.TANSR_NATIVE_CONSUMER_MODULE_PATH;
+const moduleSource = pinnedModule ? { path: resolve(pinnedModule), expectedSha256: required('TANSR_NATIVE_CONSUMER_MODULE_SHA256'), mode: 'explicit developer module pinned by SHA256' }
+  : { path: 'examples/serve-demo/trusted-host.cjs', commit: sourceRecord.sourceBaseCommit, mode: 'original committed module' };
+assert.equal(Boolean(pinnedModule), Boolean(process.env.TANSR_NATIVE_CONSUMER_MODULE_SHA256));
+const moduleBytes = pinnedModule ? await readFile(moduleSource.path)
+  : execFileSync('git', ['show', sourceRecord.sourceBaseCommit + ':examples/serve-demo/trusted-host.cjs'], { cwd: source, windowsHide: true });
+assert.ok(moduleBytes.length > 0 && moduleBytes.length <= 65536);
 const moduleSha = sha(moduleBytes);
+if (pinnedModule) { assert.match(moduleSource.expectedSha256, /^[a-f0-9]{64}$/); assert.equal(moduleSha, moduleSource.expectedSha256); }
 await mkdir(directory); // Never overwrite a previous run's evidence.
 await writeFile(modulePath, moduleBytes, { flag: 'wx' });
-// Exact public platform bundle, with only the existing client-business-tool bit enabled.
+// Exact public platform bundle; the trusted module permits Read on the bound device.
 // No SDK/Serve package is loaded by this provider process.
 const capabilities = {
   tools: Object.fromEntries(['read', 'write', 'edit', 'glob', 'grep', 'list', 'shell', 'process', 'webFetch', 'webSearch', 'http', 'todoWrite', 'askUser', 'agent', 'skills', 'mcp', 'customTools'].map(key => [key, key === 'customTools'])),
-  platform: { imageGen: false, videoGen: false, webSearch: false, speechToText: false, textToSpeech: false }
+  platform: { imageGen: false, videoGen: false, webSearch: false, speechToText: false, textToSpeech: false },
+  execution: { version: 'bound-device-v1', boundDevice: { tools: { read: true } } }
 };
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const exec = promisify(execFile);
@@ -84,7 +92,7 @@ function child(name, executable, args, env, cwd) {
   void exited.catch(() => {});
   const result = { name, process, exited, text: () => text, errors: () => errors, completed: () => completed, exitCode: () => exitCode,
     send: value => process.stdin.write(value + '\n'),
-    async wait(marker) { return until(() => { if (completed) throw new Error(name + ' exited before ' + marker + ': ' + text + errors); return text.includes(marker); }, name + ': ' + marker); },
+    async wait(marker) { return until(() => { if (completed || /(?:^|\n)error=/.test(text)) throw new Error(name + ' failed before ' + marker + ': ' + text + errors); return text.includes(marker); }, name + ': ' + marker); },
     async save() { await writeFile(join(directory, name + '.stdout.log'), text); await writeFile(join(directory, name + '.stderr.log'), errors); } };
   owned.push(result); return result;
 }
@@ -102,8 +110,38 @@ async function consoleRun(mode, phase, config, resume) {
   const serverPid = await listeningPid(config.port); assert.ok(serverPid && serverPid !== app.process.pid);
   if (config.serverPid) assert.equal(serverPid, config.serverPid);
   app.send('/workspace 0'); await app.wait(mode === 'local' ? '受控本地 Serve' : '远端 Serve');
+  const deviceConfig = join(config.root, 'device-' + phase + '.json');
+  await writeFile(deviceConfig, JSON.stringify({ format: 'tansr-example-terminal-device-v1', enablePreview: true,
+    serveUrl: `http://127.0.0.1:${config.port}`, allowInsecureLoopback: true, useControllerForDevice: true,
+    sessionId, executorId: 'native-' + mode, trustedScopeFile: join(config.root, 'scope.json'), bindingRequestId: 'bind-' + mode + '-' + phase,
+    workspace: { path: config.deviceWorkspace, id: 'work', revision: '1' },
+    journal: { path: join(config.root, 'device-execution.sqlite'), mode: resume ? 'reopen' : 'create' }, allowedTools: ['Read'] }));
+  app.send('/device-start ' + deviceConfig); await app.wait('device=Ready');
+  const approved = new Set(), serverApproved = new Set();
+  async function waitForDeviceRead() {
+    await until(() => {
+      assert.doesNotMatch(app.text(), /(?:^|\n)error=|turn\.error|turn\.aborted/);
+      assert.equal(app.completed(), false);
+      for (const match of app.text().matchAll(/server\.permission\.request ([a-f0-9-]+) ([^\r\n]+)/g)) {
+        if (serverApproved.has(match[1])) continue;
+        const request = JSON.parse(match[2]); assert.equal(request.requestId, match[1]); assert.equal(request.name, 'Read');
+        assert.ok(request.summary.includes('Device native-' + mode + '; workspace work; binding revision '));
+        assert.ok(request.summary.endsWith('\n/workspace/work/note.txt')); assert.ok(serverApproved.size < 2);
+        serverApproved.add(match[1]); app.send('/allow ' + match[1]);
+      }
+      for (const match of app.text().matchAll(/device_approval=([a-f0-9]{32})\r?\n终端本地批准：Read\r?\n工作区：[^\r\n]+\r?\n([^\r\n]+)/g)) {
+        if (approved.has(match[1])) continue;
+        const request = JSON.parse(match[2]); assert.ok(['fs.inspect', 'fs.read'].includes(request.operation));
+        assert.equal(request.args.path, 'note.txt'); assert.ok(approved.size < 16);
+        if (request.operation === 'fs.read') { assert.equal(request.args.offset, 0); assert.equal(request.args.length, 21); }
+        approved.add(match[1]); app.send('/device-allow ' + match[1]);
+      }
+      return app.text().includes('A20_FIRST_DONE');
+    }, mode + ' real device Read and local approval');
+    assert.ok(approved.size > 0, 'The real terminal operation must pass the native local approval.');
+  }
   if (!resume) {
-    app.send(`A20:${mode}:FIRST`); await app.wait('A20_FIRST_DONE'); await app.wait('turn.completed');
+    app.send(`A20:${mode}:FIRST`); await waitForDeviceRead(); await app.wait('turn.completed');
     const previous = app.text().split('turn.completed').length;
     app.send(`A20:${mode}:SECOND`); await app.wait('A20_SECOND_DONE');
     await until(() => app.text().split('turn.completed').length > previous, 'Second original turn settles');
@@ -119,7 +157,7 @@ async function consoleRun(mode, phase, config, resume) {
   const state = JSON.parse(await readFile(env.TANSR_EXAMPLE_STATE_FILE, 'utf8'));
   assert.equal(state.sessionId, sessionId); assert.ok(state.history.includes('A20_FIRST_DONE'));
   runs.push({ mode, phase, sessionId, clientPid: app.process.pid, servePid: serverPid, port: config.port, scope: identities[mode],
-    retainedHistory: true, businessTool: 'application_info', remoteResources: 'Completed', localServeExited: mode === 'local',
+    retainedHistory: true, deviceTool: 'Read', serverApprovalIds: [...serverApproved], localApprovalIds: [...approved], remoteResources: 'Completed', localServeExited: mode === 'local',
     inheritedPath: env.PATH, source: 'unchanged ConsoleAssistant / ExampleConnection / original trusted-host.cjs' });
   return sessionId;
 }
@@ -145,13 +183,13 @@ try {
     if (body.purpose === 'memory' || body.meta?.purpose === 'memory') delta = { i: 0, t: 'text', v: 'No new durable memory.' };
     else if (serialized.includes('PERMISSION ADJUDICATION')) delta = { i: 0, t: 'text', v: '{"verdict":"endorse","reason":"synthetic read-only application metadata"}' };
     else if (/A20:(local|remote):FIRST/.test(last)) {
-      const mode = /A20:(local|remote):FIRST/.exec(last)[1], callId = 'application-info-' + mode;
+      const mode = /A20:(local|remote):FIRST/.exec(last)[1], callId = 'device-read-' + mode;
       const result = results.find(block => block.toolUseId === callId);
-      if (!result) { assert.ok(body.tools.some(tool => tool.name === 'application_info'));
-        delta = { i: 0, t: 'tool_use', id: callId, name: 'application_info', vJson: '{}' }; stop = 'tool_use'; }
-      else { assert.notEqual(result.isError, true); assert.match(JSON.stringify(result), /Tansr\.Console/); delta = { i: 0, t: 'text', v: 'A20_FIRST_DONE' }; }
+      if (!result) { assert.deepEqual(body.tools.map(tool => tool.name), ['Read']);
+        delta = { i: 0, t: 'tool_use', id: callId, name: 'Read', vJson: '{"file_path":"/workspace/work/note.txt"}' }; stop = 'tool_use'; }
+      else { assert.notEqual(result.isError, true); assert.match(JSON.stringify(result), /A20_REAL_DEVICE_NOTE/); delta = { i: 0, t: 'text', v: 'A20_FIRST_DONE' }; }
     } else if (/A20:(local|remote):(SECOND|RESUME)/.test(last)) {
-      assert.match(serialized, /A20_FIRST_DONE/); assert.match(serialized, /Tansr\.Console/);
+      assert.match(serialized, /A20_FIRST_DONE/); assert.match(serialized, /A20_REAL_DEVICE_NOTE/);
       if (last.endsWith('RESUME')) assert.match(serialized, /A20_SECOND_DONE/);
       delta = { i: 0, t: 'text', v: last.endsWith('RESUME') ? 'A20_RESUME_DONE' : 'A20_SECOND_DONE' };
     } else throw new Error('Unexpected synthetic prompt');
@@ -160,16 +198,18 @@ try {
   })().catch(error => { faults.push(String(error.stack ?? error)); res.writeHead(500).end('{"error":{"code":"fixture_failed"}}'); }); });
   await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
   for (const mode of ['local', 'remote']) {
-    const root = join(directory, mode), workspace = join(root, 'workspace'); await mkdir(workspace, { recursive: true });
+    const root = join(directory, mode), workspace = join(root, 'workspace'), deviceWorkspace = join(root, 'device-workspace');
+    await mkdir(workspace, { recursive: true }); await mkdir(deviceWorkspace);
+    await writeFile(join(deviceWorkspace, 'note.txt'), 'A20_REAL_DEVICE_NOTE\n');
     const userToken = randomBytes(32).toString('hex'), bearer = randomBytes(32).toString('hex'), listenPort = await port();
     const scope = identities[mode], policy = join(root, 'users.json'), scopeFile = join(root, 'scope.json'); activeScope = scope;
     await writeFile(scopeFile, JSON.stringify({ principal: 'local-binding/' + mode, scope }));
     await writeFile(policy, JSON.stringify([{ endUserId: scope.endUserId, tokenSha256: sha(userToken), executorId: 'native-' + mode,
-      authorizationRevision: '1', tools: [], memory: { sourceId: 'native-memory-' + mode, sourceGeneration: '1', mode: 'create' } }]));
+      authorizationRevision: '1', tools: ['Read'], memory: { sourceId: 'native-memory-' + mode, sourceGeneration: '1', mode: 'create' } }]));
     const hostEnvironment = { TANSR_APP_KEY_ID: scope.applicationScopeId, TANSR_APP_KEY: 'synthetic-platform-only', TANSR_API_BASE: `http://127.0.0.1:${upstream.address().port}`,
       DEMO_STORE_DIR: join(root, 'store'), DEMO_HOST_USERS_PATH: policy, TANSR_DEMO_SYSTEM: 'Read-only application metadata and deterministic synthetic acceptance.' };
     const clientEnvironment = { TANSR_MODEL: 'main', TANSR_TRUSTED_SCOPE_FILE: scopeFile, TANSR_TERMINAL_PREVIEW: '1', TANSR_SERVE_USER_TOKEN: userToken, TANSR_SESSION_CONTRACT: 'sdk1' };
-    const config = { root, workspace, port: listenPort, clientEnvironment };
+    const config = { root, workspace, deviceWorkspace, port: listenPort, clientEnvironment };
     if (mode === 'local') Object.assign(clientEnvironment, hostEnvironment, { TANSR_LOCAL_SERVE_EXE: sea, TANSR_LOCAL_SERVE_SHA256: expectedSea,
       TANSR_LOCAL_WORKSPACE: workspace, TANSR_LOCAL_SERVE_PORT: String(listenPort), TANSR_LOCAL_SERVE_HOST_MODULE: modulePath,
       TANSR_LOCAL_SERVE_HOST_MODULE_SHA256: moduleSha, TANSR_LOCAL_ENV_NAMES: Object.keys(hostEnvironment).join(',') });
@@ -202,7 +242,7 @@ finally {
   } catch (error) { failure ??= error; }
   await writeFile(join(directory, 'exchanges.json'), JSON.stringify(requests, null, 2));
   await writeFile(join(directory, 'manifest.json'), JSON.stringify({ finalSea: { path: sea, sha256: await fileSha(sea) },
-    trustedModule: { path: modulePath, sha256: moduleSha }, console: consoleProduct,
+    trustedModule: { path: modulePath, sha256: moduleSha, source: moduleSource }, console: consoleProduct,
     sourceBefore, sourceAfter, consoleEncoding, runs, syntheticExchanges: requests.length, faults, success: !failure,
     boundary: 'Node is the acceptance orchestrator/upstream only; the unchanged product children receive a PATH without Node. No model service is contacted.',
     failure: failure ? String(failure.stack ?? failure) : null }, null, 2));

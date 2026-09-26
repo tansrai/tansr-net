@@ -33,6 +33,7 @@ internal static class Program
         {
             Console.WriteLine("Tansr 原生控制台\n环境：TANSR_SERVE_URL、TANSR_SESSION_TOKEN；可选 TANSR_ALLOW_HTTP_LOOPBACK=1、TANSR_RESUME_SESSION、TANSR_MODEL。\n命令：普通文字发送；/history /meta /compact /checkpoint /checkpoints /cancel /requests /allow <requestId> /deny <requestId> /answer <requestId> <答案JSON数组> /quit。\n无界面 --once <prompt> 会拒绝审批、以明确的无人值守说明回答提问，等待终态后关闭。Ctrl+C / SIGTERM 中断当前工作并有界收尾。票据不写入文件或日志。");
             Console.WriteLine("草稿：/draft <全文>、/draft-file <UTF8文件>、/draft、/send-draft；同轮：/insert <全文>、/insert-draft、/input-status、/input-retry（原键）；离线：--offline、/offline。多会话：--worker <jobs.jsonl> [--concurrency 1..8]。提示词来源与策略：/prompt（显式只读）。");
+            Console.WriteLine("运行叙述：TANSR_NARRATOR_VERBOSITY=quiet|normal|verbose（默认normal），与原事件观察共用同一泵；verbose只报告思考字符数，不输出思考正文。Worker以phase=narration输出相同叙述。");
             Console.WriteLine("Windows设备自动记忆：--device-memory <可信配置JSON>；独立controller/device票据，持续领取原操作直到Ctrl+C或/stop，不关闭远端会话。见 examples/Shared/device-memory.md。");
             Console.WriteLine("共享工作台：/workspace 显示操作；/workspace <0..27> [参数]，覆盖能力/任务/会话分页/快照/分叉/cwd，以及本机SDK1镜像与SDK2档案。/export <快照ID> <新文件路径>，/import <快照路径>。三个示例共用TANSR_PROFILE/TANSR_CAPABILITIES_PROFILE/TANSR_THINKING_BUDGET/TANSR_MAX_TOKENS/TANSR_MAX_USD受信宿主请求。");
             Console.WriteLine("本机设备工具：/device-start <受信JSON配置>；/device-status；/device-stop；本地批准使用 /device-allow <原ID> 或 /device-deny <原ID>。不读取第二条stdin，不自动批准或改用Serve宿主工具。");
@@ -82,6 +83,7 @@ internal static class Program
         }
         MediaWorkspace? media = null; ConsoleMediaCommands? mediaCommands = null; ExampleConnection? connection = null; TansrClient? client = null; AgentSession? session = null; Task? observation = null; NativeToolHost? nativeTools = null;
         using var view = new SessionView();
+        SessionNarrator? narrator = null;
         NativeTerminalDeviceHost? terminalDevice = null;
         ExampleLocalStorage? storage = null;
         using var deviceApprovals = new ExampleDeviceApprovals(Write);
@@ -92,6 +94,7 @@ internal static class Program
         void SaveLocal(string? history = null) => local.Save(Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve", session?.Id ?? "", draft, SessionViewTextFormatter.Format(view.Snapshot), history);
         try
         {
+            narrator = new SessionNarrator(line => Write("[narrator] " + line), new SessionNarratorOptions { Verbosity = ExampleSessionOptions.ReadNarratorVerbosity() });
             var saved = local.Load(); draft = saved.Draft;
             if (saved.Input != null && !saved.Input.CanStartAnother &&
                 (saved.SessionId != Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") || saved.Endpoint != (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve")))
@@ -128,9 +131,9 @@ internal static class Program
             {
                 var prompt = string.Join(" ", args.Skip(1));
                 return await RunOnceAsync(active, prompt,
-                    async (item, ct) => { await ObserveEventAsync(active, view, nativeTools, true, item, ct); await ObserveStorageAsync(storage, item, ct); }, stop.Token);
+                    async (item, ct) => { narrator.Apply(item); await ObserveEventAsync(active, view, nativeTools, true, item, ct); await ObserveStorageAsync(storage, item, ct); }, stop.Token);
             }
-            observation = ObserveAsync(active, view, nativeTools, stop.Token, storage);
+            observation = ObserveAsync(active, view, nativeTools, stop.Token, storage, narrator);
             while (!stop.IsCancellationRequested)
             {
                 var line = await Console.In.ReadLineAsync(stop.Token);
@@ -220,6 +223,11 @@ internal static class Program
                 {
                     if (stop.IsCancellationRequested) await session.CancelAsync(timeout.Token);
                     if (storage != null) await storage.FlushAsync(timeout.Token);
+                    if (terminalDevice != null)
+                    {
+                        await terminalDevice.PrepareSessionCloseAsync(timeout.Token);
+                        Write("device_notifications=quiesced; device_execution=available_for_remote_drain");
+                    }
                     await session.CloseAsync(timeout.Token);
                     if (connection?.Observation != null)
                     { var settled = await connection.Observation.WaitForResourcesAsync(session.Id, TimeSpan.FromSeconds(10), sessionContract: connection.Contract, cancellationToken: timeout.Token); Write("remote_resources=" + settled.State); }
@@ -229,10 +237,14 @@ internal static class Program
                 catch (Exception error) { Write("close_unconfirmed=" + ErrorCode(error)); }
             }
             stop.Cancel();
-            if (terminalDevice != null) { try { await terminalDevice.StopAsync(); } catch (Exception error) { Write("device_cleanup_unconfirmed=" + ErrorCode(error)); } }
+            if (terminalDevice != null)
+            {
+                try { await terminalDevice.StopAsync(); Write("device_cleanup=completed"); }
+                catch (Exception error) { Write("device_cleanup_unconfirmed=" + ErrorCode(error) + "; notification=" + (terminalDevice.LastNotificationErrorCode ?? "none") + "; cause=" + (error.InnerException == null ? "none" : ErrorCode(error.InnerException))); }
+            }
             if (observation != null) { try { await observation; } catch (Exception error) { Write("observer=" + ErrorCode(error)); } }
             if (storage != null) { if (storage.PendingCleanupStatus.Length > 0) Write(storage.PendingCleanupStatus); try { await storage.CloseAsync(); } catch (Exception error) { Write("storage_cleanup_unconfirmed=" + ErrorCode(error)); } }
-            media?.Dispose(); nativeTools?.Dispose(); client?.Dispose();
+            narrator?.Dispose(); media?.Dispose(); nativeTools?.Dispose(); client?.Dispose();
             if (connection != null) { try { await connection.CloseAsync(); } catch (Exception error) { Write("local_serve_cleanup_unconfirmed=" + ErrorCode(error)); } }
             Console.CancelKeyPress -= cancel;
         }
@@ -293,11 +305,11 @@ internal static class Program
         return !result.WasAborted && result.Reason is "completed" or "structured_output" ? 0 : 2;
     }
 
-    private static async Task ObserveAsync(AgentSession session, SessionView view, NativeToolHost tools, CancellationToken token, ExampleLocalStorage? storage = null)
+    private static async Task ObserveAsync(AgentSession session, SessionView view, NativeToolHost tools, CancellationToken token, ExampleLocalStorage? storage = null, SessionNarrator? narrator = null)
     {
         try
         {
-            await session.ObserveAsync(async (item, ct) => { await ObserveEventAsync(session, view, tools, false, item, ct); if (storage != null) await ObserveStorageAsync(storage, item, ct); }, token);
+            await session.ObserveAsync(async (item, ct) => { narrator?.Apply(item); await ObserveEventAsync(session, view, tools, false, item, ct); if (storage != null) await ObserveStorageAsync(storage, item, ct); }, token);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error) { Write("event_source=" + ErrorCode(error)); }

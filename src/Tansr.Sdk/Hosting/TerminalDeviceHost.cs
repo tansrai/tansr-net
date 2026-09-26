@@ -203,6 +203,11 @@ public sealed class TerminalDeviceHost : IDisposable
         if (running != null) await running.ConfigureAwait(false);
     }
 
+    /// <summary>Drain executor notification SSE before closing the remote session. Device polling,
+    /// heartbeat, tool execution and memory publication remain available until StopAsync.</summary>
+    public Task QuiesceNotificationsAsync(CancellationToken cancellationToken = default) =>
+        device.QuiesceNotificationsAsync(cancellationToken);
+
     public void Dispose()
     {
         lock (gate)

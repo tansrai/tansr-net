@@ -5,6 +5,7 @@ using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Views;
 
 namespace ConsoleAssistant;
 
@@ -109,7 +110,7 @@ internal static class ConsoleWorker
     private static async Task<bool> RunJobAsync(Job job, string? defaultModel, TansrClient client,
         IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Output output, TerminalObservationClient? observation, SessionContract sessionContract)
     {
-        AgentSession? session = null; NativeToolHost? tools = null; SessionRun? run = null;
+        AgentSession? session = null; NativeToolHost? tools = null; SessionRun? run = null; SessionNarrator? narrator = null;
         var creationStarted = false; var acceptanceWritten = false; var terminalKnown = false; var success = false; var cleanupConfirmed = true;
         try
         {
@@ -131,7 +132,8 @@ internal static class ConsoleWorker
                 code => output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "native_tool", code }), bindings);
             await tools.Ready.ConfigureAwait(false);
             var activeSession = session; var activeTools = tools;
-            run = session.StartRun(job.Prompt, observer: (item, ct) => ObserveAsync(job.Id, activeSession, activeTools, item, ct, output), cancellationToken: stop);
+            narrator = new SessionNarrator(line => output.Emit(new { jobId = job.Id, sessionId = activeSession.Id, phase = "narration", line }), new SessionNarratorOptions { Verbosity = ExampleSessionOptions.ReadNarratorVerbosity() });
+            run = session.StartRun(job.Prompt, observer: (item, ct) => { narrator.Apply(item); return ObserveAsync(job.Id, activeSession, activeTools, item, ct, output); }, cancellationToken: stop);
             try
             {
                 await run.Acceptance.ConfigureAwait(false);
@@ -166,6 +168,7 @@ internal static class ConsoleWorker
         finally
         {
             run?.Dispose();
+            narrator?.Dispose();
             if (session is not null)
             {
                 if (!terminalKnown && run?.AcceptanceState is SessionMessageAcceptance.Accepted or SessionMessageAcceptance.Unconfirmed)

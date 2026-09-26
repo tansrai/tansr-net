@@ -124,6 +124,11 @@ public sealed class DeviceSessionHost : IDisposable
         if (completion != null) await completion.ConfigureAwait(false);
     }
 
+    /// <summary>Drain optional executor notifications before remote session close, keeping the original
+    /// device polling, heartbeat and memory/tool settlement alive. Previously recorded failures remain visible.</summary>
+    public Task QuiesceNotificationsAsync(CancellationToken cancellationToken = default) =>
+        _execution.QuiesceNotificationsAsync(cancellationToken);
+
     private JsonElement Initialization() => ExecutionJson.Object(writer =>
     {
         writer.WriteString("protocol", "sdk2-ext-v1"); writer.WriteString("sessionId", _sessionId);

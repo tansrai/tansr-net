@@ -112,6 +112,39 @@ public sealed class WindowsWorkspace : IDisposable
         }
     }
 
+    // fs.mkdir is the remote form of the kernel's recursive mkdir. Keep the
+    // original create-only method and all file-path rules unchanged.
+    internal void EnsureDirectory(string relativeDirectory, CancellationToken cancellationToken)
+    {
+        lock (_gate)
+        {
+            Check(); string[] parts = Parts(relativeDirectory);
+            cancellationToken.ThrowIfCancellationRequested();
+            NativeWorkspace.Validate(RootHandle, true);
+            if (_cooperative) NativeWorkspace.ValidatePrivatePermissions(RootHandle);
+            using var chain = new HandleChain(RootHandle);
+            foreach (var part in parts)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                SafeFileHandle next;
+                try { next = NativeWorkspace.OpenDirectory(chain.Last, part); }
+                catch (WindowsWorkspaceException error) when (error.Code == "not_found")
+                {
+                    try { next = NativeWorkspace.OpenDirectory(chain.Last, part, true); }
+                    catch (WindowsWorkspaceException raced) when (raced.Code == "already_exists")
+                    {
+                        // Re-open through the same pinned parent and revalidate the
+                        // actual directory; an existing file or reparse point is not success.
+                        next = NativeWorkspace.OpenDirectory(chain.Last, part);
+                    }
+                }
+                chain.Add(next);
+                if (_cooperative) NativeWorkspace.ValidatePrivatePermissions(chain.Last);
+            }
+            if (!IsWithinRoot(NativeWorkspace.FinalPath(chain.Last))) throw new WindowsWorkspaceException("path_identity_changed");
+        }
+    }
+
     /// <summary>原子替换指定目录项；不会读取或跟随目标符号链接。不是带条件的提交。</summary>
     public WindowsWorkspaceWriteResult WriteAtomic(string relativePath, byte[] bytes, bool overwrite = true, CancellationToken cancellationToken = default)
     {

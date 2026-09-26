@@ -12,6 +12,82 @@ public sealed class ExecutionHostTests
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public async Task QuiesceDuringNotificationInitializationRetainsTheOriginalFactoryFailure()
+    {
+        var entered = Signal(); var release = Signal(); var failure = new InvalidDataException("synthetic notification factory failure");
+        var client = new FakeClient();
+        using var host = new ExecutionHost(client, client, new FakeBackend(), new FakeJournal(), Allow,
+            new ExecutionHostOptions
+            {
+                NotificationSourceFactory = async (_, token) =>
+            { entered.TrySetResult(true); await release.Task.WaitAsync(token); throw failure; }
+            });
+        var run = host.RunAsync();
+        await entered.Task.WaitAsync(Deadline);
+        var quiesce = host.QuiesceNotificationsAsync(); Assert.False(quiesce.IsCompleted);
+        release.TrySetResult(true);
+        Assert.Same(failure, (await Assert.ThrowsAsync<IOException>(() => quiesce.WaitAsync(Deadline))).InnerException);
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidDataException>(() => run.WaitAsync(Deadline)));
+        Assert.Same(failure, await Assert.ThrowsAsync<InvalidDataException>(() => host.StopAsync().WaitAsync(Deadline)));
+        Assert.Equal(0, client.PollCalls); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Fact]
+    public async Task QuiesceDrainsOnlyNotificationsAndKeepsHeartbeatAndTailOperationsAlive()
+    {
+        var operation = ExecutionFixture.Operation(); var started = Signal(); var release = Signal(); var notificationRelease = Signal();
+        var source = new FakeNotifications { StopRelease = notificationRelease.Task, StopError = new TansrProtocolException("serve_http_truncated") };
+        source.Status = value => ExecutionFixture.Status(value, null);
+        var client = new FakeClient { Connection = ExecutionFixture.Set(ExecutionFixture.Connection(), "heartbeatAfterMs", JsonSerializer.SerializeToElement(1000)) };
+        client.Enqueue(operation); var journal = new FakeJournal(); var backend = new FakeBackend(); CancellationToken active = default;
+        backend.Execute = async (_, guard, ct) =>
+        {
+            Interlocked.Increment(ref backend.SideEffects); active = ct; started.TrySetResult(true);
+            await release.Task.WaitAsync(ct); await guard(ct); return ExecutionFixture.Result();
+        };
+        using var host = new ExecutionHost(client, client, backend, journal, Allow, source.Options());
+        var run = host.RunAsync();
+        try
+        {
+            await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline); await started.Task.WaitAsync(Deadline);
+            var quiesce = host.QuiesceNotificationsAsync();
+            await source.StopEntered.Task.WaitAsync(Deadline);
+            Assert.False(quiesce.IsCompleted); Assert.False(active.IsCancellationRequested);
+            notificationRelease.TrySetResult(true); await quiesce.WaitAsync(Deadline);
+            await client.HeartbeatObserved.Task.WaitAsync(Deadline);
+            Assert.False(run.IsCompleted); Assert.False(active.IsCancellationRequested); Assert.Null(host.LastNotificationErrorCode);
+            release.TrySetResult(true);
+            var first = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            client.Enqueue(ExecutionFixture.Operation("tail-operation"));
+            var tail = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.Equal("completed", first.GetProperty("status").GetString());
+            Assert.Equal("completed", tail.GetProperty("status").GetString());
+            Assert.Equal(2, backend.SideEffects); Assert.Equal(2, journal.Completions.Count);
+            await host.QuiesceNotificationsAsync().WaitAsync(Deadline); Assert.Single(source.Connections); Assert.Equal(1, source.Exits);
+        }
+        finally { release.TrySetResult(true); notificationRelease.TrySetResult(true); await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+    }
+
+    [Fact]
+    public async Task QuiesceCallerCancellationDoesNotReportPumpDrainedOrStopDevice()
+    {
+        var release = Signal(); var source = new FakeNotifications { StopRelease = release.Task };
+        var client = new FakeClient(); using var host = new ExecutionHost(client, client, new FakeBackend(), new FakeJournal(), Allow, source.Options());
+        var run = host.RunAsync(); using var cancellation = new CancellationTokenSource();
+        try
+        {
+            await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            var quiesce = host.QuiesceNotificationsAsync(cancellation.Token);
+            await source.StopEntered.Task.WaitAsync(Deadline); cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => quiesce.WaitAsync(Deadline));
+            Assert.False(run.IsCompleted);
+            release.TrySetResult(true); await host.QuiesceNotificationsAsync().WaitAsync(Deadline);
+            Assert.False(run.IsCompleted); Assert.Single(source.Connections);
+        }
+        finally { release.TrySetResult(true); await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+    }
+
+    [Fact]
     public async Task NotificationReadReportingNetworkErrorDuringStopIsNormalShutdown()
     {
         // A real canceled/disposed HTTP stream can report an I/O error instead of OCE.
@@ -128,6 +204,7 @@ public sealed class ExecutionHostTests
         await Assert.ThrowsAsync<IOException>(() => run.WaitAsync(Deadline));
         // Explicit stop cannot erase a failure already observed before cancellation.
         await Assert.ThrowsAsync<IOException>(() => host.StopAsync().WaitAsync(Deadline));
+        await Assert.ThrowsAsync<IOException>(() => host.QuiesceNotificationsAsync().WaitAsync(Deadline));
         Assert.Equal(0, backend.SideEffects); Assert.Equal(0, journal.ClaimCalls); Assert.Equal(0, client.SubmitCalls);
         Assert.Single(source.Connections); Assert.NotNull(host.LastNotificationErrorCode);
     }
@@ -152,6 +229,8 @@ public sealed class ExecutionHostTests
         public JsonElement Scope => ExecutionFixture.Scope();
         public Func<JsonElement, JsonElement>? Status;
         public Exception? StopError;
+        public Task? StopRelease;
+        public TaskCompletionSource<bool> StopEntered { get; } = Signal();
         public int Exits, StatusReads;
         public ExecutionHostOptions Options() => new() { NotificationSourceFactory = (_, _) => Task.FromResult<IExecutionNotificationSource>(this) };
         public async Task ObserveAsync(JsonElement connection, long? lastEventId, Func<JsonElement, CancellationToken, Task> observer, CancellationToken ct)
@@ -161,6 +240,8 @@ public sealed class ExecutionHostTests
             finally
             {
                 Interlocked.Increment(ref Exits);
+                StopEntered.TrySetResult(true);
+                if (StopRelease != null) await StopRelease;
                 if (ct.IsCancellationRequested && StopError != null) throw StopError;
             }
         }
@@ -598,6 +679,8 @@ public sealed class ExecutionHostTests
         public Channel<JsonElement> Submissions { get; } = Channel.CreateUnbounded<JsonElement>();
         public TaskCompletionSource<bool> StatusObserved { get; } = Signal();
         public JsonElement Scope = ExecutionFixture.Scope();
+        public JsonElement Connection = ExecutionFixture.Connection();
+        public TaskCompletionSource<bool> HeartbeatObserved { get; } = Signal();
         public Func<string, string, JsonElement>? Status;
         public Func<CancellationToken, Task<JsonElement>>? Poll;
         public bool LoseSubmitResponse;
@@ -605,8 +688,9 @@ public sealed class ExecutionHostTests
         public int SubmitCalls, StatusReads, PollCalls;
         public void Enqueue(JsonElement operation) => _batches.Writer.TryWrite(ExecutionFixture.Batch(operation));
         public JsonElement ReadScope() => Scope.Clone();
-        public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken cancellationToken) => Task.FromResult(ExecutionFixture.Connection());
-        public Task<JsonElement> HeartbeatAsync(JsonElement connection, CancellationToken cancellationToken) => Task.FromResult(ExecutionFixture.Connection());
+        public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken cancellationToken) => Task.FromResult(Connection.Clone());
+        public Task<JsonElement> HeartbeatAsync(JsonElement connection, CancellationToken cancellationToken)
+        { cancellationToken.ThrowIfCancellationRequested(); HeartbeatObserved.TrySetResult(true); return Task.FromResult(Connection.Clone()); }
         public async Task<JsonElement> PollAsync(JsonElement connection, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref PollCalls);

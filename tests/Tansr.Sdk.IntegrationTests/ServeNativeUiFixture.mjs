@@ -20,13 +20,14 @@ const { setEnglish } = await load('packages/server/test/helpers.ts'); setEnglish
 const records = [], issued = new Map();
 const capability = zeroAppCapabilities('desktop');
 capability.tools.customTools = capability.tools.askUser = capability.tools.todoWrite = true;
+capability.tools.agent = true;
 const { nativeMediaPlatform } = await import('./ServeNativeMediaFixture.mjs');
 const media = await nativeMediaPlatform({ directory });
 const { nativeMemoryPlatform } = await import('./ServeNativeMemoryFixture.mjs');
 const memory = await nativeMemoryPlatform({ source, directory,
   scope: { applicationScopeId: 'native-ui-app', endUserId: 'native-ui-user', authorizationRevision: '1' },
   authenticate: request => request.headers.authorization === `Bearer ${token}` ? { endUserId: 'native-ui-user' } : null,
-  allowedTools: ['SearchMemory', 'Read', 'List', 'Write', 'Edit', 'AskUser', 'TodoWrite', 'ImageGen', 'VideoGen', 'TextToSpeech', 'SpeechToText', 'set_window_title', 'native_skill', 'mcp_echo'] });
+  allowedTools: ['SearchMemory', 'Read', 'List', 'Write', 'Edit', 'AskUser', 'TodoWrite', 'ImageGen', 'VideoGen', 'TextToSpeech', 'SpeechToText', 'set_window_title', 'native_skill', 'mcp_echo', 'Task'] });
 capability.platform.imageGen = capability.platform.videoGen = capability.platform.speechToText = capability.platform.textToSpeech = true;
 const fake = createFakePlatform({ cacheControl: 'private, max-age=0', features: ['image-input', 'reasoning-content', 'reasoning-off'], bundleExtra: {
   ...media?.bundleExtra, app: { platform: 'desktop' }, capabilities: {
@@ -101,6 +102,13 @@ const fetchImpl = async (input, init) => {
   assert.ok(marker); assert.ok(records.filter(x => x.kind === 'model').length < 150);
   const match = /^UI_([A-Z_]+)_(WPF|WINFORMS)$/.exec(marker); assert.ok(match, 'Only named synthetic UI scenarios are accepted.');
   const kind = match[1], host = match[2]; records.push({ kind: 'model', marker, model: request.model, at: Date.now() });
+  if (kind === 'TASK_CHILD') {
+    assert.ok(request.thread.some(message => message.role === 'user' && message.blocks.some(block => block.t === 'text' && block.v === `UI_TASK_CHILD_${host}`)), 'Only the actual child prompt selects the child response.');
+    assert.deepEqual(request.tools ?? [], [], 'This bounded Task requested no child tools.');
+    records.push({ kind: 'task-child', host, at: Date.now() }); await saveRecords();
+    return new Response(frame('t.open', { exchangeId: `ui-child-${records.length}`, model: request.model, protocol: 'twp/1' }) +
+      frame('t.delta', { i: 0, t: 'text', v: `UI_TASK_CHILD_DONE_${host}` }) + frame('t.close', { stop: 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+  }
   if (kind === 'IMAGE_INPUT') assert.ok(request.thread.findLast(message => message.role === 'user').blocks.some(block => block.t === 'image'), 'Original user image block must reach the real model boundary.');
   await saveRecords();
   let tool;
@@ -110,15 +118,45 @@ const fetchImpl = async (input, init) => {
     else if (kind === 'SKILL' || kind === 'SKILL_DIRECTORY' || kind === 'SKILL_REVOKED') tool = { name: 'native_skill', args: { name: kind === 'SKILL_DIRECTORY' ? 'device-guide' : 'inline-guide' } };
     else if (kind === 'MCP' || kind === 'MCP_REVOKED') tool = { name: 'mcp_echo', args: { text: 'native ui mcp echo' } };
     else if (kind === 'TODO') tool = { name: 'TodoWrite', args: { todos: [{ id: 'ui-todo', content: 'Native UI todo', status: 'pending' }], merge: false } };
+    else if (kind === 'TASK') tool = { name: 'Task', args: { description: 'Native UI foreground task', prompt: `UI_TASK_CHILD_${host}`, tools: [] } };
     else if (kind.startsWith('MEDIA_')) tool = media.toolRequests[`UI_${kind}`];
     if (tool) { assert.ok(request.tools.some(x => x.name === tool.name), `Required UI tool unavailable: ${tool.name}`); issued.set(marker, `ui-tool-${records.length}`); }
   }
   if (!tool && issued.has(marker) && !['DENY', 'EXPIRE'].includes(kind)) {
     const result = request.thread.flatMap(message => message.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === issued.get(marker));
     assert.ok(result && (result.isError === true) === kind.endsWith('_REVOKED'), `The real ${kind} tool must have its expected success/revocation outcome before UI_DONE is emitted.`);
+    if (kind === 'TASK') assert.ok(JSON.stringify(result).includes(`UI_TASK_CHILD_DONE_${host}`), 'The parent must receive the actual child result.');
     records.push({ kind: 'tool-result', marker, toolUseId: result.toolUseId, isError: result.isError === true });
   }
   const open = frame('t.open', { exchangeId: `ui-${records.length}`, model: request.model, protocol: 'twp/1' });
+  if (kind === 'DELIVERY') {
+    const encoder = new TextEncoder();
+    return new Response(new ReadableStream({
+      async start(controller) {
+        controller.enqueue(encoder.encode(open + frame('t.delta', { i: 0, t: 'thinking', v: `UI_DELIVERY_PRIOR_THINKING_${host}` }) +
+          frame('t.delta', { i: 1, t: 'text', v: `UI_DELIVERY_STARTED_${host}` })));
+        let phase = 0; const deadline = Date.now() + 30000;
+        try {
+          while (!init.signal?.aborted && Date.now() < deadline) {
+            let requested = 0;
+            try { requested = JSON.parse(await readFile(join(directory, `native-delivery-${host}.json`), 'utf8')).phase; }
+            catch (error) { if (error.code !== 'ENOENT') throw error; }
+            if (phase === 0 && requested === 1) {
+              controller.enqueue(encoder.encode(frame('t.delta', { i: 1, t: 'text', v: `UI_DELIVERY_CONTINUED_${host}` }) +
+                frame('t.delta', { i: 2, t: 'thinking', v: `UI_DELIVERY_HIDDEN_${host}` }) +
+                frame('t.delta', { i: 3, t: 'text', v: `UI_DELIVERY_FINAL_${host}` })));
+              phase = 1;
+            } else if (phase === 1 && requested === 2) {
+              controller.enqueue(encoder.encode(frame('t.close', { stop: 'end_turn' }))); controller.close(); return;
+            }
+            await new Promise(resolve => setTimeout(resolve, 50));
+          }
+          if (!init.signal?.aborted) throw new Error('The native dynamic delivery fixture did not receive its bounded host release.');
+          controller.close();
+        } catch (error) { controller.error(error); }
+      },
+    }), { headers: { 'content-type': 'text/event-stream' } });
+  }
   if (kind === 'HOLD') {
     const encoder = new TextEncoder();
     return new Response(new ReadableStream({

@@ -181,7 +181,7 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
                 return Result(name, writer => writer.WriteString("hash", written.Hash));
             case "fs.mkdir":
                 if (!workspace.SupportsCooperativeCompareExchange) throw new ExecutionRejectedException("ENOTSUP");
-                workspace.CreateDirectory(Text(args, "path")); return Result(name, _ => { });
+                workspace.EnsureDirectory(Text(args, "path"), cancellationToken); return Result(name, _ => { });
             case "tool.invoke":
                 if (!_tools.TryGetValue(Text(args, "name"), out var tool) || tool.DefinitionDigest != Text(args, "definitionDigest")) throw new ExecutionRejectedException("ENOTSUP");
                 var toolArgs = WireJson.Parse(System.Text.Encoding.UTF8.GetBytes(Text(args, "argsJson")), 32768);

@@ -91,6 +91,24 @@ function Approve-SyntheticPending($MainWindow, [int]$ProcessId) {
     $local = Find-ProcessWindow $ProcessId 'DeviceApproval'
     if ($local) { Click (Find-Id $local 'DeviceAllow') }
 }
+function Connect-NativeUiTools($MainWindow, [int]$ProcessId, [string]$HostName, [string]$Phase, [string]$SessionId, [string]$ScopeFile, $Ready) {
+    $root = Join-Path $target ($HostName + '-device-' + $Phase)
+    $work = Join-Path $root 'workspace'
+    [IO.Directory]::CreateDirectory($work) | Out-Null
+    $configurationPath = Join-Path $root 'device.json'
+    $configuration = @{
+        format = 'tansr-example-terminal-device-v1'; enablePreview = $true; serveUrl = $ServeUrl; allowInsecureLoopback = $true
+        sessionId = $SessionId; executorId = $Ready.memory.executorId; trustedScopeFile = $ScopeFile
+        controllerTokenEnvironment = 'TANSR_NATIVE_UI_TOKEN'; deviceTokenEnvironment = 'TANSR_NATIVE_UI_TOKEN'
+        bindingRequestId = ('native-ui-' + $HostName.ToLowerInvariant() + '-' + $Phase)
+        allowedTools = @('Read', 'List', 'Write', 'Edit', 'AskUser', 'TodoWrite', 'ImageGen', 'VideoGen', 'TextToSpeech', 'SpeechToText', 'set_window_title', 'native_skill', 'mcp_echo', 'Task')
+        workspace = @{ path = $work; id = 'native-ui-workspace'; revision = '1'; allWritersCooperate = $true }
+        journal = @{ path = (Join-Path $root 'executor.sqlite'); mode = 'create' }
+    }
+    [IO.File]::WriteAllText($configurationPath, ($configuration | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
+    Invoke-NativeMediaModalAction (Find-Id $MainWindow '连接本机设备工具') $ProcessId $configurationPath
+    $null = Wait-For { (Read-Text (Find-Id $MainWindow 'ConnectionStatus')).Contains('device=') } 'public terminal initialization and binding'
+}
 . ([ScriptBlock]::Create([IO.File]::ReadAllText($env:TANSR_NATIVE_UI_MEDIA_SCRIPT, [Text.Encoding]::UTF8)))
 . ([ScriptBlock]::Create([IO.File]::ReadAllText($env:TANSR_NATIVE_UI_STORAGE_SCRIPT, [Text.Encoding]::UTF8)))
 try {
@@ -130,6 +148,7 @@ try {
         $session = Read-Text (Find-Id $window 'ResumeSession')
         if ([string]::IsNullOrEmpty($session)) { throw 'Session ID was not rendered.' }
         Record $hostName 'connect' ('session=' + $session)
+        Connect-NativeUiTools $window $process.Id $hostName 'initial' $session $scopeFile $fixtureReady
         Send-Prompt $window ('UI_TEXT_' + $hostName)
         Wait-Answer $window ('UI_DONE_TEXT_' + $hostName)
         Record $hostName 'text-stream' 'actual controls -> public SDK -> real Serve/kernel -> SSE -> UI'
@@ -261,6 +280,27 @@ try {
         Workspace-Action $workspace '读取 SDK1 本地镜像摘要' '没有本地上下文镜像' $process.Id
         Record $hostName 'snapshot-disable' 'explicit disable removes mirror content without replacing the original session'
         $workspace.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+        Select-NamedItem (Find-Id $window 'TextDeliveryMode') 'stream' $process.Id
+        Select-NamedItem (Find-Id $window 'ThinkingDeliveryMode') 'stream' $process.Id
+        Send-Prompt $window ('UI_DELIVERY_' + $hostName)
+        Wait-Answer $window ('UI_DELIVERY_STARTED_' + $hostName) $false
+        Wait-Answer $window ('UI_DELIVERY_PRIOR_THINKING_' + $hostName) $false
+        Select-NamedItem (Find-Id $window 'TextDeliveryMode') 'final' $process.Id
+        Select-NamedItem (Find-Id $window 'ThinkingDeliveryMode') 'off' $process.Id
+        $null = Wait-For { !(Read-Text (Find-Id $window 'Conversation')).Contains('UI_DELIVERY_PRIOR_THINKING_' + $hostName) } 'Off immediately removes previously displayed thinking'
+        $deliveryControl = Join-Path $env:TANSR_NATIVE_UI_DIRECTORY ('native-delivery-' + $hostName + '.json')
+        [IO.File]::WriteAllText($deliveryControl, '{"phase":1}', (New-Object Text.UTF8Encoding($false)))
+        Wait-Answer $window ('UI_DELIVERY_CONTINUED_' + $hostName) $false
+        $deliveryText = Read-Text (Find-Id $window 'Conversation')
+        if ($deliveryText.Contains('UI_DELIVERY_HIDDEN_' + $hostName) -or $deliveryText.Contains('UI_DELIVERY_FINAL_' + $hostName)) { throw 'Dynamic delivery changed the old block or prematurely published a new final/off block.' }
+        [IO.File]::WriteAllText($deliveryControl, '{"phase":2}', (New-Object Text.UTF8Encoding($false)))
+        Wait-Answer $window ('UI_DELIVERY_FINAL_' + $hostName)
+        if ((Read-Text (Find-Id $window 'Conversation')).Contains('UI_DELIVERY_HIDDEN_' + $hostName)) { throw 'Off thinking became visible at completion.' }
+        if ((Read-Text (Find-Id $window 'ResumeSession')) -ne $session) { throw 'Dynamic delivery replaced the original session.' }
+        Record $hostName 'dynamic-delivery' 'same active session and view; old stream block continued, new off/final blocks respected new policy and original completion'
+        Select-NamedItem (Find-Id $window 'TextDeliveryMode') 'stream' $process.Id
+        Select-NamedItem (Find-Id $window 'ThinkingDeliveryMode') 'stream' $process.Id
+        if ((Read-Text (Find-Id $window 'Conversation')).Contains('UI_DELIVERY_PRIOR_THINKING_' + $hostName)) { throw 'Switching thinking back on revived previously cleared thinking.' }
         Send-Prompt $window ('UI_HOLD_' + $hostName)
         Wait-Answer $window ('UI_HOLDING_' + $hostName) $false
         Set-Text (Find-Id $window 'MessageDraft') 'Synthetic same-turn follow-up'
@@ -278,6 +318,7 @@ try {
         if ((Read-Text (Find-Id $window 'ResumeSession')) -ne $session) { throw 'Detaching replaced the session identity.' }
         Click (Find-Id $window '连接 / 创建')
         $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已连接') } 'resumed session connected'
+        Connect-NativeUiTools $window $process.Id $hostName 'resumed' $session $scopeFile $fixtureReady
         Send-Prompt $window ('UI_RESUMED_' + $hostName)
         $null = Wait-For { (Pending-Count $window) -gt 0 } 'resumed fresh permission'
         Click (Find-Id $window '批准')
@@ -295,16 +336,29 @@ try {
         Click (Find-Id $window '仅断开本机连接')
         $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已断开') } 'final detached'
         foreach ($mode in @('stream', 'final', 'off')) {
+            $narratorMode = if ($mode -eq 'stream') { 'quiet' } elseif ($mode -eq 'final') { 'normal' } else { 'verbose' }
+            Select-NamedItem (Find-Id $window 'NarratorVerbosity') $narratorMode $process.Id
             Select-NamedItem (Find-Id $window 'ThinkingDeliveryMode') $mode $process.Id
             Select-NamedItem (Find-Id $window 'TextDeliveryMode') $(if ($mode -eq 'final') { 'final' } else { 'stream' }) $process.Id
             Click (Find-Id $window '连接 / 创建')
             $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已连接') } ('resume thinking mode ' + $mode)
+            Connect-NativeUiTools $window $process.Id $hostName ('thinking-' + $mode) $session $scopeFile $fixtureReady
             Send-Prompt $window ('UI_THINK_' + $mode.ToUpperInvariant() + '_' + $hostName)
             Wait-Answer $window ('UI_DONE_THINK_' + $mode.ToUpperInvariant() + '_' + $hostName)
             $shown = Read-Text (Find-Id $window 'Conversation')
             $thinking = 'UI_REASONING_' + $mode.ToUpperInvariant() + '_' + $hostName
             if (($mode -eq 'off' -and $shown.Contains($thinking)) -or ($mode -ne 'off' -and !$shown.Contains($thinking))) { throw 'Thinking delivery mode did not control native presentation.' }
             Record $hostName ('thinking-' + $mode) 'original session resumed, real thinking/text events projected according to the selected delivery mode'
+            Click (Find-Id $window '运行叙述')
+            $narratorWindow = Wait-For { Find-ProcessWindow $process.Id 'SessionNarrator' } 'incremental narration window'
+            $null = Wait-For { (Read-Text (Find-Id $narratorWindow 'SessionNarration')).Contains('turn completed') } 'narration original terminal event'
+            $narration = Read-Text (Find-Id $narratorWindow 'SessionNarration')
+            if ($narration.Contains('UI_REASONING_')) { throw 'Narration exposed thinking body.' }
+            if ($narratorMode -eq 'quiet' -and $narration -match 'tool [^\r\n]+ (started|completed|proposed)') { throw 'Quiet narration exposed tool detail.' }
+            if ($narratorMode -eq 'normal' -and $narration.Contains('assistant:')) { throw 'Normal narration emitted verbose assistant previews.' }
+            if ($narratorMode -eq 'verbose' -and (!$narration.Contains('assistant:') -or !$narration.Contains('thinking finished'))) { throw 'Verbose narration omitted actual block completion summaries.' }
+            $narratorWindow.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+            Record $hostName ('narrator-' + $narratorMode) 'same original event pump, incremental narration, original verbosity filters, no thinking body'
             Click (Find-Id $window '仅断开本机连接')
             $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('已断开') } 'thinking mode detached'
         }
@@ -339,7 +393,7 @@ try {
             format = 'tansr-example-terminal-device-v1'; enablePreview = $true; serveUrl = $ServeUrl; allowInsecureLoopback = $true
             sessionId = $memorySession; executorId = $memoryConfiguration.executorId; trustedScopeFile = $scopeFile
             controllerTokenEnvironment = 'TANSR_NATIVE_UI_TOKEN'; deviceTokenEnvironment = 'TANSR_NATIVE_UI_TOKEN'
-            bindingRequestId = ('native-ui-memory-' + $hostName); allowedTools = @('SearchMemory', 'Read', 'List', 'Write', 'Edit')
+            bindingRequestId = ('native-ui-memory-' + $hostName); allowedTools = @('SearchMemory', 'Read', 'List', 'Write', 'Edit', 'Task')
             workspace = @{ path = $memoryWorkspace; id = 'native-ui-workspace'; revision = '1'; allWritersCooperate = $true }
             journal = @{ path = (Join-Path $memoryRoot 'executor.sqlite'); mode = 'create' }
             publication = @{ path = (Join-Path $memoryRoot 'memory.sqlite'); mode = 'create'; identity = $memoryIdentity.deviceIdentity; maxTransfers = 64; maxStagingBytes = 8388608; maxPages = 32768 }
@@ -347,6 +401,26 @@ try {
         [IO.File]::WriteAllText($deviceConfiguration, ($device | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))
         Invoke-NativeMediaModalAction (Find-Id $window '连接本机设备工具') $process.Id $deviceConfiguration
         $null = Wait-For { (Read-Text (Find-Id $window 'ConnectionStatus')).Contains('device=') } 'same-session terminal and publication backend bound'
+        Send-Prompt $window ('UI_TASK_' + $hostName)
+        $null = Wait-For {
+            Approve-SyntheticPending $window $process.Id
+            $text = Read-Text (Find-Id $window 'Conversation')
+            $text.Contains('UI_DONE_TASK_' + $hostName) -and $text.Contains('[status:idle]')
+        } 'original foreground Task completed' 35
+        Click (Find-Id $window '会话工作台 / 能力 / Task')
+        $taskWorkspace = Wait-For { Find-ProcessWindow $process.Id 'SessionWorkspace' } 'original child event projection'
+        Workspace-Action $taskWorkspace '工具 / Task / 待办 / 用量' 'Task ' $process.Id
+        $taskText = Read-Text (Find-Id $taskWorkspace 'WorkspaceResult')
+        if ($taskText -notmatch 'Task [^\r\n]+ · (completed|settled) ·') { throw 'Task did not render an original completed/settled child projection.' }
+        $taskWorkspace.GetCurrentPattern([System.Windows.Automation.WindowPattern]::Pattern).Close()
+        Record $hostName 'foreground-task' 'original Serve Task ran its bounded child prompt with no child tools; original child completion reached native Workbench.Agents'
+        $null = Wait-For {
+            Approve-SyntheticPending $window $process.Id
+            $statusFile = Join-Path $env:TANSR_NATIVE_UI_DIRECTORY 'native-memory-status.json'
+            if (!(Test-Path -LiteralPath $statusFile)) { return $false }
+            $state = @([IO.File]::ReadAllText($statusFile, [Text.Encoding]::UTF8) | ConvertFrom-Json) | Where-Object { $_.sessionId -eq $memorySession } | Select-Object -First 1
+            $state -and $state.idle
+        } 'original Task background resources idle' 50
         Send-Prompt $window ('UI_MEMORY_SEED_' + $hostName)
         $null = Wait-For {
             Approve-SyntheticPending $window $process.Id

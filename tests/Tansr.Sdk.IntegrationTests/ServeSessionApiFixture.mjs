@@ -21,7 +21,7 @@ export async function startSessionApiFixture({ source, directory, authenticate }
     models: [{ handle: 'fake-main', modelId: 'fake-main-id', displayName: 'API synthetic', protocol: 'twp', contextWindow: 128000,
       capabilities: { inputModalities: { image: 'supported' } } }], capabilities: { ...caps,
     platform: { ...caps.platform, speechToText: true, textToSpeech: true } }, app: { platform: 'desktop' } } });
-  const exchanges = [], audio = [], routes = [], profiles = [], handles = new Map(), storeErrors = [], resourceGates = new Map();
+  const exchanges = [], audio = [], routes = [], profiles = [], creations = [], handles = new Map(), storeErrors = [], resourceGates = new Map();
   let expectedResourceFailures = 0;
   const summary = SUMMARY_SECTION_TITLES.map((title, index) => `${index + 1}. ${title}: NET retained decision.`).join('\n') + '\n' + 'Recorded synthetic detail. '.repeat(30);
   const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
@@ -50,7 +50,7 @@ export async function startSessionApiFixture({ source, directory, authenticate }
     const responseText = compacting ? summary : `NET answer ${exchanges.length} ${filler}`;
     return new Response(frame('t.open', { exchangeId: `api-${exchanges.length}`, model: request.model, protocol: 'twp/1' }) +
       frame('t.delta', { i: 0, t: 'text', v: responseText }) +
-      frame('t.usage', { inTokens: 120, outTokens: 35, cacheRTokens: 0, cacheWTokens: 0 }) + frame('t.close', { stop: 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+      frame('t.usage', { inTokens: compacting ? 20 : 120, outTokens: compacting ? 5 : 35, cacheRTokens: 0, cacheWTokens: 0 }) + frame('t.close', { stop: 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
   };
   const store = createServeAgentSessionStore({ dir: join(directory, 'sessions'), ownership: {} });
   const build = createAgentSessionFactory({ cwd, cwdPolicy: { allowedRoots: [directory] }, store, checkpoints: { autoBeforeCompact: false },
@@ -58,15 +58,18 @@ export async function startSessionApiFixture({ source, directory, authenticate }
     platform: { apiBaseUrl: FAKE_API_BASE, appId: 'net-integration-app', appKey: 'synthetic-only', fetchImpl, maxOutputTokens: 8192 } });
   const factory = { ...build.factory, async create(init) {
     const result = await build.factory.create(init); const handle = result.handle; handles.set(handle.sessionId, handle);
+    creations.push({ sessionId: handle.sessionId, resumed: result.resumed });
     const mode = init.labels?.resource;
     if (mode === 'delayed' || mode === 'failed') {
-      const settle = handle.settleResources.bind(handle); let release;
-      const pending = new Promise(resolve => { release = resolve; }); resourceGates.set(handle.sessionId, { release, mode, entered: false });
+      const settle = handle.settleResources.bind(handle); let release, entered;
+      const pending = new Promise(resolve => { release = resolve; });
+      const ready = new Promise(resolve => { entered = resolve; });
+      resourceGates.set(handle.sessionId, { release, mode, entered: false, ready });
       // Inject an owned host resource, after real kernel/store settlement. HTTP still reads
       // the original registry's actual resource promise and safe failure translation.
       let injected = false;
       handle.settleResources = async () => {
-        await settle(); resourceGates.get(handle.sessionId).entered = true;
+        await settle(); resourceGates.get(handle.sessionId).entered = true; entered();
         if (mode === 'delayed') await pending;
         else { if (!injected) { injected = true; expectedResourceFailures++; } throw new Error('NET_API_RESOURCE_FAILURE'); }
       };
@@ -86,18 +89,30 @@ export async function startSessionApiFixture({ source, directory, authenticate }
       assert.match(file, /^[a-z0-9-]{1,64}\.json$/); processed.add(file);
       const value = JSON.parse(await readFile(join(commands, file), 'utf8')); assert.equal(file, `${value.id}.json`);
       let result;
-      if (value.action === 'inspect') result = { cwd, alternate, exchanges: exchanges.length, audio, routes, profiles, storeErrors };
+      if (value.action === 'inspect') result = { cwd, alternate, exchanges: exchanges.length, audio, routes, profiles, creations, storeErrors };
       else if (value.action === 'usage') {
         await build.flush(); const record = await store.get('net-integration-user', value.sessionId); assert.ok(record);
         const snapshot = record.usageSnapshot?.payload.snapshot;
         result = { snapshot: snapshot ?? null, totals: snapshot === undefined ? null : budgetSpendOf(snapshot) };
       }
       else if (value.action === 'settle') { const handle = handles.get(value.sessionId); assert.ok(handle); await handle.settleResources(); await build.flush(); result = { status: handle.status(), settled: true }; }
-      else if (value.action === 'release-resource') { const gate = resourceGates.get(value.sessionId); assert.ok(gate); assert.equal(gate.mode, 'delayed'); assert.equal(gate.entered, true); gate.release(); result = { released: true }; }
+      else if (value.action === 'release-resource') {
+        const gate = resourceGates.get(value.sessionId); assert.ok(gate); assert.equal(gate.mode, 'delayed');
+        // Registry draining means settlement has been scheduled; it does not mean the
+        // real kernel/store cleanup has reached this extra owned resource yet.
+        let deadline;
+        try { await Promise.race([gate.ready, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Original resources did not reach the delayed host gate')), 5000); })]); }
+        finally { clearTimeout(deadline); }
+        assert.equal(gate.entered, true); gate.release(); result = { released: true };
+      }
       else throw new Error('Unknown trusted session API fixture command.');
       await writeFile(join(responses, `${value.id}.tmp`), JSON.stringify({ id: value.id, value: result }), { flag: 'wx' });
       await rename(join(responses, `${value.id}.tmp`), join(responses, `${value.id}.json`));
-    } catch (error) { failure = { message: String(error?.message ?? error).slice(0, 2048) }; await writeFile(join(directory, 'host-failure.json'), JSON.stringify(failure)); }
+    } catch (error) {
+      failure = { message: String(error?.message ?? error).slice(0, 2048), stack: String(error?.stack ?? '').slice(0, 4096) };
+      await writeFile(join(directory, 'host-failure.tmp'), JSON.stringify(failure));
+      await rename(join(directory, 'host-failure.tmp'), join(directory, 'host-failure.json'));
+    }
     finally { busy = false; }
   }, 10);
   return { url: server.url, async close() {
@@ -111,7 +126,7 @@ export async function startSessionApiFixture({ source, directory, authenticate }
     const leafErrors = cleanupErrors.flatMap(leaves);
     if (expectedResourceFailures > 0) { assert.ok(leafErrors.length >= 1); assert.ok(leafErrors.every(error => error?.message === 'NET_API_RESOURCE_FAILURE')); }
     else assert.deepEqual(leafErrors, []);
-    const evidence = { realKernel: true, realStore: true, routes, profiles, exchanges: exchanges.length, audioCalls: audio.length, storeErrors, report: report ?? null,
+    const evidence = { realKernel: true, realStore: true, routes, profiles, creations, exchanges: exchanges.length, audioCalls: audio.length, storeErrors, report: report ?? null,
       expectedResourceFailures, observedCleanupFailureLeaves: leafErrors.length, failure: failure ?? null };
     await writeFile(join(directory, 'result.json'), JSON.stringify(evidence)); assert.deepEqual(storeErrors, []); assert.equal(failure, undefined); return evidence;
   } };

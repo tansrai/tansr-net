@@ -4,6 +4,8 @@ using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Windows.Security;
+using Tansr.Sdk.Windows.Storage;
 
 namespace Tansr.Sdk.IntegrationTests;
 
@@ -74,7 +76,9 @@ public sealed partial class ServeSessionApiTests
     public async Task CheckpointsCompactRestoreExportImportForkAndDeletePreserveTheOriginalSessionAndImages()
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(60)); var ct = deadline.Token;
-        using var client = new TansrClient(Options());
+        using var capturedExports = new ExportCaptureHandler(); using var sessionHttp = new HttpClient(capturedExports);
+        using var client = new TansrClient(Options(), sessionHttp);
+        using var restartedClient = new TansrClient(Options());
         var session = await client.CreateSessionAsync(new() { Tools = [], MaxTokens = 100000 }, ct);
         var forked = new List<AgentSession>(); Exception? primary = null;
         try
@@ -92,12 +96,12 @@ public sealed partial class ServeSessionApiTests
             Assert.Contains((await session.ListCheckpointsAsync(ct)).GetProperty("checkpoints").EnumerateArray(), item => item.GetProperty("checkpointId").GetString() == checkpointId);
             var exported = await session.ExportCheckpointAsync(checkpointId, ct);
             Assert.Contains(Png, System.Text.Encoding.UTF8.GetString(exported));
+            await VerifyLocalSnapshotToggleAsync(session, capturedExports, ct);
             var compacted = await session.CompactAsync(new() { Instructions = "Keep NET synthetic decisions and identifiers.", CheckpointLabel = "before compact" }, ct);
             Assert.Equal("compacted", compacted.GetProperty("status").GetString()); Assert.NotEmpty(compacted.GetProperty("compactionId").GetString()!);
             var compactedUsage = await CommandAsync(new { action = "usage", sessionId = session.Id }, ct);
             Assert.Equal(JsonValueKind.Object, compactedUsage.GetProperty("totals").ValueKind);
-            Assert.True(compactedUsage.GetProperty("totals").GetProperty("totalTokens").GetInt64() >= 620,
-                "Rewriting compacted history must retain the original paid usage ledger.");
+            Assert.Equal(645, compactedUsage.GetProperty("totals").GetProperty("totalTokens").GetInt64());
             Assert.True((await session.GetHistoryAsync(ct)).GetProperty("messages").GetArrayLength() < beforeMessages.GetArrayLength());
             var restore = await session.RestoreCheckpointAsync(checkpointId, false, ct);
             Assert.Equal("restored", restore.GetProperty("status").GetString()); Assert.Equal(checkpointId, restore.GetProperty("checkpointId").GetString());
@@ -135,10 +139,24 @@ public sealed partial class ServeSessionApiTests
             // This is trusted-host evidence, not a fabricated client-side drain success.
             Assert.True((await CommandAsync(new { action = "settle", sessionId = session.Id }, ct)).GetProperty("settled").GetBoolean());
             Assert.True((await session.CloseAsync(ct)).GetProperty("accepted").GetBoolean());
-            var resumed = await client.ResumeSessionAsync(session.Id, new() { Tools = [], MaxTokens = 100000 }, ct); forked.Add(resumed); Assert.True(resumed.Resumed);
-            Assert.Equal(WireJson.CanonicalString(beforeMessages), WireJson.CanonicalString((await resumed.GetHistoryAsync(ct)).GetProperty("messages")));
+            // A fresh .NET client and a fresh session driver from the original persistent
+            // factory. This is not claimed as a process restart of the Serve host.
+            var limited = await restartedClient.ResumeSessionAsync(session.Id, new() { Tools = [], MaxTokens = 645 }, ct); forked.Add(limited); Assert.True(limited.Resumed);
+            Assert.Equal(WireJson.CanonicalString(beforeMessages), WireJson.CanonicalString((await limited.GetHistoryAsync(ct)).GetProperty("messages")));
+            var callsBeforeBudget = (await CommandAsync(new { action = "inspect" }, ct)).GetProperty("exchanges").GetInt32();
+            var rejected = await limited.SendAndObserveAsync("NET-API persisted paid usage must prevent another model call", cancellationToken: ct);
+            Assert.True(rejected.WasAborted); Assert.Equal("budget_exceeded", rejected.Reason);
+            await CommandAsync(new { action = "settle", sessionId = limited.Id }, ct);
+            var budgetEvidence = await CommandAsync(new { action = "inspect" }, ct);
+            Assert.Equal(callsBeforeBudget, budgetEvidence.GetProperty("exchanges").GetInt32());
+            Assert.Equal(2, budgetEvidence.GetProperty("creations").EnumerateArray().Count(item => item.GetProperty("sessionId").GetString() == session.Id));
+            Assert.Equal(645, (await CommandAsync(new { action = "usage", sessionId = limited.Id }, ct)).GetProperty("totals").GetProperty("totalTokens").GetInt64());
+            var afterRejected = (await limited.GetHistoryAsync(ct)).GetProperty("messages");
+            await limited.CloseAsync(ct); await CommandAsync(new { action = "settle", sessionId = limited.Id }, ct);
+            var resumed = await restartedClient.ResumeSessionAsync(session.Id, new() { Tools = [], MaxTokens = 100000 }, ct); forked.Add(resumed); Assert.True(resumed.Resumed);
+            Assert.Equal(WireJson.CanonicalString(afterRejected), WireJson.CanonicalString((await resumed.GetHistoryAsync(ct)).GetProperty("messages")));
             AssertUsage(await resumed.SendAndObserveAsync("NET-API resume retains the original spend", cancellationToken: ct));
-            Assert.Equal(compactedUsage.GetProperty("totals").GetProperty("totalTokens").GetInt64() + 155,
+            Assert.Equal(800,
                 (await CommandAsync(new { action = "usage", sessionId = resumed.Id }, ct)).GetProperty("totals").GetProperty("totalTokens").GetInt64());
             Assert.Equal(155, (await CommandAsync(new { action = "usage", sessionId = fork.Id }, ct)).GetProperty("totals").GetProperty("totalTokens").GetInt64());
         }
@@ -148,6 +166,64 @@ public sealed partial class ServeSessionApiTests
 
     private static void AssertUsage(SessionRunResult result)
     { Assert.False(result.WasAborted); Assert.Equal(1, result.Snapshot.UsageRequests); Assert.Equal(155, result.Snapshot.TurnTokens); Assert.Equal(155, result.Snapshot.SessionTokens); }
+
+    private static async Task VerifyLocalSnapshotToggleAsync(AgentSession session, ExportCaptureHandler captures, CancellationToken ct)
+    {
+        var directory = Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "dotnet-session-snapshot"); Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "context.sqlite"); var keyPath = Path.Combine(directory, "context.key");
+        var scope = new SessionSnapshotScope(Required("TANSR_SERVE_SESSION_API_URL"), "net-integration-app", "net-integration-user", session.Id);
+        CurrentUserDpapiArchiveKeyProvider? key = null;
+        using var store = new WindowsSessionSnapshotStore(new()
+        {
+            Path = path,
+            Scope = scope,
+            ReadScope = () => scope,
+            KeyProvider = () => key ??= CurrentUserDpapiArchiveKeyProvider.Create(keyPath, "a08-snapshot-key")
+        });
+        using var mirror = await SessionSnapshotPersistence.CreateAsync(session, store, () => scope, ct);
+        var history = await session.GetHistoryAsync(ct); var metadata = await session.ReadMetadataAsync(ct);
+        var usage = await CommandAsync(new { action = "usage", sessionId = session.Id }, ct);
+        var checkpoints = await session.ListCheckpointsAsync(ct); var originalId = session.Id; var exports = captures.Exports;
+        Assert.False(mirror.IsEnabled); Assert.False(File.Exists(path)); Assert.False(File.Exists(keyPath));
+        await mirror.FlushAsync(ct); Assert.Equal(exports, captures.Exports); Assert.False(File.Exists(path));
+
+        async Task AssertUnchangedAsync()
+        {
+            Assert.Same(session, mirror.Session); Assert.Equal(originalId, mirror.Session.Id);
+            Assert.Equal(metadata.LastSequence, (await session.ReadMetadataAsync(ct)).LastSequence);
+            Assert.Equal(WireJson.CanonicalString(history), WireJson.CanonicalString(await session.GetHistoryAsync(ct)));
+            Assert.Equal(WireJson.CanonicalString(usage), WireJson.CanonicalString(await CommandAsync(new { action = "usage", sessionId = session.Id }, ct)));
+            Assert.Equal(WireJson.CanonicalString(checkpoints), WireJson.CanonicalString(await session.ListCheckpointsAsync(ct)));
+            Assert.Null(mirror.PendingCheckpointId); Assert.Null(mirror.LastCheckpointCleanupErrorCode);
+        }
+        async Task AssertExactCopyAsync()
+        {
+            var copy = await mirror.ReadAsync(ct); Assert.NotNull(copy);
+            Assert.Equal(captures.LastExport, copy.Bytes); Assert.Equal(copy.Bytes, (await store.ReadAsync(ct)).Snapshot!.Bytes);
+            Assert.Contains(Png, System.Text.Encoding.UTF8.GetString(copy.Bytes));
+            Assert.DoesNotContain(Png, System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path, ct)));
+            await AssertUnchangedAsync();
+        }
+
+        await mirror.EnableAsync(ct); Assert.True(mirror.IsEnabled); Assert.Equal(++exports, captures.Exports); await AssertExactCopyAsync();
+        var enabledRevision = (await store.ReadAsync(ct)).Revision;
+        await mirror.FlushAsync(ct); Assert.Equal(++exports, captures.Exports); Assert.True((await store.ReadAsync(ct)).Revision > enabledRevision); await AssertExactCopyAsync();
+        await mirror.DisableAsync(ct); Assert.False(mirror.IsEnabled); Assert.Null(await mirror.ReadAsync(ct)); await AssertUnchangedAsync();
+        var disabledRevision = (await store.ReadAsync(ct)).Revision;
+        await mirror.FlushAsync(ct); Assert.Equal(exports, captures.Exports); Assert.Equal(disabledRevision, (await store.ReadAsync(ct)).Revision);
+        await mirror.EnableAsync(ct); Assert.True(mirror.IsEnabled); Assert.Equal(++exports, captures.Exports); await AssertExactCopyAsync();
+        // Reopen the same encrypted file/key independently; this is a durable real SQLite
+        // copy of the original Serve export, never synthetic SessionView text or a new session.
+        store.Dispose();
+        using var reopened = new WindowsSessionSnapshotStore(new()
+        {
+            Path = path,
+            Scope = scope,
+            ReadScope = () => scope,
+            KeyProvider = () => CurrentUserDpapiArchiveKeyProvider.Open(keyPath, "a08-snapshot-key")
+        });
+        Assert.Equal(captures.LastExport, (await reopened.ReadAsync(ct)).Snapshot!.Bytes);
+    }
 
     [Theory]
     [InlineData(false)]
@@ -197,6 +273,21 @@ public sealed partial class ServeSessionApiTests
         var response = Path.Combine(root, "host-responses", id + ".json"); var failure = Path.Combine(root, "host-failure.json");
         while (!File.Exists(response)) { ct.ThrowIfCancellationRequested(); if (File.Exists(failure)) throw new InvalidOperationException(await File.ReadAllTextAsync(failure, ct)); await Task.Delay(20, ct); }
         using var body = JsonDocument.Parse(await File.ReadAllBytesAsync(response, ct)); Assert.Equal(id, body.RootElement.GetProperty("id").GetString()); return body.RootElement.GetProperty("value").Clone();
+    }
+    private sealed class ExportCaptureHandler : DelegatingHandler
+    {
+        internal ExportCaptureHandler() : base(new HttpClientHandler { AllowAutoRedirect = false, UseCookies = false }) { }
+        internal int Exports { get; private set; }
+        internal byte[]? LastExport { get; private set; }
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            var response = await base.SendAsync(request, ct);
+            if (request.Method == HttpMethod.Get && request.RequestUri!.AbsolutePath.EndsWith("/export", StringComparison.Ordinal) && response.StatusCode == HttpStatusCode.OK)
+            {
+                LastExport = await response.Content.ReadAsByteArrayAsync(ct); Exports++;
+            }
+            return response;
+        }
     }
     private sealed class LostCheckpointHandler : DelegatingHandler
     {

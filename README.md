@@ -2,7 +2,7 @@
 
 原生 C# 接入 Tansr Serve 的 SDK，供 Windows 桌面应用与 .NET 服务使用。
 
-当前处于开发阶段，尚未发布到 NuGet.org。两个计划产物为 `Tansr.Sdk` 与 `Tansr.Sdk.Windows`；正式能力以实际实现及验收记录为准。
+当前处于集中验收阶段，尚未发布到 NuGet.org。两个产品包为 `Tansr.Sdk` 与 `Tansr.Sdk.Windows`；本地候选已经实际打包、安装和运行，正式能力以实际实现及验收记录为准。
 
 开发方案、六张工程卡和24项验收的事实源位于 `J:/tansr/tansr-cli/doc/report/NETSDK-*2026-09-26.md`。本仓实施与验证记录见 [开发记录](doc/development.md)。Serve 新协议独立由 Serve 会话维护，不能将候选协议当成生产能力。
 
@@ -47,7 +47,7 @@ Console.WriteLine(completed.Reason); // 同时检查 WasAborted，不能把任�
 
 `ExecutionClient`、`ExecutionHost` 和 Windows 后端消费已经冻结的执行合同；先耐久认领，后执行，再存回执，未知副作用只对账。受控工作区的协作 CAS 要求全部写者遵守同一 owner，不能作为任意共享目录或同用户恶意进程的沙箱。启动本地命令也不等于提供 OS 沙箱，宿主仍须落实终端授权及受控执行环境。
 
-SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 Windows 用户 DPAPI 保存。加密不覆盖所有协议元数据；不能以加密代替应用/用户授权、删除修订和可信密钥管理。完整新记忆管理和远程输出传输仍依赖 Serve 新合同，不能据此版本宣称已经达到 Electron 全功能等价。
+SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 Windows 用户 DPAPI 保存。加密不覆盖所有协议元数据；不能以加密代替应用/用户授权、删除修订和可信密钥管理。设备记忆、远程增量输出、配置控制和缓存连续性已有公开的显式预览消费入口，由 Serve 的独立合同约束，不替换原稳定协议。完整 Electron 对照、真实界面、性能与跨端联验仍按原验收单结算。
 
 ## 示例和开发
 
@@ -55,7 +55,7 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 
 终端分块输出、同会话配置／记忆管理和 ACK 恢复已有显式候选消费入口；参见[终端服务预览接入](doc/terminal-services.md)。预览与稳定协议、管理命令与完整记忆本地化、代码实现与正式发行分别记录。
 
-设备自动记忆可通过 `SqliteMemoryPublicationStore` 和 `WindowsMemoryPublicationHost` 接入原执行管道；三种示例共用[设备记忆配置入口](examples/Shared/device-memory.md)。Serve 负责提取、检索和删除，客户端持久化原 Node 兼容的 publication 介质。必须由可信 Serve 宿主配置 `memoryPublicationFor`；普通 CLI 启动目前不会自动启用。参见[身份、容量与恢复边界](doc/device-memory.md)。
+设备自动记忆可通过 `SqliteMemoryPublicationStore` 和 `WindowsMemoryPublicationHost` 接入原执行管道，也可显式注入实现相同存储接口的第三方介质；三种示例共用[设备记忆配置入口](examples/Shared/device-memory.md)。Serve 负责提取、检索和删除，客户端持久化原 Node 兼容的 publication 介质。可信 Serve 宿主须配置 `memoryPublicationFor`，本地 Serve 可用显式的受信 `--host-module` 装配；默认 CLI 启动不自动启用。参见[身份、容量与恢复边界](doc/device-memory.md)。
 
 - [WPF](examples/WpfAssistant/README.md)：现代 Windows UI。
 - [WinForms](examples/WinFormsAssistant/README.md)：.NET Framework 4.8。
@@ -78,13 +78,15 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 
 真实 Serve 路由联验另由 `scripts/serve-integration.mjs` 驱动，要求明确指定 Serve 源码路径；使用受控会话夹具而非付费模型。`scripts/check-contract.ps1` 与 `scripts/check-parity.mjs` 检查上游合同和入口变化。`scripts/test-packages.ps1` 从独立本地源安装两个包，实际运行 net48 WinForms、现代控制台、WPF self-contained 和可选 Native AOT；`-PreviousPackageDirectory` 增加独立旧包消费与用户目录升级/回滚/卸载演练。它们不替代固定24项完整验收，详见[消费与安装入口](doc/installation.md)。
 
-`RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。本批完整 Windows 门要求 0 跳过。
+`RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。Windows 正确性门不接受依赖缺失造成的跳过；同机 Electron 时序性能测试单独准备并记录，尚未运行时不能关闭对应性能验收。
+
+2026-09-27 的本地包消费使用源码 `83f99f8`，同一对包已通过 net48 CLR4 WinForms、现代控制台、WPF self-contained 与核心 Native AOT 的实际运行，并完成安装／升级／回滚／卸载演练。消费进程的 PATH 中无 Node；当前身份为管理员，不能据此宣称已通过干净普通用户验收。真实 HTTP、界面与跨端结果另列于[开发记录](doc/development.md)，不以本地包运行替代这些门。
 
 ## English
 
 Tansr provides a native C# client for Tansr Serve. The core package targets .NET Standard 2.0 and .NET 10; the Windows adapter targets .NET Framework 4.8 and modern Windows .NET. Serve owns the agent runtime, context, memory decisions and authorization. The client provides transport, local execution, durable storage and presentation. Electron keeps its existing embedded Node SDK.
 
-The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `WindowsMemoryPublicationHost` through the existing execution pipeline. The trusted Serve host must install `memoryPublicationFor`; the ordinary CLI launcher does not enable it automatically. The examples share an explicit configuration for source identity, separate control/device credentials, storage creation or reopening, and capacity. See [device memory](doc/device-memory.md) for recovery and lifecycle boundaries.
+The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `WindowsMemoryPublicationHost` through the existing execution pipeline, or a caller-supplied implementation of the storage interface. The trusted Serve host must install `memoryPublicationFor`; local Serve supports explicit trusted `--host-module` assembly, while the default CLI launcher does not enable it automatically. The examples share explicit configuration for source identity, separate control/device credentials, storage creation or reopening, and capacity. See [device memory](doc/device-memory.md) for recovery and lifecycle boundaries.
 
 Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 

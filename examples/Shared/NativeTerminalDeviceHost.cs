@@ -33,12 +33,25 @@ internal sealed class NativeTerminalDeviceHost
         TansrClient controller, TansrClient device, TerminalConnection controllerTerminal, TerminalConnection deviceTerminal, SqliteMemoryPublicationStore? publication, bool ownsController, bool ownsDevice)
     { this.workspace = workspace; this.journal = journal; this.controller = controller; this.device = device; this.controllerTerminal = controllerTerminal; this.deviceTerminal = deviceTerminal; this.publication = publication; this.ownsController = ownsController; this.ownsDevice = ownsDevice; }
     internal Task Completion => host.Completion;
+    internal string? LastNotificationErrorCode => host.LastNotificationErrorCode;
     internal string Status => "device=" + host.State + "；自动记忆=" + (publication == null ? "未装配" : "与终端工具共用原设备绑定") + "；仅表示本机设备状态，远端任务和记忆收尾以原回执为准。";
 #else
     private NativeTerminalDeviceHost() { }
     internal Task Completion => Task.CompletedTask;
+    internal string? LastNotificationErrorCode => null;
     internal string Status => "需要 Windows 目标";
 #endif
+    // Closing the remote conversation retires its notification authority. Stop that optional
+    // transport first, but keep polling, operation settlement and memory publication alive
+    // until the original resource observation confirms that the core has finished draining.
+    internal Task PrepareSessionCloseAsync(CancellationToken cancellationToken = default)
+    {
+#if WINDOWS || NETFRAMEWORK
+        return host.QuiesceNotificationsAsync(cancellationToken);
+#else
+        return Task.CompletedTask;
+#endif
+    }
     internal static async Task<NativeTerminalDeviceHost> StartAsync(string configurationFile, string expectedSessionId, Uri expectedEndpoint,
         Func<string, CancellationToken, Task<bool>> approve, Action<string> output, CancellationToken ct = default, TansrClient? borrowedController = null, SessionContract sessionContract = SessionContract.Sdk1)
     {

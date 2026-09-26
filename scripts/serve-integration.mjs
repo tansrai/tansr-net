@@ -19,7 +19,7 @@ const required = name => {
 };
 const source = realpathSync(required('TANSR_SERVE_SOURCE'));
 const suite = process.env.TANSR_SERVE_TEST_SUITE ?? 'all';
-assert.ok(['all', 'controls', 'execution', 'new', 'memory', 'session-api', 'extensions', 'cache', 'files'].includes(suite), 'Unknown named integration suite.');
+assert.ok(['all', 'controls', 'execution', 'new', 'memory', 'session-api', 'extensions', 'cache', 'files', 'repair'].includes(suite), 'Unknown named integration suite.');
 assert.ok(suite === 'all' || process.env.TANSR_SERVE_SOURCE_SNAPSHOT, 'Named candidate suites require the pinned source snapshot.');
 const sourceFile = path => resolve(source, path);
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -261,12 +261,12 @@ async function run() {
       (ready.filesUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests' : '');
     const filter = suite === 'all' ? allFilter : [
       ...(suite === 'memory' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests'] : []),
-      ...(suite === 'session-api' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionApiTests'] : []),
-      ...(suite === 'extensions' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests'] : []),
+      ...(suite === 'session-api' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionApiTests'] : []),
+      ...(suite === 'extensions' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests'] : []),
       ...(suite === 'cache' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeCacheContinuityTests'] : []),
-      ...(suite === 'files' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests'] : []),
+      ...(suite === 'files' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests'] : []),
       ...(suite === 'controls' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionControlsTests'] : []),
-      ...(suite === 'execution' || suite === 'new' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests'] : [])].join('|');
+      ...(suite === 'execution' || suite === 'new' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeExecutionPipelineTests'] : [])].join('|');
     const args = ['test', resolve(repository, 'tests/Tansr.Sdk.IntegrationTests/Tansr.Sdk.IntegrationTests.csproj'),
       '--no-build', '--no-restore', '--configuration', process.env.TANSR_INTEGRATION_CONFIGURATION ?? 'Release',
       '--filter', filter, '--logger', 'console;verbosity=normal'];
@@ -308,7 +308,7 @@ async function run() {
           assert.equal(result.memoryEvidence.mainCalls, 5, 'Seed/recall/deleted-source recall did not follow their original model loops.');
           assert.ok(result.memoryEvidence.routes.some(route => route.method === 'POST' && route.path.endsWith('/memory/commands')));
         }
-        if (exitCode === 0 && (suite === 'all' || suite === 'execution' || suite === 'new') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
+        if (exitCode === 0 && (suite === 'all' || suite === 'execution' || suite === 'new' || suite === 'repair') && process.env.TANSR_SERVE_SOURCE_SNAPSHOT) {
           assert.equal(result.executionEvidence?.realKernel, true);
           assert.equal(result.executionEvidence.realExecutionSpool, true);
           assert.equal(result.executionEvidence.operations.length, 3, 'All three original native commands must run exactly once.');
@@ -341,7 +341,7 @@ async function run() {
           closedSession: result.memoryEvidence.closedSession, directory, passed: exitCode === 0 }));
         if (['all', 'new', 'controls'].includes(suite) && result.controlsEvidence)
           console.log(JSON.stringify({ acceptance: 'public-Serve-session-controls', ...result.controlsEvidence, directory, passed: exitCode === 0 }));
-        if (['all', 'new', 'execution'].includes(suite) && result.executionEvidence)
+        if (['all', 'new', 'execution', 'repair'].includes(suite) && result.executionEvidence)
           console.log(JSON.stringify({ acceptance: 'public-Serve-native-execution', realKernel: result.executionEvidence.realKernel,
             realExecutionSpool: result.executionEvidence.realExecutionSpool, modelCalls: result.executionEvidence.modelCalls,
             operations: result.executionEvidence.operations.length, acceptedBlocks: result.executionEvidence.acceptedBlocks,

@@ -55,6 +55,48 @@ public sealed class SessionView : IDisposable
 
     public SessionViewSnapshot Snapshot { get { lock (_gate) return _snapshot; } }
 
+    /// <summary>
+    /// Changes delivery for subsequent blocks. Off also removes visible and buffered thinking immediately;
+    /// switching back cannot reconstruct it. Other already-started blocks keep their original policy.
+    /// </summary>
+    public void SetDelivery(TextDeliveryMode text, ThinkingDeliveryMode thinking)
+    {
+        Update(() =>
+        {
+            if (!Enum.IsDefined(typeof(TextDeliveryMode), text)) throw new ArgumentOutOfRangeException(nameof(text));
+            if (!Enum.IsDefined(typeof(ThinkingDeliveryMode), thinking)) throw new ArgumentOutOfRangeException(nameof(thinking));
+            if (_options.TextDelivery == text && _options.ThinkingDelivery == thinking) return false;
+            _options.TextDelivery = text; _options.ThinkingDelivery = thinking;
+            if (thinking == ThinkingDeliveryMode.Off)
+            {
+                for (var index = _messages.Count - 1; index >= 0; index--)
+                {
+                    var message = _messages[index];
+                    var removed = message.Parts.RemoveAll(part => part.Kind == "thinking");
+                    if (removed > 0 && message.Parts.Count == 0 && message != _current) _messages.RemoveAt(index);
+                }
+                foreach (var block in _blocks.Values.Where(block => block.Kind == "thinking"))
+                { block.Hidden = true; block.Part = null; block.Buffer = ""; }
+            }
+            return true;
+        });
+    }
+
+    internal NarrationBlock? GetNarrationBlock(int index)
+    {
+        lock (_gate)
+        {
+            if (!_blocks.TryGetValue(index, out var block) || !block.Open) return null;
+            return new NarrationBlock(block.Kind, block.Hidden ? "" : block.Part?.Text ?? block.Buffer, block.Characters);
+        }
+    }
+
+    internal string? GetNarrationArguments(string id)
+    {
+        lock (_gate)
+            return _tools.TryGetValue(_turn.ToString(CultureInfo.InvariantCulture) + ":" + id, out var tool) ? tool.ArgumentSummary : null;
+    }
+
     /// <summary>UI 可传同步上下文。慢订阅者只保留最新完整快照；异常不打断其它订阅或事件泵。</summary>
     public IDisposable Subscribe(Action<SessionViewSnapshot> observer, SynchronizationContext? context = null,
         Action<Exception>? onObserverError = null)
@@ -247,8 +289,9 @@ public sealed class SessionView : IDisposable
         var index = BlockIndex(data);
         if (!index.HasValue || !_blocks.TryGetValue(index.Value, out var block) || !block.Open || block.Kind != kind)
         { _gap = true; Notice("orphan_delta", kind); return; }
-        if (block.Hidden) return;
         var text = String(data, "text") ?? "";
+        block.Characters = AddCount(block.Characters, text.Length);
+        if (block.Hidden) return;
         if (block.Final)
         { block.Truncated |= block.Buffer.Length + (long)text.Length > _options.MaximumTextCharacters; block.Buffer = Prefix(block.Buffer + text); }
         else if (block.Part != null)
@@ -280,6 +323,8 @@ public sealed class SessionView : IDisposable
         }
         switch (type)
         {
+            case "tool.proposed":
+                tool.ArgumentSummary = SessionNarrator.Summarize(data.TryGetProperty("args", out var args) ? args : null); break;
             case "tool.permission.requested": tool.Status = "awaiting_permission"; break;
             case "tool.permission.decided": tool.Status = String(data, "decision") == "deny" ? "denied" : "proposed"; break;
             case "tool.started": tool.Status = "running"; _sealed = true; break;
@@ -387,9 +432,9 @@ public sealed class SessionView : IDisposable
     private sealed class Part(string kind)
     { internal readonly string Kind = kind; internal string Text = ""; internal string? ToolId, ToolInstanceId; internal bool Truncated; }
     private sealed class Block(string kind)
-    { internal readonly string Kind = kind; internal bool Open = true, Hidden, Final, Truncated; internal Part? Part; internal string Buffer = ""; }
+    { internal readonly string Kind = kind; internal bool Open = true, Hidden, Final, Truncated; internal Part? Part; internal string Buffer = ""; internal long Characters; }
     private sealed class Tool(string id, string instanceId, string name)
-    { internal readonly string Id = id, InstanceId = instanceId, Name = name; internal string Status = "proposed", Output = ""; internal string? Progress, ResultText, Error; internal JsonElement? Result; internal int ResultBytes; internal bool Truncated; }
+    { internal readonly string Id = id, InstanceId = instanceId, Name = name; internal string Status = "proposed", Output = ""; internal string? Progress, ResultText, Error, ArgumentSummary; internal JsonElement? Result; internal int ResultBytes; internal bool Truncated; }
 
     private sealed class Subscription(SessionView owner, Action<SessionViewSnapshot> observer,
         SynchronizationContext? context, Action<Exception>? onError) : IDisposable

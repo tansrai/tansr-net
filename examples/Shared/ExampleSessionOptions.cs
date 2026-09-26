@@ -2,12 +2,18 @@ using System.Globalization;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Views;
 
 namespace Tansr.Examples;
 
 // 应用宿主配置只是请求；实际模型、工具、技能和扩展范围仍由 Serve 的可信 profile 决定。
 internal static class ExampleSessionOptions
 {
+    internal static NarratorVerbosity ReadNarratorVerbosity(Func<string, string?>? environment = null)
+    {
+        var value = Empty((environment ?? Environment.GetEnvironmentVariable)("TANSR_NARRATOR_VERBOSITY"));
+        return value == null || value == "normal" ? NarratorVerbosity.Normal : value == "quiet" ? NarratorVerbosity.Quiet : value == "verbose" ? NarratorVerbosity.Verbose : throw new InvalidOperationException("invalid_TANSR_NARRATOR_VERBOSITY");
+    }
     internal static CreateSessionOptions Create(string? model, string? resume, JsonElement? clientTools,
         Func<string, string?>? environment = null)
     {

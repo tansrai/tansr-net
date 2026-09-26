@@ -8,6 +8,18 @@ WPF、WinForms 和 Console 共用公开 SDK。`inputs` 仍是原会话的同轮�
 
 桌面有“本机离线回看”及“恢复本机草稿”；Console `--offline` 不联网就能读取，交互可用 `/offline`、`/draft`、`/draft <全文>`、`/draft-file <UTF8文件>` 和 `/send-draft`。`/asr` 的文本也进入同一草稿。保存的会话 ID 不自动授权恢复；Console 仍需显式 `TANSR_RESUME_SESSION`。这些文件是当时的应用呈现与历史响应副本，可能已经过期或撤权，从不作为模型历史、材料源或 SQLite archive 当前授权。公开 `SqliteArchiveHistory` 保留可信 authority 边界；三个示例现另提供 `NativeOfflineStorageReader` 冷启动只读入口，使用仍有效的本地离线授权、原档案保留期权威或已知记忆出版摘要。不建立 Serve 连接、不同步或 ACK，不把旧备份当最新授权；见 [存储接入](../../doc/storage.md)。
 
+## 原生呈现与运行叙述
+
+WPF 和 WinForms 的正文 `stream/final`、思考 `stream/final/off` 下拉可在运行中切换，直接调用原 `SessionView.SetDelivery`，不新建会话、观察连接或视图。stream/final 切换保留已开始块的呈现规则，新块使用新档位；切为 off 会立即清除已显示和缓冲的思考，切回也不重显旧思考。关闭思考呈现不改变模型是否生成思考。
+
+连接前可选择叙述 `quiet/normal/verbose`，连接后“运行叙述”窗口接收 `SessionNarrator` 的增量文字。Console 与 Worker 用 `TANSR_NARRATOR_VERBOSITY` 选择，默认 normal；Worker 为每条作业分别输出 `phase=narration`。三个示例都在已有 `ObserveAsync` 泵中调用 `Apply`，不新开事件流。叙述不会打印思考正文；verbose 只报告其字符数。叙述与视图有界、可截断，不是完整历史档案。
+
+Native WPF/WinForms delivery selectors call `SessionView.SetDelivery` during the active session. Stream/final changes preserve existing block policy; new blocks adopt the selection without replacing the session, view, or subscription. Off immediately clears displayed and buffered thinking; switching back never reveals that old content. Select narration verbosity before connecting, or configure `TANSR_NARRATOR_VERBOSITY=quiet|normal|verbose` for Console/Worker. All narration consumes the existing event pump; thinking is counted rather than printed, and bounded narration is not an archive.
+
+关闭连接先停止原设备的可选通知流，继续保留执行轮询、续租和记忆 publication。原核心确认资源排空后才停止设备并释放本地资源；未知回执和预先发生的设备错误仍保留，不能仅凭“关闭请求已受理”显示已清理。仅断开本机连接不会自动关闭远端会话。
+
+On close, the optional executor notification stream is quiesced while polling, renewal and memory publication remain available. The device is stopped after the original core resource observation confirms settlement. Existing failures and uncertain results are preserved; close acceptance alone is not a cleanup receipt. Detaching remains distinct from closing the remote session.
+
 ## 提示词来源（只读）
 
 桌面“提示词来源”与 Console `/prompt` 调用公开 `session.ReadApplicationPromptAsync()`，仅在显式读取时给原 metadata 请求增加 `?include=applicationPrompt`；不要求 terminal preview，也不改变原“状态”或 `/meta` 请求。结果表示 Serve 当前已经应用的应用提示词来源：`platform` 为平台应用设置，`sdk` 为开发者/Serve 可信宿主段，`platform+sdk` 为两者组合，`none` 为两段均未采用。它不是整个系统提示词为空的证明。

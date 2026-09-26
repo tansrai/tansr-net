@@ -24,6 +24,9 @@ public sealed class ExecutionHost : IDisposable
     private JsonElement _notificationConnection;
     private ActiveExecution? _active;
     private string? _notificationError;
+    private Exception? _notificationFailure;
+    private readonly CancellationTokenSource _notificationStop = new();
+    private readonly TaskCompletionSource<bool> _notificationsStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
     private readonly JsonElement _registration;
@@ -96,6 +99,32 @@ public sealed class ExecutionHost : IDisposable
         if (running != null) await running.ConfigureAwait(false);
     }
 
+    /// <summary>Drain only optional notification observation before closing its remote session.
+    /// Original polling, heartbeat, execution and durable settlement continue until StopAsync.
+    /// This is irreversible for this host; an already recorded notification failure remains a failure.</summary>
+    public async Task QuiesceNotificationsAsync(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (_gate)
+        {
+            if (_disposed) throw new ObjectDisposedException(nameof(ExecutionHost));
+            if (!_started) throw new InvalidOperationException("执行宿主尚未启动。");
+            _notificationStop.Cancel();
+        }
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var timeout = Task.Delay(5000, deadline.Token);
+        var completed = await Task.WhenAny(_notificationsStopped.Task, timeout).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (completed != _notificationsStopped.Task) throw new IOException("execution_notifications_stop_timeout");
+        deadline.Cancel();
+        await _notificationsStopped.Task.ConfigureAwait(false);
+        Exception? failure;
+        Task? running;
+        lock (_gate) { failure = _notificationFailure; running = _running; }
+        if (failure != null) throw new IOException("执行通知失效；设备执行已取消并等待收尾。", failure);
+        if (running != null && running.IsCompleted) await running.ConfigureAwait(false);
+    }
+
     private JsonElement Current()
     {
         lock (_gate) return _connection ?? throw new InvalidOperationException("执行器尚未连接。");
@@ -104,8 +133,8 @@ public sealed class ExecutionHost : IDisposable
     private async Task RunCoreAsync(Func<JsonElement, CancellationToken, Task>? onConnected, CancellationToken outer)
     {
         using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(outer, _stop.Token);
+        using var notificationLifetime = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, _notificationStop.Token);
         Exception? heartbeatFailure = null;
-        Exception? notificationFailure = null;
         Task? heartbeat = null;
         Task? notifications = null;
         var token = lifetime.Token;
@@ -120,16 +149,26 @@ public sealed class ExecutionHost : IDisposable
             if (onConnected != null) await onConnected(registered.Clone(), token).ConfigureAwait(false);
             if (_notificationFactory != null)
             {
-                var scope = _client.ReadScope();
-                _notifications = await _notificationFactory(registered.Clone(), token).ConfigureAwait(false)
-                    ?? throw new InvalidDataException("执行通知来源缺失。");
-                _notificationScope = _notifications.Scope.Clone();
-                _notificationConnection = registered.Clone();
-                WireJson.ValidateNamed("Scope", _notificationScope);
-                ExecutionJson.Check(ExecutionJson.Equal(scope, _notificationScope));
-                CheckNotifications(registered, token);
-                notifications = ObserveNotificationsAsync(registered, lifetime, error => notificationFailure = error);
+                try
+                {
+                    var scope = _client.ReadScope();
+                    _notifications = await _notificationFactory(registered.Clone(), token).ConfigureAwait(false)
+                        ?? throw new InvalidDataException("执行通知来源缺失。");
+                    _notificationScope = _notifications.Scope.Clone();
+                    _notificationConnection = registered.Clone();
+                    WireJson.ValidateNamed("Scope", _notificationScope);
+                    ExecutionJson.Check(ExecutionJson.Equal(scope, _notificationScope));
+                    CheckNotifications(registered, token);
+                    notifications = ObserveNotificationsAsync(registered, lifetime, notificationLifetime.Token);
+                }
+                catch (Exception error) when (!token.IsCancellationRequested)
+                {
+                    // Publish initialization failure before finally signals notification drain.
+                    lock (_gate) _notificationFailure ??= error;
+                    throw;
+                }
             }
+            else _notificationsStopped.TrySetResult(true);
             var idleDelayMs = 250;
             while (true)
             {
@@ -187,8 +226,11 @@ public sealed class ExecutionHost : IDisposable
                 }
                 await notifications.ConfigureAwait(false);
             }
+            else _notificationsStopped.TrySetResult(true);
         }
         if (heartbeatFailure != null) throw new IOException("执行器续租失败。", heartbeatFailure);
+        Exception? notificationFailure;
+        lock (_gate) notificationFailure = _notificationFailure;
         if (notificationFailure != null) throw new IOException("执行通知失效；设备执行已取消并等待收尾。", notificationFailure);
     }
 
@@ -396,9 +438,8 @@ public sealed class ExecutionHost : IDisposable
                 ExecutionJson.Text(connection, field) == ExecutionJson.Text(_notificationConnection, field));
     }
 
-    private async Task ObserveNotificationsAsync(JsonElement connection, CancellationTokenSource lifetime, Action<Exception> failed)
+    private async Task ObserveNotificationsAsync(JsonElement connection, CancellationTokenSource lifetime, CancellationToken token)
     {
-        var token = lifetime.Token;
         var cursor = new TerminalExecutorEventCursor(ExecutionJson.Text(connection, "executorId"), ExecutionJson.Text(connection, "connectionId"));
         try
         {
@@ -445,8 +486,11 @@ public sealed class ExecutionHost : IDisposable
         catch (Exception) when (token.IsCancellationRequested) { }
         catch (Exception error)
         {
-            ReportNotificationError(error); failed(error); lifetime.Cancel();
+            ReportNotificationError(error);
+            lock (_gate) _notificationFailure ??= error;
+            lifetime.Cancel();
         }
+        finally { _notificationsStopped.TrySetResult(true); }
     }
 
     private async Task<bool> ReconcileActiveAsync(CancellationToken token)
