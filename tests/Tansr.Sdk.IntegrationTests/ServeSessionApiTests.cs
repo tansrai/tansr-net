@@ -184,13 +184,19 @@ public sealed partial class ServeSessionApiTests
         var history = await session.GetHistoryAsync(ct); var metadata = await session.ReadMetadataAsync(ct);
         var usage = await CommandAsync(new { action = "usage", sessionId = session.Id }, ct);
         var checkpoints = await session.ListCheckpointsAsync(ct); var originalId = session.Id; var exports = captures.Exports;
+        var originalExports = exports; var capturedCheckpointIds = new List<string>();
         Assert.False(mirror.IsEnabled); Assert.False(File.Exists(path)); Assert.False(File.Exists(keyPath));
         await mirror.FlushAsync(ct); Assert.Equal(exports, captures.Exports); Assert.False(File.Exists(path));
 
         async Task AssertUnchangedAsync()
         {
             Assert.Same(session, mirror.Session); Assert.Equal(originalId, mirror.Session.Id);
-            Assert.Equal(metadata.LastSequence, (await session.ReadMetadataAsync(ct)).LastSequence);
+            // Original Serve exports first create a checkpoint and emit session.checkpointed.
+            // Each successful capture advances only that event; disabling emits nothing.
+            var expectedSequence = metadata.LastSequence + captures.Exports - originalExports;
+            Assert.Equal(expectedSequence, (await session.ReadMetadataAsync(ct)).LastSequence);
+            // The history projection watermark changes only with history mutations;
+            // checkpoint notifications advance the event log, not this projection.
             Assert.Equal(WireJson.CanonicalString(history), WireJson.CanonicalString(await session.GetHistoryAsync(ct)));
             Assert.Equal(WireJson.CanonicalString(usage), WireJson.CanonicalString(await CommandAsync(new { action = "usage", sessionId = session.Id }, ct)));
             Assert.Equal(WireJson.CanonicalString(checkpoints), WireJson.CanonicalString(await session.ListCheckpointsAsync(ct)));
@@ -201,7 +207,7 @@ public sealed partial class ServeSessionApiTests
             var copy = await mirror.ReadAsync(ct); Assert.NotNull(copy);
             Assert.Equal(captures.LastExport, copy.Bytes); Assert.Equal(copy.Bytes, (await store.ReadAsync(ct)).Snapshot!.Bytes);
             Assert.Contains(Png, System.Text.Encoding.UTF8.GetString(copy.Bytes));
-            Assert.DoesNotContain(Png, System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path, ct)));
+            capturedCheckpointIds.Add(copy.CheckpointId);
             await AssertUnchangedAsync();
         }
 
@@ -212,9 +218,33 @@ public sealed partial class ServeSessionApiTests
         var disabledRevision = (await store.ReadAsync(ct)).Revision;
         await mirror.FlushAsync(ct); Assert.Equal(exports, captures.Exports); Assert.Equal(disabledRevision, (await store.ReadAsync(ct)).Revision);
         await mirror.EnableAsync(ct); Assert.True(mirror.IsEnabled); Assert.Equal(++exports, captures.Exports); await AssertExactCopyAsync();
+        Assert.Equal(3, capturedCheckpointIds.Distinct().Count());
+        using (var replay = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            replay.CancelAfter(TimeSpan.FromSeconds(5)); var observed = 0;
+            try
+            {
+                await session.ObserveAsync((item, _) =>
+                {
+                    Assert.Equal("session.checkpointed", item.Name);
+                    Assert.Equal(metadata.LastSequence + observed + 1, item.Data.GetProperty("seq").GetInt64());
+                    Assert.Equal(originalId, item.Data.GetProperty("sessionId").GetString());
+                    Assert.Equal(capturedCheckpointIds[observed], item.Data.GetProperty("checkpointId").GetString());
+                    Assert.Equal("manual", item.Data.GetProperty("trigger").GetString());
+                    Assert.Equal("SDK1 local context mirror", item.Data.GetProperty("label").GetString());
+                    Assert.Equal(history.GetProperty("messages").GetArrayLength(), item.Data.GetProperty("messageCount").GetInt32());
+                    if (++observed == 3) replay.Cancel();
+                    return Task.CompletedTask;
+                }, new() { LastEventId = metadata.LastSequence.ToString(System.Globalization.CultureInfo.InvariantCulture), Reconnect = false }, replay.Token);
+            }
+            catch (OperationCanceledException) when (replay.IsCancellationRequested && !ct.IsCancellationRequested) { }
+            Assert.Equal(3, observed);
+        }
+        await AssertUnchangedAsync();
         // Reopen the same encrypted file/key independently; this is a durable real SQLite
         // copy of the original Serve export, never synthetic SessionView text or a new session.
         store.Dispose();
+        Assert.DoesNotContain(Png, System.Text.Encoding.UTF8.GetString(await File.ReadAllBytesAsync(path, ct)));
         using var reopened = new WindowsSessionSnapshotStore(new()
         {
             Path = path,

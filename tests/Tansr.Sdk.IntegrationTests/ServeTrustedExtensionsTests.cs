@@ -1,5 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.ExceptionServices;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
@@ -141,12 +143,20 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
         var discovered = Assert.Single(await connection.ListToolsAsync(["echo"], ct));
         var declaration = Json(new { name = "NativeMcp", description = "Call the one explicitly approved synthetic native MCP echo", parameters = new { text = new { type = "string" } }, readOnly = false, timeoutMs = 10000 });
         var digest = WireJson.DomainDigest("tansr.sdk2.client-tool.v1", WireJson.EncodeControl(declaration));
-        var tools = McpToolAdapter.CreateTools(connection, [new McpToolBinding("NativeMcp", "echo", digest, discovered)]);
+        var bridge = Assert.Single(McpToolAdapter.CreateTools(connection, [new McpToolBinding("NativeMcp", "echo", digest, discovered)]));
+        var delegateCalls = 0;
+        WindowsBusinessTool[] tools = [new(bridge.Name, bridge.DefinitionDigest, async (arguments, token) =>
+        {
+            Interlocked.Increment(ref delegateCalls);
+            return await bridge.Invoke(arguments, token);
+        })];
         await InContextAsync(await Context.OpenAsync("mcp-" + name, ["NativeMcp"], ct, tools, Json(new[] { declaration })), async context =>
         {
             await PlanAsync("NativeMcp", new { text }, ct: ct);
             await TurnAsync(context.Session, "NET_NATIVE_MCP_" + name, events, ct);
             Assert.Equal(1, context.Executions);
+            Assert.Equal(1, delegateCalls);
+            Assert.True(context.AuthorizationChecks >= 3, "Original guards must still revalidate before claim, execution and native delegation.");
             var history = await context.Session.GetHistoryAsync(ct);
             Assert.Contains("NATIVE_" + name.ToUpperInvariant() + "_MCP_", history.GetRawText());
         });
@@ -225,7 +235,7 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
         private readonly TansrClient _client; private readonly DeviceSessionHost _host; private readonly SqliteExecutorJournal _journal;
         internal AgentSession Session { get; }
         internal WindowsWorkspace Workspace { get; }
-        internal int Executions;
+        internal int Executions, AuthorizationChecks;
         private Context(TansrClient client, AgentSession session, WindowsWorkspace workspace, SqliteExecutorJournal journal, DeviceSessionHost host)
         { _client = client; Session = session; Workspace = workspace; _journal = journal; _host = host; }
         internal static async Task<Context> OpenAsync(string name, string[] tools, CancellationToken ct,
@@ -245,17 +255,34 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
                 MaxReconnectAttempts = 0
             });
             var session = await client.CreateSessionAsync(new CreateSessionOptions { Tools = tools, ClientTools = clientTools, MaxTokens = maxTokens, ResumeSessionId = resumeSessionId }, ct);
-            var workspace = new WindowsWorkspace(work);
+            var writable = tools.Contains("Write", StringComparer.Ordinal);
+            if (writable)
+            {
+                // This isolated fixture owns every writer. The real backend must advertise Write
+                // before the real child whitelist and adjudicator can reject its proposed writes.
+                using var identity = WindowsIdentity.GetCurrent();
+                var security = new DirectorySecurity(); security.SetAccessRuleProtection(true, false);
+                security.SetOwner(identity.User!);
+                security.AddAccessRule(new FileSystemAccessRule(identity.User!, FileSystemRights.FullControl,
+                    InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
+                new DirectoryInfo(work).SetAccessControl(security);
+            }
+            var workspace = new WindowsWorkspace(work, new WindowsWorkspaceOptions { AllWritersCooperate = writable });
             var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
             { Path = Path.Combine(directory, "journal.sqlite"), Mode = StorageOpenMode.Create, ExecutorId = "net-trusted-pc", ApplicationScopeId = "net-trusted-app", EndUserId = "net-integration-user", ReadContext = () => Scope }, ct);
             Context? context = null;
             var backend = new WindowsExecutorBackend("net-trusted-pc", [new WindowsExecutorWorkspace("work", "1", workspace)], tools: businessTools);
-            var host = new DeviceSessionHost(new ExecutionClient(client), backend, journal,
+            var observedBackend = new ObservedBackend(backend, () => { if (context != null) Interlocked.Increment(ref context.Executions); });
+            var host = new DeviceSessionHost(new ExecutionClient(client), observedBackend, journal,
                 new DeviceSessionOptions { SessionId = session.Id, WorkspaceId = "work", RequestedTools = tools },
-                (_, _) => { if (context != null) Interlocked.Increment(ref context.Executions); return Task.CompletedTask; });
+                (_, _) => { if (context != null) Interlocked.Increment(ref context.AuthorizationChecks); return Task.CompletedTask; });
             context = new Context(client, session, workspace, journal, host);
             await host.StartAsync(ct); Assert.Equal(DeviceSessionState.Ready, host.State);
             await File.WriteAllTextAsync(Path.Combine(directory, "bound-capabilities.json"), host.Capabilities!.Value.GetRawText(), ct);
+            if (writable)
+                foreach (var expected in new[] { "Task", "Write" })
+                    Assert.Contains(host.Capabilities.Value.GetProperty("effectiveTools").EnumerateArray(),
+                        tool => tool.GetProperty("name").GetString() == expected && tool.GetProperty("available").GetBoolean());
             return context;
         }
         public async ValueTask DisposeAsync()
@@ -265,6 +292,16 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             await Run(async () => { using var ct = new CancellationTokenSource(TimeSpan.FromSeconds(10)); await Session.CloseAsync(ct.Token); await CommandAsync(new { action = "settle", sessionId = Session.Id }, ct.Token); });
             await Run(_host.StopAsync); await Run(_journal.CloseAsync); _host.Dispose(); Workspace.Dispose(); _client.Dispose();
             if (failures.Count != 0) throw new AggregateException("Trusted extension cleanup failed.", failures);
+        }
+    }
+
+    private sealed class ObservedBackend(IExecutionBackend inner, Action onExecute) : IExecutionBackend
+    {
+        public JsonElement Registration => inner.Registration;
+        public Task<JsonElement> ExecuteAsync(JsonElement operation, Func<CancellationToken, Task> guard, CancellationToken cancellationToken)
+        {
+            onExecute();
+            return inner.ExecuteAsync(operation, guard, cancellationToken);
         }
     }
 }

@@ -247,7 +247,9 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
         {
             release.Set(); observing.Cancel();
             if (stream != null) await stream.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
-            run?.Dispose(); await session.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10)); await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            run?.Dispose();
+            await host.QuiesceNotificationsAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            await session.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10)); await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
             await File.WriteAllLinesAsync(Path.Combine(directory, "dotnet-stages.jsonl"), stages.Select(item => item.GetRawText()), CancellationToken.None);
         }
     }
@@ -279,7 +281,9 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
         internal Task Finished { get; }
         internal QpcCollector(string directory)
         {
-            this.directory = directory; pipe = new NamedPipeServerStream(Name, PipeDirection.In, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
+            // Node's duplex pipe client closes its write half when an inbound-only server
+            // reports EOF. Keep the unused outbound half open for both original consumers.
+            this.directory = directory; pipe = new NamedPipeServerStream(Name, PipeDirection.InOut, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly);
             Finished = ReadAsync();
         }
         private async Task ReadAsync()

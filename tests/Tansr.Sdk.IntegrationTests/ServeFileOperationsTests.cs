@@ -136,9 +136,15 @@ public sealed class ServeFileOperationsTests(ITestOutputHelper output)
             var changed = await OpenAsync("changed-definition", new string('b', 64));
             var beforeChanged = operations.Count;
             var capabilities = await new ExecutionClient(controller).GetExecutionCapabilitiesAsync(changed.Session.Id, ct);
-            Assert.DoesNotContain(capabilities.GetProperty("effectiveTools").EnumerateArray(), tool => tool.GetProperty("name").GetString() == "BusinessLookup");
+            // The original capability directory retains unavailable tools for explanation;
+            // a changed definition must remove invocation authority, not the directory entry.
+            var unavailable = Assert.Single(capabilities.GetProperty("effectiveTools").EnumerateArray(), tool => tool.GetProperty("name").GetString() == "BusinessLookup");
+            Assert.False(unavailable.GetProperty("available").GetBoolean());
+            Assert.Equal("bound-device", unavailable.GetProperty("executionKind").GetString());
+            Assert.Equal("capability_unconfirmed", unavailable.GetProperty("unavailableReason").GetString());
             await ToolAsync(changed.Session, "BusinessLookup", new { id = "synthetic" }, false);
             Assert.Equal(beforeChanged, operations.Count); Assert.Equal(1, businessCalls);
+            Assert.Empty(await changed.Journal.OperationsAsync(cancellationToken: ct));
             await CommandAsync(new { action = "revoke" }, ct);
             var beforeRevoked = operations.Count;
             var failure = await Record.ExceptionAsync(() => changed.Session.SendAndObserveAsync("NET_FILES:" + Json(new { id = "revoked-read", name = "Read", args = new { file_path = "/workspace/work/note.txt" } }).GetRawText(), new SessionRunOptions { Timeout = TimeSpan.FromSeconds(10) }, cancellationToken: ct));

@@ -127,7 +127,7 @@ export async function startTrustedExtensionsFixture({ source, directory, authent
   let server;
   try { server = await startServer({ host: '127.0.0.1', port: 0, token: 'unused', readyFrame: 'none', heartbeatMs: 0,
     createSession: { create() { throw new Error('Legacy v1 unused'); } },
-    v2: { createSession: factory, authenticate, governance: { sweepIntervalMs: 0 } } }); }
+    v2: { createSession: factory, store: build.storeReader, authenticate, governance: { sweepIntervalMs: 0 } } }); }
   catch (error) { unsubscribe(); await build.flush(); spool.close(); throw error; }
   const mcpServer = createServer(async (request, response) => {
     try {
