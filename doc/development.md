@@ -1,16 +1,16 @@
 # NETSDK 实施记录
 
-日期：2026-09-26。状态：前四批本地增量已收编；当前 `20260926-NET-05-device-memory` 接入设备自动记忆介质、原执行链和原生示例，并修正 net48 原生资产消费。该批真实 Serve 复验仍在处理，最终事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。当前完整工程0/6、验收2/24（A03/A06）；下文保留既有批次事实，不将历史快照当作当前进度。
+日期：2026-09-26。状态：前四批本地增量已收编；当前 `20260926-NET-05-device-memory` 接入设备自动记忆介质、原执行链和原生示例，并修正 net48 原生资产消费。该批真实 Serve 复验已5/5通过，最终包及收编事实见末节。整体仍在开发，尚未正式发行。对应原方案 `tansr-cli/doc/report/NETSDK-*2026-09-26.md`；仍为六张父卡、24项完整验收、P01—P16，未拆进度卡。当前完整工程0/6、验收2/24（A03/A06）；下文保留既有批次事实，不将历史快照当作当前进度。
 
 ## 责任、源码和边界
 
 用户已要求 SDK2.0 会话实施 Serve 补齐、本会话立即实施 C# SDK。已通过 Codex 会话消息完成交接。Serve 是运行内核和新 wire 的单一写者；本仓是协议消费者、设备执行器、存储和原生示例。原 Electron 完整 SDK/IPC 不变。
 
 - 固定目录 `J:/tansr/tansr-net`，主分支 `main`；初始工程提交 `9bcb40c`。
-- 开发树 `J:/tansr/worktrees/net-NET-01-sdk`，本地分支 `lane/net/NET-01-sdk`，不推开发分支。
+- 开发树 `J:/tansr/worktrees/net-NET-01-sdk`，首批本地分支 `lane/net/NET-01-sdk`，当前分支 `lane/net/NET-04-device-memory`；各批实际分支另记，不推开发分支。
 - 原协议/同源源码 `tansr-cli 027de7e2d9b647374b7fe94cb0e4a7429a9195e2`。
 - SDK2 schema SHA256 `969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605`，详见 `contract/manifest.json`。
-- Serve terminal 新候选 `2026-09-26.candidate-2`，SHA256 `3cbb311f568bdc6d85b816fafbdb95254664219fdbd625dcadc0dfbdf4df84ae`，仅只读会签反馈，未导入稳定 API。
+- 首批 Serve terminal 候选 `2026-09-26.candidate-2`，SHA256 `3cbb311f568bdc6d85b816fafbdb95254664219fdbd625dcadc0dfbdf4df84ae`，当时仅只读反馈；当前使用 candidate-7，来源及显式 preview 边界见末批记录，不据历史快照回退当前合同。
 
 ## 首批固定父卡进度快照
 
@@ -269,9 +269,9 @@ Windows四条失败只修测试：原执行账本按 canonical JSON 保存，回
 
 第二轮包检查又定位到构建目标未入包：原 `None Update` 在单目标inner build存在，但多目标outer build没有对应实例。改为显式Remove/Include后，outer/inner/_GetPackageFiles均只有一个打包项。保留 `packages-native-layout` 的原失败包与消费日志，第三轮从 `packages-final` 和全新独立消费目录验证，禁止在缓存中手工补文件后冒称NuGet已修。
 
-最终两包产品提交 `799ebc4a8ecf39cef168c3836f2d850ba2fa0c99`；全解决方案重建仍0警告0错误。新Windows nupkg实际包含与源码一致的buildTransitive目标，全新消费工程由NuGet自动导入，net48实际CLR4.0.30319.42000与.NET10.0.9的Windows消费均完成新记忆创建、分块提交、关闭/重开/原终态/中文读取以及原文件/进程消费；win-x64 NativeAOT实际运行也通过（验证核心协议，不冒充Windows存储AOT）。见 `build-native-layout.log`、`native-layout-package-final.json`、`package-consumption-final.log`、`consumers-final/`。格式前次verify通过，最终增量另核；未重复启动未变的核心和现代Windows池。
+第三轮两包产品提交 `799ebc4a8ecf39cef168c3836f2d850ba2fa0c99`；全解决方案重建仍0警告0错误。新Windows nupkg实际包含与源码一致的buildTransitive目标，全新消费工程由NuGet自动导入，net48实际CLR4.0.30319.42000与.NET10.0.9的Windows消费均完成新记忆创建、分块提交、关闭/重开/原终态/中文读取以及原文件/进程消费；win-x64 NativeAOT实际运行也通过（验证核心协议，不冒充Windows存储AOT）。见 `build-native-layout.log`、`native-layout-package-final.json`、`package-consumption-final.log`、`consumers-final/`。格式前次verify通过，最终增量另核；未重复启动未变的核心和现代Windows池。
 
-最终SDK核心包466349字节，SHA256 `ada5a63439d56038f1a8761211e3dec1f015a027a09fae96af56a9a596071582`；Windows包295634字节，SHA256 `fb88041dbec9c8958a361c08d42c3489e991e0ca11547e3520c8f2ecd9e4db6f`，见 `candidate-artifacts-final.json`。版本仍是隔离本地候选0.1.0-preview.1，不代表已经上架。
+第三轮SDK核心包466349字节，SHA256 `ada5a63439d56038f1a8761211e3dec1f015a027a09fae96af56a9a596071582`；Windows包295634字节，SHA256 `fb88041dbec9c8958a361c08d42c3489e991e0ca11547e3520c8f2ecd9e4db6f`，见 `candidate-artifacts-final.json`。版本仍是隔离本地候选0.1.0-preview.1，不代表已经上架。
 
 ### 真实记忆联验的修正记录
 
@@ -282,3 +282,17 @@ r3执行5项、4通过1失败：新记忆链已通过真实提取/写入，但 S
 r4补回审批后保留110秒总期限、40秒业务轮、30秒流空闲及原30秒提取排空断言。实际提取写入成功，但分块链每次短暂空轮询后等待250毫秒，提取资源未在30秒内排空；4项旧链已通过，新链未产生通过结论，最终runner退出1。测试辅助程序对首个错误缺少即时失败响应也拖延收尾；本次补有界失败文件与独立关闭通道。正在修正真实执行宿主的空轮询退避，产品变化与后续完整回执单独记录，不抹去这些原红。
 
 执行宿主现保持原HTTP轮询合同与逐条耐久执行，在收到并结算非空批次后，从25毫秒短等待逐步退避至原250毫秒上限；启动和持续空闲仍为250毫秒。它不并发工具、不自动重试HTTP错误、不改变旧请求或回执。脚本化的即时空批测试补上了原阻塞Channel替身的盲点，覆盖短等待/封顶等待中取消、顺序和一次副作用。完整记忆联验显式规划1024操作、512MiB逻辑字节和131072页；原默认64MiB只容纳约255份262KiB永久回执，不能承诺覆盖整组多次提取/检查/删除链。测试不自动扩容或清账，产品默认与容量负例不变。
+
+### 本批最终联验
+
+暖态轮询修正后的核心完整池663/663通过，0失败/跳过；完整Release构建0警告0错误，格式verify-no-changes通过，见 `core-poll.log`、`results/core-poll.trx`、`build-poll.log`、`format-final-poll.log`。不与先前661项重复相加；Windows333项及覆盖其4个夹具红的18项复验沿前表结算。
+
+r5已完成所有业务链，最后因夹具把 `AgentHandle.settleResources(): Promise<void>` 的成功空返回值误当数组而失败（4/5）。修正为先在原10秒帽内等待真实handle清理，再核lifecycle的settlement数组。r6最终5/5通过、exit0、1.1108分钟：SDK1原3会话/9发送/32请求/0意外interrupt；公开kernel工具/档案恢复/提示词来源保持；新设备记忆5次主模型和6次提取交换均为合成任务。核心实际提取后经原MemoryPublication派工在Windows SQLite耐久保存，后续轮经真实审批检索并采用；pin丢回包后仅查询原键；forget移除正文及索引，同会话继续检索确认缺席；撤权零派工，真正排空后关闭设备，原transfer终态在同owner重开后仍可查询。406个操作、DB/WAL/SHM实测111558736字节，是该合成场景的账本证据，不是模型费用或通用性能基准。
+
+本轮行为代码提交 `cc9ffe5`，最终夹具源码 `661612ad6c5f9128f2496c31fbdb4c5423e7cf26`；Serve运行源码为已提交的 `3ac68177d1f286a979671fb75f8bbfa0a1361192`。3020个受检文件与35条workspace source解析在联验前后保持一致；`serve-source-snapshot-r5.json` SHA256 `60b0616d7dceef8def941eabe0fc88c4d9c534d8ae90ff127a91e93c62eff8d8`。快照工具现在据受检Git路径实际状态记录sourceCommitted，不把已提交源误记为未提交候选。依据为 `serve-integration-r6.log`、`serve-integration-evidence.json`、`serve-final-summary.json` 及两份最终阶段日志；原SQLite身份绑定运行目录 `artifacts/serve-integration/run-kdA254` 保留，不移动后冒充原介质。
+
+本次仍未覆盖NET-A14全部晚到写回、备份回放与跨连接维护矩阵，未增加完整关闭项。**工程0/6、剩6、新增0、0%；对抗验收2/24、剩22、新增0、8.3%；完整Electron对照0/16。** 后续重点仍为原卡的扩展装配、UI/媒体实操、混装与完整记忆恢复矩阵，不能把这条典型链或本地包当整套SDK已经发行。
+
+最终两包从 `661612ad6c5f9128f2496c31fbdb4c5423e7cf26` 重建；程序集信息版本也指向该提交，包含暖态轮询修正。`build-pack-closure.log` 为0警告0错误，两个pack exit0。`packages-closure` 经全新 `consumers-closure` 隔离本地源实际消费，net48/CLR4与.NET10 Windows的新记忆IO、旧文件/进程入口，以及win-x64核心NativeAOT均通过，见 `package-consumption-closure.log`。SDK核心包466692字节、SHA256 `9d15c35c8b9a20bfda35b3848a34d866bf6c4cde80c41bb03c553c0ac3b8b02b`；Windows包295632字节、SHA256 `97f05efa4fde62ae7d83fa90d21772bbabbae353f09544d1f342f35b1058c839`，完整索引为 `candidate-artifacts-closure.json`。前述799ebc4的第三轮包保留为中间证据，不再是本批最终候选。
+
+本批收编本地NET main的准确提交、运行目录归属和归档清单位于本批 `closure-manifest.json`。后续仅回填文档，不改变已验产品源和候选包。没有配置remote、没有GitHub推送/CI、没有签名或NuGet上传；活动开发树保留在 `worktrees/`，不删除其他会话材料。
