@@ -53,7 +53,8 @@ internal sealed class NativeTerminalDeviceHost
 #endif
     }
     internal static async Task<NativeTerminalDeviceHost> StartAsync(string configurationFile, string expectedSessionId, Uri expectedEndpoint,
-        Func<string, CancellationToken, Task<bool>> approve, Action<string> output, CancellationToken ct = default, TansrClient? borrowedController = null, SessionContract sessionContract = SessionContract.Sdk1)
+        Func<string, CancellationToken, Task<bool>> approve, Action<string> output, CancellationToken ct = default, TansrClient? borrowedController = null, SessionContract sessionContract = SessionContract.Sdk1,
+        NativeToolHost? nativeTools = null)
     {
 #if WINDOWS || NETFRAMEWORK
         using var document = JsonDocument.Parse(await BoundedFiles.ReadAsync(configurationFile, 65536, ct).ConfigureAwait(false));
@@ -150,9 +151,11 @@ internal sealed class NativeTerminalDeviceHost
                     throw new ExecutionRejectedException("ESTALE");
                 return tokenIdentity + ":" + WireJson.Sha256(System.Text.Encoding.UTF8.GetBytes(currentScope));
             }
+            var businessTools = nativeTools?.SelectDeviceExecution().ToList() ?? new List<WindowsBusinessTool>();
+            if (memoryTool != null) businessTools.Add(memoryTool);
             result.host = new TerminalDeviceHost(new ExecutionClient(controller), new ExecutionClient(device), controllerTerminal, deviceTerminal,
                 sink => new WindowsExecutorBackend(executorId, new[] { new WindowsExecutorWorkspace(workspaceId, Text(work, "revision"), workspace) },
-                    tools: memoryTool == null ? null : new[] { memoryTool }, interpreter: interpreter, processFactory: process, executionOutput: sink), journal,
+                    tools: businessTools, interpreter: interpreter, processFactory: process, executionOutput: sink), journal,
                 new TerminalDeviceOptions { SessionId = sessionId, SessionContract = sessionContract, WorkspaceId = workspaceId, BindingRequestId = Text(config, "bindingRequestId"), RequestedTools = allowed },
                 async (operation, token) =>
                 {

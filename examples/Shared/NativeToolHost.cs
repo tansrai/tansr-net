@@ -3,13 +3,17 @@ using System.IO;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+#if WINDOWS || NETFRAMEWORK
+using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Windows.Hosting;
+#endif
 
 namespace Tansr.Examples;
 
 /// <summary>
 /// 原生业务函数的 SDK1 clientTools 示例。恢复时固定权威会话水位，只接手其后新签发的请求。
 /// 水位之前的未知副作用不重做；恢复历史不等于恢复了业务回执。
-/// 不冒充 SDK2 的持久 execution host。内存回执仅在当前宿主进程内去重。
+/// 旧桥的内存回执仅在当前宿主进程内去重；设备模式将相同委托交原持久 execution host。
 /// </summary>
 internal sealed class NativeToolHost : IDisposable
 {
@@ -24,13 +28,20 @@ internal sealed class NativeToolHost : IDisposable
     private long? _resumeBoundary;
     private long _retiredThrough = -1;
     private bool _stopping;
+    private bool _deviceExecution = false;
 
     internal NativeToolHost(AgentSession session, string application,
         Func<string, CancellationToken, Task> setTitle, Action<string> report, IReadOnlyList<NativeToolBinding>? bindings = null)
+        : this(session, application, setTitle, report, bindings, false) { }
+
+    internal NativeToolHost(AgentSession session, string application,
+        Func<string, CancellationToken, Task> setTitle, Action<string> report, IReadOnlyList<NativeToolBinding>? bindings, bool resumeRequested)
     {
         _session = session; _application = application; _setTitle = setTitle; _report = report;
         _bindings = ValidateBindings(bindings).ToDictionary(x => x.Name, StringComparer.Ordinal);
-        Ready = session.Resumed ? InitializeResumeAsync(session.LastSequence) : Task.CompletedTask;
+        // A live attach returns resumed:false on the original wire. The host still
+        // attaches to existing history and must not execute an unobserved prior call.
+        Ready = session.Resumed || resumeRequested ? InitializeResumeAsync(session.LastSequence) : Task.CompletedTask;
         _ = Ready.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
@@ -77,6 +88,36 @@ internal sealed class NativeToolHost : IDisposable
         return snapshot;
     }
 
+#if WINDOWS || NETFRAMEWORK
+    /// <summary>由明确的设备连接操作选择原持久执行管道；同一宿主不再回落执行旧 SSE 请求。</summary>
+    internal IReadOnlyList<WindowsBusinessTool> SelectDeviceExecution()
+    {
+        lock (_gate)
+        {
+            if (_stopping) throw new InvalidOperationException("native_tool_host_stopping");
+            if (!Ready.IsCompleted || Ready.IsFaulted || Ready.IsCanceled) throw new InvalidOperationException("native_tool_host_not_ready");
+            if (_calls.Values.Any(call => !call.Task.IsCompleted || !call.ReceiptConfirmed))
+                throw new InvalidOperationException("native_tool_prior_outcome_unconfirmed");
+            _deviceExecution = true;
+            return GetDeclarations(_bindings.Values.ToArray()).EnumerateArray().Select(declaration =>
+            {
+                var name = declaration.GetProperty("name").GetString()!;
+                var digest = WireJson.DomainDigest("tansr.sdk2.client-tool.v1", WireJson.EncodeControl(declaration));
+                return new WindowsBusinessTool(name, digest, async (arguments, token) =>
+                {
+                    // Admission, authority, deadlines and exactly-once receipts belong to the
+                    // original ExecutionHost. Only the same application delegate is adapted here.
+                    lock (_gate) if (_stopping || !_deviceExecution) throw new InvalidOperationException("native_tool_host_stopping");
+                    using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token, _lifetime.Token);
+                    try { return await InvokeBindingAsync(name, arguments, lifetime.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { throw; }
+                    catch (Exception error) { return Receipt(error is InvalidOperationException ? error.Message : "native_tool_failed", true); }
+                });
+            }).ToArray();
+        }
+    }
+#endif
+
     /// <summary>不得 await 工具执行来阻塞 SSE 读取；取消帧需继续抵达。</summary>
     internal void HandleEvent(AgentEvent item)
     {
@@ -86,7 +127,7 @@ internal sealed class NativeToolHost : IDisposable
         var id = Text(data, "callId"); if (id == null) return;
         lock (_gate)
         {
-            if (_stopping) return;
+            if (_stopping || _deviceExecution) return;
             if (type == "server.tool.cancel") { if (_calls.TryGetValue(id, out var cancelled)) cancelled.Stop.Cancel(); return; }
             if (_calls.TryGetValue(id, out var previous))
             {
@@ -131,31 +172,8 @@ internal sealed class NativeToolHost : IDisposable
                 throw new InvalidOperationException("tool_clock_or_expiry_unconfirmed");
             call.Stop.CancelAfter(TimeSpan.FromMilliseconds(Math.Min(ttl.Value, deadline.Value - now)));
             call.Stop.Token.ThrowIfCancellationRequested();
-            var name = Text(call.Data, "name");
-            string result;
-            if (name != null && _bindings.TryGetValue(name, out var binding))
-            {
-                if (!call.Data.TryGetProperty("args", out var arguments) || arguments.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("invalid_tool_arguments");
-                receipt = await binding.ExecuteAsync(arguments, call.Stop.Token).ConfigureAwait(false);
-                // 使用同一个调用记录保存原回执；后续重放只能重送，不重做MCP请求。
-                if (receipt.ValueKind != JsonValueKind.Object || Text(receipt, "status") is not ("ok" or "error")) throw new InvalidOperationException("invalid_native_tool_receipt");
-                receipt = receipt.Clone();
-            }
-            else
-            {
-                if (name == "application_info")
-                    result = _application + "; version=" + typeof(NativeToolHost).Assembly.GetName().Version + "; runtime=" + Environment.Version + "; os=" + Environment.OSVersion.Platform;
-                else if (name == "set_window_title")
-                {
-                    if (!call.Data.TryGetProperty("args", out var arguments)) throw new InvalidOperationException("invalid_tool_arguments");
-                    var title = Text(arguments, "title");
-                    if (string.IsNullOrWhiteSpace(title) || title!.Length > 120 || title.Any(char.IsControl)) throw new InvalidOperationException("invalid_window_title");
-                    await _setTitle(title, call.Stop.Token).ConfigureAwait(false);
-                    result = "window_title_updated";
-                }
-                else throw new InvalidOperationException("unknown_native_tool");
-                receipt = Receipt(result, false);
-            }
+            call.Data.TryGetProperty("args", out var arguments);
+            receipt = await InvokeBindingAsync(Text(call.Data, "name"), arguments, call.Stop.Token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { receipt = Receipt("native_tool_cancelled", true); }
         catch (Exception error) { receipt = Receipt(error is InvalidOperationException ? error.Message : "native_tool_failed", true); }
@@ -164,6 +182,25 @@ internal sealed class NativeToolHost : IDisposable
         // Old unknown requests never become executable on replay. Do not permanently consume
         // the bounded ledger reserved for this host's new executions with historical rejections.
         if (rejectedPrior) lock (_gate) { _calls.Remove(call.Id); call.Stop.Dispose(); }
+    }
+
+    private async Task<JsonElement> InvokeBindingAsync(string? name, JsonElement arguments, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (name != null && _bindings.TryGetValue(name, out var binding))
+        {
+            if (arguments.ValueKind != JsonValueKind.Object) throw new InvalidOperationException("invalid_tool_arguments");
+            var receipt = await binding.ExecuteAsync(arguments, token).ConfigureAwait(false);
+            if (receipt.ValueKind != JsonValueKind.Object || Text(receipt, "status") is not ("ok" or "error")) throw new InvalidOperationException("invalid_native_tool_receipt");
+            return receipt.Clone();
+        }
+        if (name == "application_info")
+            return Receipt(_application + "; version=" + typeof(NativeToolHost).Assembly.GetName().Version + "; runtime=" + Environment.Version + "; os=" + Environment.OSVersion.Platform, false);
+        if (name != "set_window_title") throw new InvalidOperationException("unknown_native_tool");
+        var title = Text(arguments, "title");
+        if (string.IsNullOrWhiteSpace(title) || title!.Length > 120 || title.Any(char.IsControl)) throw new InvalidOperationException("invalid_window_title");
+        await _setTitle(title, token).ConfigureAwait(false);
+        return Receipt("window_title_updated", false);
     }
 
     private async Task SubmitAsync(Call call, JsonElement receipt, CancellationToken token)

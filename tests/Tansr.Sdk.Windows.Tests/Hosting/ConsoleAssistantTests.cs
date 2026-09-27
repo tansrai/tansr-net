@@ -17,6 +17,38 @@ public sealed class ConsoleAssistantTests
     private static readonly Type ConsoleProgram = Assembly.Load("ConsoleAssistant").GetType("ConsoleAssistant.Program", true)!;
 
     [Fact]
+    public async Task CancelledInteractiveInputReturnsBeforeTheSingleSynchronousReadFinishes()
+    {
+        using var input = new BlockingInput(); using var stop = new CancellationTokenSource();
+        var command = ReadCommand(input, stop.Token);
+        try
+        {
+            await input.Entered.Task.WaitAsync(Deadline);
+            Assert.False(command.IsCompleted); Assert.Equal(1, input.Reads);
+            stop.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => command.WaitAsync(Deadline));
+            Assert.False(input.Finished.Task.IsCompleted); Assert.Equal(1, input.Reads);
+            Assert.False(input.WasDisposed);
+        }
+        finally
+        {
+            input.Release.Set();
+            await input.Finished.Task.WaitAsync(Deadline);
+        }
+    }
+
+    [Fact]
+    public async Task InteractiveInputPreservesCommandsAndEofWithoutConcurrentReads()
+    {
+        using var input = new StringReader("/device-status\n/quit\n");
+        Assert.Equal("/device-status", await ReadCommand(input, CancellationToken.None).WaitAsync(Deadline));
+        Assert.Equal("/quit", await ReadCommand(input, CancellationToken.None).WaitAsync(Deadline));
+        Assert.Null(await ReadCommand(input, CancellationToken.None).WaitAsync(Deadline));
+        using var stop = new CancellationTokenSource(); stop.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ReadCommand(input, stop.Token).WaitAsync(Deadline));
+    }
+
+    [Fact]
     public async Task ResumedOnceSkipsOldCompletedReplayAndWaitsForItsOwnTurn()
     {
         using var f = new Fixture(); var session = await f.ResumeAsync();
@@ -110,15 +142,37 @@ public sealed class ConsoleAssistantTests
         => (Task<int>)ConsoleProgram.GetMethod("RunOnceAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null,
             [session, "new prompt", observer ?? ((_, _) => Task.CompletedTask), token])!;
 
+    private static Task<string?> ReadCommand(TextReader input, CancellationToken token)
+        => (Task<string?>)ConsoleProgram.GetMethod("ReadCommandAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [input, token])!;
+
     private static IDisposable CreateTools(AgentSession session)
     {
         var type = ConsoleProgram.Assembly.GetType("Tansr.Examples.NativeToolHost", true)!;
-        return (IDisposable)type.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single().Invoke(
+        return (IDisposable)type.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single(constructor => constructor.GetParameters().Length == 5).Invoke(
             [session, "console-test", (Func<string, CancellationToken, Task>)((_, _) => Task.CompletedTask), (Action<string>)(_ => { }), null]);
     }
     private static TaskCompletionSource<bool> Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static string Frame(int sequence, string type, string turn, string? reason = null)
         => "id: " + sequence + "\ndata: " + JsonSerializer.Serialize(new { sessionId = "resumed", seq = sequence, type, turnId = turn, reason }) + "\n\n";
+
+    private sealed class BlockingInput : TextReader
+    {
+        internal readonly TaskCompletionSource<bool> Entered = Signal(), Finished = Signal();
+        internal readonly ManualResetEventSlim Release = new();
+        internal int Reads;
+        internal bool WasDisposed;
+        public override string? ReadLine()
+        {
+            Interlocked.Increment(ref Reads); Entered.TrySetResult(true);
+            try { Release.Wait(); return "unconsumed input"; }
+            finally { Finished.TrySetResult(true); }
+        }
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) { WasDisposed = true; Release.Dispose(); }
+            base.Dispose(disposing);
+        }
+    }
 
     private sealed class Fixture : IDisposable
     {

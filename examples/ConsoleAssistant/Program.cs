@@ -85,6 +85,10 @@ internal static class Program
         using var view = new SessionView();
         SessionNarrator? narrator = null;
         NativeTerminalDeviceHost? terminalDevice = null;
+        // Ctrl+C stops input/observation. MCP and the executor remain available
+        // until the original close, publication and resource handshake finishes.
+        using var serviceLifetime = new CancellationTokenSource();
+        using var deviceLifetime = CancellationTokenSource.CreateLinkedTokenSource(serviceLifetime.Token);
         ExampleLocalStorage? storage = null;
         using var deviceApprovals = new ExampleDeviceApprovals(Write);
         var once = args.Length >= 2 && args[0] == "--once";
@@ -99,11 +103,15 @@ internal static class Program
             if (saved.Input != null && !saved.Input.CanStartAnother &&
                 (saved.SessionId != Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") || saved.Endpoint != (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve")))
                 throw new InvalidOperationException("unresolved_input_requires_original_serve_and_resume_session");
-            connection = await ExampleConnection.ConnectAsync(Environment.GetEnvironmentVariable("TANSR_SERVE_URL"),
-                _ => Task.FromResult(Required("TANSR_SESSION_TOKEN")), Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", stop.Token);
+            // Startup is cancellable; after startup, operation cancellation is
+            // separate from destroying the underlying owned services.
+            using (stop.Token.Register(serviceLifetime.Cancel))
+                connection = await ExampleConnection.ConnectAsync(Environment.GetEnvironmentVariable("TANSR_SERVE_URL"),
+                    _ => Task.FromResult(Required("TANSR_SESSION_TOKEN")), Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", serviceLifetime.Token);
             client = connection.Client;
-            session = await client.CreateSessionAsync(ExampleSessionOptions.Create(Environment.GetEnvironmentVariable("TANSR_MODEL"),
-                Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"), NativeToolHost.GetDeclarations(connection.NativeTools)), stop.Token);
+            var createOptions = ExampleSessionOptions.Create(Environment.GetEnvironmentVariable("TANSR_MODEL"),
+                Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"), NativeToolHost.GetDeclarations(connection.NativeTools));
+            session = await client.CreateSessionAsync(createOptions, stop.Token);
             var active = session;
             var input = new TurnInputEditor(session, saved.Endpoint == (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve") ? saved.Input : null, local.SaveInput);
             var controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl,
@@ -124,7 +132,7 @@ internal static class Program
                 ct.ThrowIfCancellationRequested();
                 if (Console.IsOutputRedirected || !OperatingSystem.IsWindows()) throw new InvalidOperationException("console_window_title_unavailable");
                 Console.Title = title; return Task.CompletedTask;
-            }, Write, connection.NativeTools);
+            }, Write, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
             await nativeTools.Ready;
             Write("session=" + session.Id);
             if (once)
@@ -136,14 +144,17 @@ internal static class Program
             observation = ObserveAsync(active, view, nativeTools, stop.Token, storage, narrator);
             while (!stop.IsCancellationRequested)
             {
-                var line = await Console.In.ReadLineAsync(stop.Token);
+                var line = await ReadCommandAsync(Console.In, stop.Token);
                 if (line == null || line == "/quit") break;
                 try
                 {
                     if (line.StartsWith("/device-start ", StringComparison.Ordinal))
                     {
                         if (terminalDevice != null) throw new InvalidOperationException("terminal_device_already_started");
-                        terminalDevice = await NativeTerminalDeviceHost.StartAsync(line.Substring(14), active.Id, connection.Endpoint, deviceApprovals.RequestAsync, Write, stop.Token, connection.Client, connection.Contract);
+                        // Cancelling this later initialization must not destroy the
+                        // already connected owned Serve or MCP needed for shutdown.
+                        using (stop.Token.Register(deviceLifetime.Cancel))
+                            terminalDevice = await NativeTerminalDeviceHost.StartAsync(line.Substring(14), active.Id, connection.Endpoint, deviceApprovals.RequestAsync, Write, deviceLifetime.Token, connection.Client, connection.Contract, nativeTools);
                         Write(terminalDevice.Status);
                     }
                     else if (line == "/device-status") Write(terminalDevice?.Status ?? "terminal_device_not_started");
@@ -242,12 +253,25 @@ internal static class Program
                 try { await terminalDevice.StopAsync(); Write("device_cleanup=completed"); }
                 catch (Exception error) { Write("device_cleanup_unconfirmed=" + ErrorCode(error) + "; notification=" + (terminalDevice.LastNotificationErrorCode ?? "none") + "; cause=" + (error.InnerException == null ? "none" : ErrorCode(error.InnerException))); }
             }
+            serviceLifetime.Cancel();
             if (observation != null) { try { await observation; } catch (Exception error) { Write("observer=" + ErrorCode(error)); } }
             if (storage != null) { if (storage.PendingCleanupStatus.Length > 0) Write(storage.PendingCleanupStatus); try { await storage.CloseAsync(); } catch (Exception error) { Write("storage_cleanup_unconfirmed=" + ErrorCode(error)); } }
             narrator?.Dispose(); media?.Dispose(); nativeTools?.Dispose(); client?.Dispose();
             if (connection != null) { try { await connection.CloseAsync(); } catch (Exception error) { Write("local_serve_cleanup_unconfirmed=" + ErrorCode(error)); } }
             Console.CancelKeyPress -= cancel;
         }
+    }
+
+    private static async Task<string?> ReadCommandAsync(TextReader input, CancellationToken stop)
+    {
+        stop.ThrowIfCancellationRequested();
+        // Console.In may block synchronously before ReadLineAsync returns its task.
+        // The loop owns exactly one background read. Cancellation exits the loop
+        // without waiting for a newline or disposing the shared standard input.
+        var read = Task.Run(input.ReadLine, stop);
+        var line = await read.WaitAsync(stop);
+        stop.ThrowIfCancellationRequested();
+        return line;
     }
 
     private static async Task<int> RunMemoryDeviceAsync(string path, CancellationToken stop)

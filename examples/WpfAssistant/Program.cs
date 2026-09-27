@@ -175,7 +175,8 @@ internal sealed class AssistantWindow : Window
         var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.IsChecked == true);
         var client = connection.Client;
         AgentSession session;
-        try { session = await client.CreateSessionAsync(ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools))); }
+        CreateSessionOptions createOptions;
+        try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
         catch { await connection.CloseAsync(); throw; }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         var savedInput = _local.Snapshot.Endpoint == _endpoint.Text ? _local.Snapshot.Input : null;
@@ -185,7 +186,7 @@ internal sealed class AssistantWindow : Window
         _nativeTools = new NativeToolHost(session, "Tansr.WPF", async (title, ct) =>
         {
             await Dispatcher.InvokeAsync(() => { ct.ThrowIfCancellationRequested(); Title = title; }, DispatcherPriority.Normal, ct);
-        }, code => Dispatcher.BeginInvoke(new Action(() => _status.Text = code)), connection.NativeTools);
+        }, code => Dispatcher.BeginInvoke(new Action(() => _status.Text = code)), connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
         try { await _nativeTools.Ready; }
         catch { await DetachAsync(); throw; }
         _view = new SessionView(new SessionViewOptions
@@ -359,7 +360,7 @@ internal sealed class AssistantWindow : Window
         if (picker.ShowDialog(this) != true) return;
         var session = _session!;
         _terminalDevice = await NativeTerminalDeviceHost.StartAsync(picker.FileName, session.Id, _connection!.Endpoint,
-            ApproveDeviceAsync, text => Dispatcher.BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) AppendTerminalOutput(text); })), _lifetime!.Token, _connection.Client, _connection.Contract);
+            ApproveDeviceAsync, text => Dispatcher.BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) AppendTerminalOutput(text); })), _lifetime!.Token, _connection.Client, _connection.Contract, _nativeTools);
         _status.Text = _terminalDevice.Status; _ = WatchTerminalDeviceAsync(_terminalDevice);
     }
     private Task<bool> ApproveDeviceAsync(string description, CancellationToken ct)

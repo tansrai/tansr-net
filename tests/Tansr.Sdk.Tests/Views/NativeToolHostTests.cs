@@ -119,12 +119,33 @@ public sealed class NativeToolHostTests
     }
 
     [Fact]
-    public async Task FailureToReadTheOriginalWatermarkNeverExecutesOrSilentlyRecreatesTheSession()
+    public async Task LiveAttachWithOriginalResumedFalseRejectsPriorRequestsButAcceptsNewRequestsAfterMetadata()
     {
-        using var handler = new Handler(true) { FailMetadata = true }; using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        var metadata = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        using var handler = new Handler(false) { MetadataGate = metadata.Task, LastSequence = 50 }; using var http = new HttpClient(handler); using var client = Client(http);
+        var executions = 0; var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
+        var options = new CreateSessionOptions { ResumeSessionId = "s" };
+        var session = await client.CreateSessionAsync(options); Assert.False(session.Resumed);
+        using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding }, resumeRequested: options.ResumeSessionId != null);
+        host.HandleEvent(Request(sequence: "49", id: "old"));
+        Assert.False(host.Ready.IsCompleted); Assert.Equal(0, executions); Assert.Empty(handler.Receipts);
+        metadata.SetResult(); await host.Ready; await CallCompletion(host, "old");
+        Assert.Equal("native_tool_prior_outcome_unknown", Assert.Single(handler.Receipts).GetProperty("message").GetString());
+        host.HandleEvent(Request(sequence: "51", id: "new")); await CallCompletion(host, "new");
+        Assert.Equal(1, executions); Assert.Equal("ok", handler.Receipts.Last().GetProperty("status").GetString());
+        Assert.Equal(1, handler.MetadataReads); Assert.Equal(1, handler.Creates); Assert.False(session.Resumed);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5)); await host.DrainAsync(timeout.Token);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task FailureToReadTheOriginalWatermarkNeverExecutesOrSilentlyRecreatesTheSession(bool resumed)
+    {
+        using var handler = new Handler(resumed) { FailMetadata = true }; using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
         var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "s" });
-        using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding });
+        using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding }, resumeRequested: true);
         await Assert.ThrowsAsync<TansrHttpException>(() => host.Ready); host.HandleEvent(Request());
         var receipt = await handler.Submitted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal("error", receipt.GetProperty("status").GetString()); Assert.Equal(0, executions); Assert.Equal(1, handler.MetadataReads); Assert.Equal(1, handler.Creates);
