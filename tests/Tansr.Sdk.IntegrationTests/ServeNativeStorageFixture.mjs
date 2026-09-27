@@ -40,7 +40,16 @@ export async function startNativeStorageFixture({ source, directory, scope, auth
         platformTokens.add((await result.clone().json()).token);
       }
       if (url.pathname === '/t1/heartbeat' && result.status === 200) {
-        const value = await result.json(); return Response.json({ ...value, features: [...new Set([...(value.features ?? []), 'prompt-cache'])] }, { headers: result.headers });
+        assert.ok(platformTokens.has(new Headers(init?.headers).get('x-tansr-app-token')),
+          'Runtime registration retains the same-user minted token boundary.');
+        const requested = JSON.parse(String(init?.body));
+        assert.equal(requested.client, 'sdk'); assert.equal(typeof requested.sessionId, 'string');
+        assert.ok(requested.sessionId.length > 0);
+        // The generic SDK1 UI peer omits this field. Cache registration uses the
+        // original stricter heartbeat contract and must echo the actual runtime.
+        const value = await result.json(); observations.push({ kind: 'heartbeat', runtimeSessionId: requested.sessionId });
+        return Response.json({ ...value, sessionId: requested.sessionId,
+          features: [...new Set([...(value.features ?? []), 'prompt-cache'])] }, { headers: result.headers });
       }
       return result;
     }
@@ -91,10 +100,16 @@ export async function startNativeStorageFixture({ source, directory, scope, auth
     events: { storeId: 'native-ui-archive-events', key: randomBytes(32), maxQueuedOperations: 32, maxSubscriptions: 8 },
     sourceFor(subject) {
       assert.equal(subject.endUserId, scope.endUserId);
-      if (!subjects.has(subject.sessionId)) subjects.set(subject.sessionId, { ...subject, observedAt: Date.now() });
       return selectedSource;
     },
-    authorize({ subject }) { assert.equal(subject.endUserId, scope.endUserId); return { authorizationRevision: scope.authorizationRevision }; }
+    authorize({ subject, operation }) {
+      assert.equal(subject.endUserId, scope.endUserId);
+      // Source selection also runs for discovery's synthetic "capabilities"
+      // subject. Only actual session open/resume intent may issue UI storage config.
+      if ((operation === 'open' || operation === 'resume') && !subjects.has(subject.sessionId))
+        subjects.set(subject.sessionId, { ...subject, observedAt: Date.now() });
+      return { authorizationRevision: scope.authorizationRevision };
+    }
   });
   let server;
   try {
@@ -116,6 +131,14 @@ export async function startNativeStorageFixture({ source, directory, scope, auth
   async function prepare(sessionId) {
     if (configurations.has(sessionId)) return configurations.get(sessionId);
     const subject = subjects.get(sessionId); assert.ok(subject, 'Only a real same-scope host session can receive configuration.');
+    // sourceFor runs during creation, before the original archive session port is
+    // published. Wait for the original public session read to become available;
+    // its offload store/read guard settles opening before returning metadata.
+    // Only its normal 404 means not ready. Authentication/authorization errors
+    // still fail the fixture and are never treated as transient binding absence.
+    const metadata = await get(`/v3/sdk2/sessions/${encodeURIComponent(sessionId)}`);
+    if (!metadata) return null;
+    assert.equal(metadata.sessionId, sessionId);
     const target = await get(`/v3/sdk2/sessions/${encodeURIComponent(sessionId)}/binding-target?protocol=sdk2-ext-v1`);
     if (!target?.bindingId) return null;
     const bindingId = target.bindingId;

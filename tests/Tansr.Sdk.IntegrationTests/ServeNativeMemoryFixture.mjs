@@ -13,14 +13,15 @@ export async function nativeMemoryPlatform({ source, directory, scope, authentic
   assert.equal(typeof authenticate, 'function');
   assert.ok(allowedTools.length > 0 && allowedTools.length <= 16);
   const { openSqliteArchiveSpool, memoryPublicationKey } = await import(pathToFileURL(join(source, 'packages/server/src/extensions/index.ts')).href);
-  const { getPlatformMemoryLifecycle } = await import(pathToFileURL(join(source, 'packages/server/src/v2/memory-lifecycle.ts')).href);
+  const { getPlatformMemoryLifecycle, getPlatformMemoryPreparation } = await import(pathToFileURL(join(source, 'packages/server/src/v2/memory-lifecycle.ts')).href);
   await mkdir(directory, { recursive: true });
   const controlFile = join(directory, 'native-memory-control.json');
   const identityFile = join(directory, 'native-memory-identities.json');
   const topic = 'native-ui-preference.md';
   const fact = 'NATIVE_UI_MEMORY_FACT: the synthetic user prefers violet report headings.';
   const observations = [], identities = new Map(), extracted = new Set(), extractedSessions = new Set(), handles = new Map();
-  let modelCalls = 0, closed = false, statusWork, closeWork, lastStatus;
+  let modelCalls = 0, closed = false, statusWork, closeWork, lastStatus, observingPreparation = false;
+  const lifecycleBindings = new Map(), bindingFailures = new Map();
   const limit = { bytes: 64 * 1048576, records: 4096 };
   const spool = await openSqliteArchiveSpool({ path: join(directory, 'native-memory-execution.sqlite'), mode: 'create', storeId: 'native-ui-device-memory',
     bindings: [{ bindingId: 'native-memory', applicationScopeId: scope.applicationScopeId, endUserId: scope.endUserId,
@@ -53,13 +54,47 @@ export async function nativeMemoryPlatform({ source, directory, scope, authentic
     statusWork = (async () => {
       const rows = [];
       for (const [sessionId, handle] of handles) {
-        const lifecycle = getPlatformMemoryLifecycle(handle);
-        let idle = false;
-        if (quiescent(handle, lifecycle) && handle.owner) {
-          try { await handle.owner.assertIdle(); idle = quiescent(handle, lifecycle); }
-          catch { idle = false; } // Busy, reconciliation or failed ownership is never a successful idle observation.
+        let lifecycle = getPlatformMemoryLifecycle(handle), idle = false, failure = bindingFailures.get(sessionId), bindingAttempt = false;
+        const extractionObserved = observations.some(item => item.sessionId === sessionId && item.kind === 'extraction' && item.value?.ok === true);
+        if (failure === undefined && handle.status() === 'idle' && typeof handle.owner?.assertIdle === 'function') {
+          try {
+            await handle.owner.assertIdle();
+            if (!lifecycle && extractionObserved) {
+              bindingAttempt = true;
+              // Lazy first-turn installation binds the lifecycle to the driver, not
+              // its public handle. A completed original extraction proves that it
+              // already exists. Use the original management preparation wrapper to
+              // expose that same lifecycle; never initialize an unrun memory source.
+              const preparation = getPlatformMemoryPreparation(handle);
+              assert.ok(preparation, 'The original managed-memory preparation must exist.');
+              const callsBefore = modelCalls, observationsBefore = observations.length;
+              observingPreparation = true;
+              try { lifecycle = await preparation.prepare(AbortSignal.timeout(3000)); }
+              finally { observingPreparation = false; }
+              assert.equal(modelCalls, callsBefore, 'Observing the installed memory lifecycle cannot run a model.');
+              assert.equal(observations.length, observationsBefore, 'Observing the installed lifecycle cannot complete pending memory work.');
+              assert.equal(getPlatformMemoryLifecycle(handle), lifecycle, 'Preparation must bind the original lifecycle to its public handle.');
+              lifecycleBindings.set(sessionId, { sessionId, extractionObserved, callsBefore, callsAfter: modelCalls,
+                observationsBefore, observationsAfter: observations.length, domain: lifecycle.status().domain });
+              persist('native-memory-lifecycle-bindings.json', [...lifecycleBindings.values()]);
+              bindingAttempt = false;
+            }
+            if (quiescent(handle, lifecycle)) {
+              const settlements = await lifecycle.settleResources({ timeoutMs: 0 });
+              await handle.owner.assertIdle();
+              idle = settlements.every(result => result.status === 'completed') && quiescent(handle, lifecycle);
+            }
+          } catch (error) {
+            failure = error.code ?? error.name;
+            if (bindingAttempt) {
+              bindingFailures.set(sessionId, failure);
+              persist('native-memory-status-failure.json', { sessionId, code: failure, message: String(error.message).slice(0, 1024) });
+            }
+          } // Busy, failed ownership or unfinished resources never count as idle.
         }
-        rows.push({ sessionId, idle, extracted: extractedSessions.has(sessionId) });
+        rows.push({ sessionId, idle, extracted: extractedSessions.has(sessionId),
+          sessionStatus: handle.status(), lifecycleObserved: lifecycle !== undefined, ownerPresent: typeof handle.owner?.assertIdle === 'function',
+          ...(failure === undefined ? {} : { failure }) });
       }
       const encoded = JSON.stringify(rows);
       if (!closed && encoded !== lastStatus) { persist('native-memory-status.json', rows); lastStatus = encoded; }
@@ -110,13 +145,14 @@ export async function nativeMemoryPlatform({ source, directory, scope, authentic
     return new Response(frame('t.open', { exchangeId: 'native-ui-memory-' + modelCalls, model: request.model, protocol: 'twp/1' }) +
       (text ? frame('t.delta', { i: 0, t: 'text', v: text }) : '') +
       (tool ? frame('t.delta', { i: text ? 1 : 0, t: 'tool_use', id: tool.id, name: tool.name, vJson: JSON.stringify(tool.args) }) : '') +
-      frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+      frame('t.close', { stop: tool ? 'tool_use' : 'end' }), { headers: { 'content-type': 'text/event-stream' } });
   }
   // This handles only the original kernel memory fork. It neither implements the
   // agent loop nor changes its authority, publication, extraction or promotion code.
   function tryModel(request) {
     if (request.meta?.purpose !== 'memory') return undefined;
     assert.ok(++modelCalls <= 48, 'Unexpected synthetic native memory workload.');
+    assert.equal(observingPreparation, false, 'Lifecycle observation must not trigger a memory model request.');
     assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Edit', 'Read', 'Write']);
     const blocks = request.thread.flatMap(message => message.blocks ?? []);
     const instructions = blocks.filter(block => block.t === 'text').map(block => block.v).join('\n');

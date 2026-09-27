@@ -33,6 +33,10 @@ const fake = createFakePlatform({ cacheControl: 'private, max-age=0', features: 
   ...media?.bundleExtra, app: { platform: 'desktop' }, capabilities: {
     ...capability, ...memory.capabilityExtra, ...(media?.bundleExtra.capabilities ?? {}),
     tools: { ...capability.tools, ...(media?.bundleExtra.capabilities?.tools ?? {}) },
+    execution: { ...memory.capabilityExtra.execution, boundDevice: {
+      ...memory.capabilityExtra.execution.boundDevice,
+      tools: { ...memory.capabilityExtra.execution.boundDevice.tools, customTools: true },
+    } },
   }, models: [
     { handle: 'ui-main', modelId: 'ui-main', displayName: 'UI Main', protocol: 'twp', capabilities: { inputModalities: { image: 'supported' } }, contextWindow: 32768 },
     { handle: 'ui-large', modelId: 'ui-large', displayName: 'UI Large', protocol: 'twp', capabilities: { inputModalities: { image: 'supported' } }, contextWindow: 65536 },
@@ -41,8 +45,21 @@ const fake = createFakePlatform({ cacheControl: 'private, max-age=0', features: 
 const frame = (event, data) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
 let recordWrite = Promise.resolve();
 const saveRecords = () => { const bytes = JSON.stringify(records); recordWrite = recordWrite.then(async () => {
-  await writeFile(join(directory, 'native-ui-records.tmp'), bytes); await rename(join(directory, 'native-ui-records.tmp'), join(directory, 'native-ui-records.json'));
-}); return recordWrite; };
+  const temporary = join(directory, 'native-ui-records.tmp'), target = join(directory, 'native-ui-records.json');
+  await writeFile(temporary, bytes);
+  for (let attempt = 0; ; attempt++) {
+    try { await rename(temporary, target); break; }
+    catch (error) {
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= 7) throw error;
+      await new Promise(resolve => setTimeout(resolve, 20 * (attempt + 1)));
+    }
+  }
+});
+  // Authenticate callbacks cannot await. Retain the rejection for the final
+  // awaited flush without turning a transient evidence I/O fault into a crash.
+  void recordWrite.catch(() => {});
+  return recordWrite;
+};
 // Only synthetic echo is exposed; the application still performs the public MCP handshake,
 // approved tools/list lookup, frozen-definition check and tools/call over real HTTP.
 const mcp = createServer(async (request, response) => {
@@ -107,7 +124,7 @@ const fetchImpl = async (input, init) => {
     assert.deepEqual(request.tools ?? [], [], 'This bounded Task requested no child tools.');
     records.push({ kind: 'task-child', host, at: Date.now() }); await saveRecords();
     return new Response(frame('t.open', { exchangeId: `ui-child-${records.length}`, model: request.model, protocol: 'twp/1' }) +
-      frame('t.delta', { i: 0, t: 'text', v: `UI_TASK_CHILD_DONE_${host}` }) + frame('t.close', { stop: 'end_turn' }), { headers: { 'content-type': 'text/event-stream' } });
+      frame('t.delta', { i: 0, t: 'text', v: `UI_TASK_CHILD_DONE_${host}` }) + frame('t.close', { stop: 'end' }), { headers: { 'content-type': 'text/event-stream' } });
   }
   if (kind === 'IMAGE_INPUT') assert.ok(request.thread.findLast(message => message.role === 'user').blocks.some(block => block.t === 'image'), 'Original user image block must reach the real model boundary.');
   await saveRecords();
@@ -147,7 +164,7 @@ const fetchImpl = async (input, init) => {
                 frame('t.delta', { i: 3, t: 'text', v: `UI_DELIVERY_FINAL_${host}` })));
               phase = 1;
             } else if (phase === 1 && requested === 2) {
-              controller.enqueue(encoder.encode(frame('t.close', { stop: 'end_turn' }))); controller.close(); return;
+              controller.enqueue(encoder.encode(frame('t.close', { stop: 'end' }))); controller.close(); return;
             }
             await new Promise(resolve => setTimeout(resolve, 50));
           }
@@ -169,7 +186,7 @@ const fetchImpl = async (input, init) => {
   }
   return new Response(open + (kind.startsWith('THINK_') ? frame('t.delta', { i: 0, t: 'thinking', v: `UI_REASONING_${kind.slice(6)}_${host}` }) : '') + (tool
     ? frame('t.delta', { i: 0, t: 'tool_use', id: issued.get(marker), name: tool.name, vJson: JSON.stringify(tool.args) })
-    : frame('t.delta', { i: kind.startsWith('THINK_') ? 1 : 0, t: 'text', v: `UI_DONE_${kind}_${host} · 中文🙂` })) + frame('t.close', { stop: tool ? 'tool_use' : 'end_turn' }),
+    : frame('t.delta', { i: kind.startsWith('THINK_') ? 1 : 0, t: 'text', v: `UI_DONE_${kind}_${host} · 中文🙂` })) + frame('t.close', { stop: tool ? 'tool_use' : 'end' }),
   { headers: { 'content-type': 'text/event-stream' } });
 };
 const originalFetch = globalThis.fetch;
@@ -178,7 +195,8 @@ globalThis.fetch = (input, init) => {
   assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname), 'External fetch forbidden.'); return originalFetch(input, init);
 };
 const store = createServeAgentSessionStore({ dir: join(directory, 'sessions'), ownership: {} });
-const build = createAgentSessionFactory({ cwd: directory, store, configuration: {}, permissionTimeoutMs: 10000,
+const build = createAgentSessionFactory({ cwd: directory, cwdPolicy: { allowedRoots: [directory] },
+  store, checkpoints: { autoBeforeCompact: false }, configuration: {}, permissionTimeoutMs: 10000,
   execution: memory.execution,
   platform: { apiBaseUrl: FAKE_API_BASE, appId: 'native-ui-app', appKey: 'synthetic', fetchImpl, maxOutputTokens: 8192, memoryPublicationFor: memory.memoryPublicationFor } });
 const createSession = build.factory.create.bind(build.factory);
@@ -192,16 +210,25 @@ const { startNativeStorageFixture } = await import('./ServeNativeStorageFixture.
 const storage = await startNativeStorageFixture({ source, directory: join(directory, 'storage'),
   scope: { applicationScopeId: 'native-ui-app', endUserId: 'native-ui-user', authorizationRevision: '1' }, token, fetchImpl, apiBaseUrl: FAKE_API_BASE,
   authenticate(request) { return request.headers.authorization === `Bearer ${token}` ? { endUserId: 'native-ui-user' } : null; } });
-await writeFile(join(directory, 'ready.json'), JSON.stringify({ url: server.url, mcpUrl, source: sourceBefore, memory: memory.configuration, storage: storage.configuration }), { flag: 'wx' });
+const { startNativeLegacyFixture } = await import('./ServeNativeLegacyFixture.mjs');
+const legacy = await startNativeLegacyFixture({ source, directory: join(directory, 'legacy'), token, fetchImpl, apiBaseUrl: FAKE_API_BASE,
+  scope: { applicationScopeId: 'native-ui-app', endUserId: 'native-ui-user', authorizationRevision: '1' } });
+await writeFile(join(directory, 'ready.json'), JSON.stringify({ url: server.url, mcpUrl, source: sourceBefore, memory: memory.configuration, storage: storage.configuration,
+  legacy: { url: legacy.url, cwdRoot: legacy.cwdRoot, cwdTarget: legacy.cwdTarget } }), { flag: 'wx' });
 let stopped = false;
 async function close() {
   if (stopped) return; stopped = true;
   try { const report = await server.drain({ timeoutMs: 5000 }); await server.settleResources?.(); await build.flush(); await saveRecords(); await memory.close();
-    const storageReport = await storage.close();
+    const storageReport = await storage.close(); const legacyReport = await legacy.close();
     await new Promise((accept, reject) => mcp.close(error => error ? reject(error) : accept()));
     const sourceAfter = verifyServeSourceSnapshot(source, process.env.TANSR_SERVE_SOURCE_SNAPSHOT);
-    await writeFile(join(directory, 'result.json'), JSON.stringify({ records, report, storage: storageReport, media: media?.mediaRecords ?? [], sourceBefore, sourceAfter }), { flag: 'wx' });
-  } catch (error) { await writeFile(join(directory, 'failure.txt'), error.stack ?? String(error), { flag: 'wx' }); process.exitCode = 1; }
+    await writeFile(join(directory, 'result.json'), JSON.stringify({ records, report, storage: storageReport, legacy: legacyReport, media: media?.mediaRecords ?? [], sourceBefore, sourceAfter }), { flag: 'wx' });
+  } catch (error) {
+    process.exitCode = 1;
+    console.error(error.stack ?? String(error));
+    try { await writeFile(join(directory, 'failure.txt'), error.stack ?? String(error), { flag: 'wx' }); }
+    catch (diagnosticError) { console.error('Could not persist the original fixture failure:', diagnosticError.code ?? diagnosticError.name); }
+  }
   finally { process.exit(process.exitCode ?? 0); }
 }
 process.on('SIGINT', close); process.on('SIGTERM', close);

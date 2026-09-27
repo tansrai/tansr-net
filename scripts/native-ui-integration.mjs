@@ -15,6 +15,13 @@ const directory = resolve(required('TANSR_NATIVE_UI_DIRECTORY'));
 const source = resolve(required('TANSR_SERVE_SOURCE'));
 const snapshot = resolve(required('TANSR_SERVE_SOURCE_SNAPSHOT'));
 const sourceBefore = verifyServeSourceSnapshot(source, snapshot);
+const select = (name, defaults, allowed = defaults) => {
+  const values = process.env[name]?.split(',') ?? defaults;
+  assert.ok(values.length && new Set(values).size === values.length && values.every(value => allowed.includes(value)), `Invalid ${name}.`);
+  return values;
+};
+const hosts = select('TANSR_NATIVE_UI_HOSTS', ['WPF', 'WINFORMS']);
+const groups = select('TANSR_NATIVE_UI_GROUPS', ['primary', 'storage', 'legacy'], ['primary', 'media', 'media-tail', 'speech', 'continuity', 'memory', 'storage', 'legacy']);
 await mkdir(directory); // preserve all prior red and green evidence
 const token = randomBytes(32).toString('hex');
 const originDirectory = join(directory, 'serve'); await mkdir(originDirectory);
@@ -31,7 +38,8 @@ async function candidate(path) {
 const executables = { wpf: await candidate(wpf), winforms: await candidate(winforms) };
 const scripts = await Promise.all(['scripts/test-native-ui.ps1', 'scripts/native-media-ui.ps1', 'scripts/native-storage-ui.ps1',
   'tests/Tansr.Sdk.IntegrationTests/ServeNativeUiFixture.mjs', 'tests/Tansr.Sdk.IntegrationTests/ServeNativeMediaFixture.mjs',
-  'tests/Tansr.Sdk.IntegrationTests/ServeNativeMemoryFixture.mjs', 'tests/Tansr.Sdk.IntegrationTests/ServeNativeStorageFixture.mjs'].map(async name => ({ path: join(repository, name), sha256: await sha(join(repository, name)) })));
+  'tests/Tansr.Sdk.IntegrationTests/ServeNativeMemoryFixture.mjs', 'tests/Tansr.Sdk.IntegrationTests/ServeNativeStorageFixture.mjs',
+  'tests/Tansr.Sdk.IntegrationTests/ServeNativeLegacyFixture.mjs'].map(async name => ({ path: join(repository, name), sha256: await sha(join(repository, name)) })));
 const env = { ...process.env };
 for (const name of Object.keys(env)) if (/(TOKEN|SECRET|PASSWORD|API.?KEY|APP.?KEY|CREDENTIAL)/i.test(name) || /^TANSR_/.test(name)) delete env[name];
 Object.assign(env, { TANSR_SERVE_SOURCE: source, TANSR_SERVE_SOURCE_SNAPSHOT: snapshot, TANSR_NATIVE_UI_DIRECTORY: originDirectory, TANSR_NATIVE_UI_TOKEN: token });
@@ -57,7 +65,7 @@ try {
   readyWaitMilliseconds = Date.now() - waitingSince;
   assert.ok(ready, 'Real Serve fixture startup timed out.');
   const quote = value => `'${value.replaceAll("'", "''")}'`;
-  const command = `$taskUiScript = [ScriptBlock]::Create([IO.File]::ReadAllText(${quote(join(repository, 'scripts/test-native-ui.ps1'))}, [Text.Encoding]::UTF8)); & $taskUiScript -WpfExecutable ${quote(wpf)} -WinFormsExecutable ${quote(winforms)} -OutputDirectory ${quote(join(directory, 'ui'))} -ServeUrl ${quote(ready.url)}; if (-not $?) { exit 1 }`;
+  const command = `$taskUiScript = [ScriptBlock]::Create([IO.File]::ReadAllText(${quote(join(repository, 'scripts/test-native-ui.ps1'))}, [Text.Encoding]::UTF8)); & $taskUiScript -WpfExecutable ${quote(wpf)} -WinFormsExecutable ${quote(winforms)} -OutputDirectory ${quote(join(directory, 'ui'))} -ServeUrl ${quote(ready.url)} -Hosts @(${hosts.map(quote).join(',')}) -Groups @(${groups.map(quote).join(',')}); if (-not $?) { exit 1 }`;
   const uiLog = openSync(join(directory, 'ui.log'), 'wx');
   try {
     const ui = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')],
@@ -74,7 +82,7 @@ finally {
   if (fixtureCode !== 0 && !failure) failure = new Error(`Serve cleanup failed: ${fixtureCode}`);
   let sourceAfter;
   try { sourceAfter = verifyServeSourceSnapshot(source, snapshot); } catch (error) { failure ??= error; }
-  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ executables, scripts, sourceBefore, sourceAfter, fixturePid: fixture.pid, readyWaitMilliseconds, uiCode, fixtureCode, failure: failure?.message ?? null }, null, 2));
+  await writeFile(join(directory, 'manifest.json'), JSON.stringify({ hosts, groups, executables, scripts, sourceBefore, sourceAfter, fixturePid: fixture.pid, readyWaitMilliseconds, uiCode, fixtureCode, failure: failure?.message ?? null }, null, 2));
 }
 if (failure) throw failure;
 console.log(JSON.stringify({ directory, uiCode, result: 'passed', paidModelCalls: 0 }));
