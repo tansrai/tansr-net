@@ -75,9 +75,10 @@ public sealed class MediaDownloader : IDisposable
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
         HttpResponseMessage response;
         try { response = await _client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, timeout.Token).ConfigureAwait(false); }
-        catch (HttpRequestException) { throw new MediaException("media_download_failed"); }
+        catch (HttpRequestException) { timeout.Token.ThrowIfCancellationRequested(); throw new MediaException("media_download_failed"); }
         using (response)
         {
+            timeout.Token.ThrowIfCancellationRequested();
             var code = (int)response.StatusCode;
             if (code >= 300 && code < 400) throw new MediaException("media_redirect_rejected");
             if (response.StatusCode == HttpStatusCode.NotFound || response.StatusCode == HttpStatusCode.Gone) throw new MediaException("media_expired_or_removed");
@@ -86,18 +87,28 @@ public sealed class MediaDownloader : IDisposable
             var mime = response.Content.Headers.ContentType?.MediaType?.ToLowerInvariant() ?? "";
             MediaFormats.EnsureType(mime, resource.Kind);
             if (response.Content.Headers.ContentLength > _maximum) throw new MediaException("media_too_large");
-            using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
-            using var cancelRead = timeout.Token.Register(() => input.Dispose());
-            using var output = new MemoryStream(); var buffer = new byte[65536];
-            while (true)
+            try
             {
-                var count = await input.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, _maximum + 1L - output.Length), timeout.Token).ConfigureAwait(false);
-                if (count == 0) break;
-                output.Write(buffer, 0, count);
-                if (output.Length > _maximum) throw new MediaException("media_too_large");
+                using var input = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+                using var cancelRead = timeout.Token.Register(() => input.Dispose());
+                using var output = new MemoryStream(); var buffer = new byte[65536];
+                while (true)
+                {
+                    timeout.Token.ThrowIfCancellationRequested();
+                    var count = await input.ReadAsync(buffer, 0, (int)Math.Min(buffer.Length, _maximum + 1L - output.Length), timeout.Token).ConfigureAwait(false);
+                    // 旧框架/宿主流可能将关闭报告为 EOF；取消后的局部字节不能成为成功产物。
+                    timeout.Token.ThrowIfCancellationRequested();
+                    if (count == 0) break;
+                    output.Write(buffer, 0, count);
+                    if (output.Length > _maximum) throw new MediaException("media_too_large");
+                }
+                if (output.Length == 0) throw new MediaException("media_empty_response");
+                return new MediaContent(output.ToArray(), mime);
             }
-            if (output.Length == 0) throw new MediaException("media_empty_response");
-            return new MediaContent(output.ToArray(), mime);
+            catch (Exception error) when (timeout.IsCancellationRequested && error is IOException or ObjectDisposedException or HttpRequestException)
+            { throw new OperationCanceledException(timeout.Token); }
+            catch (Exception error) when (error is IOException or HttpRequestException)
+            { throw new MediaException("media_download_failed"); }
         }
     }
     public void Dispose() { if (Interlocked.Exchange(ref _disposed, 1) != 0) return; _lifetime.Cancel(); _client.Dispose(); }
@@ -137,10 +148,7 @@ internal static class MediaFormats
     internal static MediaContent DecodeBase64(string value, string mime, MediaKind kind, int maximum)
     {
         EnsureType(mime, kind);
-        if (value.Length == 0 || value.Length > ((maximum + 2L) / 3) * 4 || value.Length % 4 != 0 || value.Any(char.IsWhiteSpace)) throw new MediaException("invalid_media_base64");
-        byte[] bytes;
-        try { bytes = Convert.FromBase64String(value); } catch (FormatException) { throw new MediaException("invalid_media_base64"); }
-        if (bytes.Length == 0 || bytes.Length > maximum || Convert.ToBase64String(bytes) != value) throw new MediaException("invalid_media_base64");
+        var bytes = DecodeBytes(value, maximum);
         if (kind == MediaKind.Image)
         {
             var valid = mime == "image/png" ? bytes.Length >= 8 && bytes.Take(8).SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) :
@@ -150,5 +158,13 @@ internal static class MediaFormats
             if (!valid) throw new MediaException("invalid_media_signature");
         }
         return new MediaContent(bytes, mime);
+    }
+    internal static byte[] DecodeBytes(string value, int maximum)
+    {
+        if (value.Length == 0 || value.Length > ((maximum + 2L) / 3) * 4 || value.Length % 4 != 0 || value.Any(char.IsWhiteSpace)) throw new MediaException("invalid_media_base64");
+        byte[] bytes;
+        try { bytes = Convert.FromBase64String(value); } catch (FormatException) { throw new MediaException("invalid_media_base64"); }
+        if (bytes.Length == 0 || bytes.Length > maximum || Convert.ToBase64String(bytes) != value) throw new MediaException("invalid_media_base64");
+        return bytes;
     }
 }

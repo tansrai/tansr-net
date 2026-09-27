@@ -126,7 +126,7 @@ internal sealed class LocalConversationState
         // 不覆盖另一个活跃写者；临时文件与目标在同目录，替换前 Flush 到磁盘。
         using var lease = new FileStream(path + ".lock", FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         CheckIdentity();
-        if ((File.Exists(path) ? Hash(File.ReadAllBytes(path)) : null) != expectedFileHash)
+        if (HashCurrentFile() != expectedFileHash)
             throw new InvalidOperationException("local_state_changed_by_another_instance");
         var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -142,6 +142,23 @@ internal sealed class LocalConversationState
     }
 
     private static string Text(JsonElement value, string name) => value.GetProperty(name).GetString() ?? "";
+    private string? HashCurrentFile()
+    {
+        if (!File.Exists(path)) return null;
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (stream.Length > MaximumBytes) throw new InvalidOperationException("local_state_too_large");
+        using var sha = SHA256.Create();
+        var block = new byte[65536]; long total = 0;
+        int count;
+        while ((count = stream.Read(block, 0, block.Length)) != 0)
+        {
+            total += count;
+            if (total > MaximumBytes) throw new InvalidOperationException("local_state_too_large");
+            sha.TransformBlock(block, 0, count, block, 0);
+        }
+        sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
+        return Convert.ToBase64String(sha.Hash!);
+    }
     private void CheckIdentity()
     { if (readIdentity != null && identity != readIdentity()) throw new InvalidOperationException("local_state_identity_changed"); }
     private static string NormalizeEndpoint(string endpoint)

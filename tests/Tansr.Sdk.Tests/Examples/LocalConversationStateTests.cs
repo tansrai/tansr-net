@@ -65,6 +65,30 @@ public sealed class LocalConversationStateTests
     }
 
     [Fact]
+    public void OversizedExternalReplacementDoesNotGetLoadedOrOverwriteTheOriginalUnknownInput()
+    {
+        using var fixture = new ContextFixture();
+        var state = new LocalConversationState(fixture.Path);
+        state.Save(ContextFixture.Endpoint, "session", "original draft", "original presentation");
+        state.SaveInput(new TurnInputRecord("session", "input", "epoch", "turn", "original input", "unconfirmed", null));
+        var original = state.Snapshot;
+        const long oversizedLength = 32L * 1024 * 1024 + 1;
+        using (var external = new FileStream(fixture.Path, FileMode.Create, FileAccess.Write, FileShare.None))
+        {
+            external.WriteByte(123); external.SetLength(oversizedLength); external.Flush(true);
+        }
+
+        var error = Assert.Throws<InvalidOperationException>(() => state.Save(ContextFixture.Endpoint, "session", "changed draft", "changed presentation"));
+        Assert.Equal("local_state_too_large", error.Message);
+        Assert.Same(original, state.Snapshot);
+        Assert.Equal("unconfirmed", state.Snapshot.Input!.Outcome);
+        Assert.Equal("original input", state.Snapshot.Input.Text);
+        using var preserved = new FileStream(fixture.Path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        Assert.Equal(oversizedLength, preserved.Length); Assert.Equal(123, preserved.ReadByte());
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(fixture.Path)!, "*.tmp"));
+    }
+
+    [Fact]
     public void TrustedUsersAtTheSameEndpointHaveSeparateDraftHistoryAndOriginalInput()
     {
         using var fixture = new ContextFixture();

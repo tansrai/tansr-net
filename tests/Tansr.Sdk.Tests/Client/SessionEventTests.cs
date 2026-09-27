@@ -43,6 +43,30 @@ public sealed class SessionEventTests
         public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
         protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
     }
+    private sealed class DisposeReleasedStream(byte[] bytes) : Stream
+    {
+        private readonly TaskCompletionSource<int> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource<bool> Reading { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public bool Disposed { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            Assert.True(bytes.Length <= count); bytes.CopyTo(buffer, offset); Reading.TrySetResult(true);
+            // An injected stream may ignore the token and finish normally when Dispose unblocks it.
+            return released.Task;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        { Disposed = true; released.TrySetResult(bytes.Length); base.Dispose(disposing); }
+    }
     private static HttpResponseMessage Json(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
     private static HttpResponseMessage Events(Stream stream) => new(HttpStatusCode.OK)
     { Content = new StreamContent(stream) { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } } };
@@ -109,6 +133,54 @@ public sealed class SessionEventTests
         Assert.All(handler.EventCursors, Assert.Null);
     }
 
+    [Theory]
+    [InlineData("message")]
+    [InlineData("control")]
+    [InlineData("gap")]
+    [InlineData("terminal")]
+    public async Task PrincipalChangeDuringObserverStopsBufferedFramesAndDoesNotAdvanceCursor(string firstKind)
+    {
+        var first = firstKind switch
+        {
+            "control" => "event: server.tool.request\nid: 1\ndata: {\"ts\":123,\"callId\":\"c\",\"name\":\"local\",\"args\":{}}\n\n",
+            "gap" => "event: server.replay.gap\ndata: {\"type\":\"server.replay.gap\",\"sessionId\":\"s\",\"reason\":\"evicted\"}\n\n",
+            "terminal" => Frame(1, "session.ended"),
+            _ => Frame(1, "msg.text.delta", ",\"text\":\"user-a-first\"")
+        };
+        var bytes = Encoding.UTF8.GetBytes(first + Frame(2, "session.ended"));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream(bytes, bytes.Length)));
+        var principal = "app/user-a";
+        var options = Options(); options.PrincipalProvider = () => principal;
+        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
+
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((item, _) =>
+        {
+            seen.Add(item); principal = "app/user-b"; return Task.CompletedTask;
+        }, new EventStreamOptions { StopOnGap = false }));
+
+        Assert.Equal("context_changed", error.Code);
+        Assert.Single(seen); Assert.Single(handler.EventCursors);
+        Assert.Equal(0, session.LastSequence);
+        Assert.DoesNotContain(handler.Paths, path => path.Contains("interrupt", StringComparison.Ordinal) || path.StartsWith("DELETE", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TicketRefreshForTheSamePrincipalPreservesBufferedEvents()
+    {
+        var bytes = Encoding.UTF8.GetBytes(Frame(1, "msg.text.delta", ",\"text\":\"one\"") + Frame(2, "session.ended"));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream(bytes, bytes.Length)));
+        var token = "ticket-original";
+        var options = Options(); options.PrincipalProvider = () => "app/user-a"; options.TokenProvider = _ => Task.FromResult(token);
+        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<string?>();
+
+        await session.ObserveAsync((item, _) => { seen.Add(item.Id); token = "ticket-renewed"; return Task.CompletedTask; });
+
+        Assert.Equal(new[] { "1", "2" }, seen); Assert.Equal(2, session.LastSequence);
+        Assert.Single(handler.EventCursors);
+    }
+
     [Fact]
     public async Task NamedControlPayloadIsPreservedAndGapIsNotInventedAsASequence()
     {
@@ -165,6 +237,39 @@ public sealed class SessionEventTests
         await waiting.Reading.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancel.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observe);
         Assert.True(waiting.Disposed); Assert.DoesNotContain(handler.Paths, p => p.Contains("interrupt", StringComparison.Ordinal) || p.StartsWith("DELETE", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task CancellationOrIdleExpiryCannotBecomeNormalDisposedStreamCompletion(bool callerCancels, bool returnsBytes)
+    {
+        using var stream = new DisposeReleasedStream(returnsBytes ? Encoding.UTF8.GetBytes(Frame(1, "session.ended")) : []);
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(stream));
+        var options = Options(); options.MaxReconnectAttempts = 0;
+        options.StreamIdleTimeout = callerCancels ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(30);
+        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
+        using var cancellation = new CancellationTokenSource();
+        var observe = session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; }, cancellation.Token);
+        await stream.Reading.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        if (callerCancels)
+        {
+            cancellation.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observe.WaitAsync(TimeSpan.FromSeconds(5)));
+        }
+        else
+        {
+            var error = await Assert.ThrowsAsync<TansrProtocolException>(() => observe.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.Equal("stream_idle_timeout", error.Code);
+        }
+
+        Assert.Empty(seen); Assert.Equal(0, session.LastSequence); Assert.True(stream.Disposed);
+        Assert.Single(handler.EventCursors);
+        Assert.DoesNotContain(handler.Paths, path => path.Contains("interrupt", StringComparison.Ordinal) || path.StartsWith("DELETE", StringComparison.Ordinal));
     }
 
     [Fact]

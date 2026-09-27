@@ -215,6 +215,31 @@ public sealed class WindowsSkillCatalogTests : IDisposable
         Assert.Equal(3, reads);
     }
 
+    [Fact]
+    public void CaseInsensitiveAliasesUseTheRegisteredIdentityForTrustRevocation()
+    {
+        var revoked = new HashSet<string>(StringComparer.Ordinal);
+        var authorizedNames = new List<string>();
+        var catalog = Catalog(new WindowsSkillCatalogOptions
+        {
+            Authorize = (name, _) =>
+            {
+                authorizedNames.Add(name);
+                if (revoked.Contains(name)) throw new WindowsSkillException("host_revoked");
+            }
+        });
+        var entry = Assert.Single(catalog.Index()); var resource = Assert.Single(entry.Resources);
+        Assert.Contains("审阅指导", catalog.Read("REVIEW", entry.DefinitionDigest).Content);
+        revoked.Add(entry.Name);
+
+        Assert.Equal("host_revoked", Assert.Throws<WindowsSkillException>(() => catalog.Read("REVIEW", entry.DefinitionDigest)).Code);
+        Assert.Equal("host_revoked", Assert.Throws<WindowsSkillException>(() =>
+            catalog.ReadResource("REVIEW", entry.DefinitionDigest, resource.RelativePath, resource.ContentDigest)).Code);
+        Assert.Equal("host_revoked", Assert.Throws<WindowsSkillException>(() =>
+            catalog.Assemble("REVIEW", entry.DefinitionDigest, new[] { resource.RelativePath })).Code);
+        Assert.All(authorizedNames, name => Assert.Equal(entry.Name, name));
+    }
+
     public void Dispose()
     {
         _workspace.Dispose(); Directory.Delete(_directory, true);

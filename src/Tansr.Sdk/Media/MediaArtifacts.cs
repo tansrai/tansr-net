@@ -101,7 +101,8 @@ public static class MediaArtifactParser
             }
             else if (resource.SourceKind == MediaSourceKind.InlineAudio)
             {
-                try { MediaFormats.DecodeBase64(resource.Value, resource.MimeType ?? "", MediaKind.Speech, 8 * 1024 * 1024); }
+                // 历史合同接受合法 audio/*，本机能否解码另由下载/预览处理，不丢弃已生成结果。
+                try { MediaFormats.DecodeBytes(resource.Value, 8 * 1024 * 1024); }
                 catch (MediaException) { return new HistoryMediaArtifact("invalid", "invalid_history_material", null); }
             }
         }
@@ -119,8 +120,8 @@ public static class MediaArtifactParser
                 (uri.Scheme != "https" && uri.Scheme != "http") || !string.IsNullOrEmpty(uri.UserInfo))) return false;
             if (audio.TryGetProperty("b64", out var rawBase64))
             {
-                if (rawBase64.ValueKind != JsonValueKind.String) return false;
-                try { MediaFormats.DecodeBase64(rawBase64.GetString()!, Text(audio, "mime") ?? "", MediaKind.Speech, 8 * 1024 * 1024); }
+                if (rawBase64.ValueKind != JsonValueKind.String || !ValidAudioMime(Text(audio, "mime"))) return false;
+                try { MediaFormats.DecodeBytes(rawBase64.GetString()!, 8 * 1024 * 1024); }
                 catch (MediaException) { return false; }
             }
             return Text(audio, "format") is { Length: <= 64 } && Text(audio, "mime") is { Length: <= 128 } && OptionalCount(audio, "durationMs") && OptionalCount(audio, "sampleRate");
@@ -128,6 +129,8 @@ public static class MediaArtifactParser
         var list = data.GetProperty(kind == MediaKind.Image ? "images" : "videos");
         return list.GetArrayLength() >= 1 && list.GetArrayLength() <= 16 && list.EnumerateArray().All(x => !string.IsNullOrEmpty(Text(x, "url")));
     }
+    private static bool ValidAudioMime(string? mime) => mime is { Length: > 6 and <= 128 } && mime.StartsWith("audio/", StringComparison.OrdinalIgnoreCase) &&
+        mime.Skip(6).All(c => c is >= 'a' and <= 'z' or >= 'A' and <= 'Z' or >= '0' and <= '9' or '.' or '+' or '-');
     private static bool OptionalCount(JsonElement data, string key) => !data.TryGetProperty(key, out var value) || value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) && !double.IsNaN(number) && !double.IsInfinity(number) && number >= 0;
     private static bool ValidHistoryCounts(JsonElement data, MediaKind kind)
     {

@@ -38,7 +38,8 @@ internal static class McpJson
 
     internal static void Validate(JsonElement message)
     {
-        if (message.ValueKind != JsonValueKind.Object || !message.TryGetProperty("jsonrpc", out var version) || version.GetString() != "2.0")
+        if (message.ValueKind != JsonValueKind.Object || !message.TryGetProperty("jsonrpc", out var version) ||
+            version.ValueKind != JsonValueKind.String || version.GetString() != "2.0")
             throw new McpException("invalid_message");
         bool method = message.TryGetProperty("method", out var methodValue);
         if (method)
@@ -59,7 +60,8 @@ internal static class McpJson
         Validate(message);
         if (message.TryGetProperty("error", out var error))
         {
-            if (error.ValueKind != JsonValueKind.Object || !error.TryGetProperty("code", out var code) || !code.TryGetInt32(out _)) throw new McpException("invalid_message");
+            if (error.ValueKind != JsonValueKind.Object || !error.TryGetProperty("code", out var code) ||
+                code.ValueKind != JsonValueKind.Number || !code.TryGetInt32(out _)) throw new McpException("invalid_message");
             throw new McpException("remote_error");
         }
         return message.GetProperty("result").Clone();

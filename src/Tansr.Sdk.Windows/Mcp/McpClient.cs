@@ -42,7 +42,7 @@ public sealed class McpClient : IMcpConnection, IDisposable
         McpClientOptions? options = null, CancellationToken cancellationToken = default)
     {
         options = ValidateOptions(options);
-        return InitializeAsync(new HttpMcpTransport(http, options.MaximumResponseBytes), options, cancellationToken);
+        return InitializeAsync(new HttpMcpTransport(http, options.MaximumResponseBytes, options.MaximumPendingRequests), options, cancellationToken);
     }
 
     private static async Task<McpClient> InitializeAsync(IMcpTransport transport, McpClientOptions options, CancellationToken cancellationToken)

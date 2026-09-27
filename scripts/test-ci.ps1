@@ -43,7 +43,7 @@ if (-not $RecoveryCliRoot) {
 Exclude-WindowsMethod 'Execution.WindowsExecutionBenchmarkTests.OriginalElectronAndServeShareSameFlushedCommandAndQpcCollector' 'Requires its existing Electron/Serve/QPC benchmark runner; not an ordinary unit test.'
 if (-not $PreviousPackageDirectory) { $scope.notRun += @{ name = 'Previous-package public API and upgrade/rollback'; reason = 'No approved previous package input. Never compare a new package to itself as compatibility evidence.' } }
 $filter = ($scope.excludedWindowsMethods | ForEach-Object { 'FullyQualifiedName!=' + $_.name }) -join '&'
-$steps = @('toolchain', 'node-version', 'contract', 'parity', 'parity-tests')
+$steps = @('toolchain', 'node-version', 'contract', 'parity', 'parity-tests', 'ci-receipt-tests')
 if ($CliRoot) { $steps += @('upstream-contract', 'upstream-parity', 'node-session-compatibility') }
 $steps += @('native-mcp-publish', 'locked-restore', 'release-build', 'core-tests', 'windows-tests', 'sandbox-golden', 'format', 'pack-core', 'pack-windows', 'package-notices', 'package-consumers', 'package-examples')
 if ($PreviousPackageDirectory) { $steps += 'public-api' }
@@ -75,14 +75,33 @@ function Invoke-CiStep([string]$Name, [string]$Executable, [string[]]$Arguments)
 }
 function Read-TestResult([string]$Name, [string]$Path, [switch]$RecordOnly) {
     [xml]$trx = Get-Content -LiteralPath $Path -Raw
-    $counters = $trx.SelectSingleNode("//*[local-name()='Counters']")
-    if (-not $counters) { throw "Missing test counters: $Name" }
-    $results = @($trx.SelectNodes("//*[local-name()='UnitTestResult']"))
-    $record = @{ name = $Name; path = $Path; sha256 = Hash-File $Path; total = [int]$counters.total; executed = [int]$counters.executed; passed = [int]$counters.passed; failed = [int]$counters.failed; notExecuted = [int]$counters.notExecuted
-        nonPassed = @($results | Where-Object { $_.outcome -ne 'Passed' } | ForEach-Object { @{ name = $_.testName; outcome = $_.outcome } }) }
+    $summaries = @($trx.SelectNodes("/*[local-name()='TestRun']/*[local-name()='ResultSummary']"))
+    if ($summaries.Count -ne 1) { throw "Missing or ambiguous test summary: $Name" }
+    $counters = @($summaries[0].SelectNodes("*[local-name()='Counters']"))
+    if ($counters.Count -ne 1) { throw "Missing or ambiguous test counters: $Name" }
+    $results = @($trx.SelectNodes("/*[local-name()='TestRun']/*[local-name()='Results']/*[local-name()='UnitTestResult']"))
+    $record = @{ name = $Name; path = $Path; sha256 = Hash-File $Path; summaryOutcome = $summaries[0].GetAttribute('outcome'); resultCount = $results.Count
+        nonPassed = @($results | Where-Object { $_.outcome -cne 'Passed' } | ForEach-Object { @{ name = $_.testName; outcome = $_.outcome } }) }
+    foreach ($key in @('total', 'executed', 'passed', 'failed', 'notExecuted')) {
+        $value = 0
+        if (-not [int]::TryParse($counters[0].GetAttribute($key), [Globalization.NumberStyles]::None, [Globalization.CultureInfo]::InvariantCulture, [ref]$value)) {
+            throw "Invalid test counter ${key}: $Name"
+        }
+        $record[$key] = $value
+    }
+    $actualPassed = @($results | Where-Object { $_.outcome -ceq 'Passed' }).Count
+    $actualFailed = @($results | Where-Object { $_.outcome -ceq 'Failed' }).Count
+    $actualNotExecuted = @($results | Where-Object { $_.outcome -ceq 'NotExecuted' }).Count
+    $record.resultsConsistent = $record.total -eq $results.Count -and $record.passed -eq $actualPassed -and
+        $record.failed -eq $actualFailed -and $record.notExecuted -eq $actualNotExecuted -and
+        $record.executed -eq ($results.Count - $actualNotExecuted)
     $manifest.tests += $record
     Save-Manifest
-    if (-not $RecordOnly -and ($record.total -eq 0 -or $record.executed -ne $record.total -or $record.passed -ne $record.total -or $record.nonPassed.Count)) { throw "$Name has unexecuted or failed cases; do not count them as passed." }
+    if (-not $RecordOnly -and (-not $record.resultsConsistent -or $record.total -eq 0 -or
+        $record.executed -ne $record.total -or $record.passed -ne $record.total -or $record.nonPassed.Count -or
+        @('Completed', 'Passed') -cnotcontains $record.summaryOutcome)) {
+        throw "$Name has inconsistent, unexecuted or failed results; do not count them as passed."
+    }
 }
 function Export-Evidence {
     # Explicit receipt/log/package allowlist. Never upload private NuGet caches or complete self-contained payloads.
@@ -142,6 +161,7 @@ try {
         Invoke-CiStep 'contract' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-contract.ps1'))
         Invoke-CiStep 'parity' 'node' @('scripts/check-parity.mjs')
         Invoke-CiStep 'parity-tests' 'node' @('--test', 'scripts/check-parity.test.mjs')
+        Invoke-CiStep 'ci-receipt-tests' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-ci-receipts.ps1'))
         if ($CliRoot) {
             Invoke-CiStep 'upstream-contract' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-contract.ps1'), '-SourceRoot', $CliRoot)
             Invoke-CiStep 'upstream-parity' 'node' @('scripts/check-parity.mjs', '--source-root', $CliRoot)

@@ -88,6 +88,21 @@ public sealed class McpClientTests
         await client.CloseAsync();
     }
 
+    [Theory]
+    [InlineData("{\"jsonrpc\":2,\"id\":$id,\"result\":{}}")]
+    [InlineData("{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{\"code\":\"bad\",\"message\":\"untrusted\"}}")]
+    [InlineData("[{\"jsonrpc\":{},\"id\":$id,\"result\":{}}]")]
+    public async Task MalformedResponseTypesUseStableProtocolErrors(string malformed)
+    {
+        using var server = new Server { RawToolResponse = malformed };
+        using var client = await McpClient.ConnectHttpAsync(server.Options());
+        Assert.Equal("invalid_message", (await Assert.ThrowsAsync<McpException>(() => client.RequestAsync("tools/call", Json("{}")))).Code);
+        Assert.Single(server.Requests, request => Method(request.Body) == "tools/call");
+        server.RawToolResponse = null;
+        var response = await client.RequestAsync("tools/call", Json("{}"));
+        Assert.Equal("hello", response.GetProperty("content")[0].GetProperty("text").GetString());
+    }
+
     [Fact]
     public async Task ToolBindingUsesFixedRemoteNameAndRejectsUnsupportedContent()
     {
@@ -243,6 +258,7 @@ public sealed class McpClientTests
         private readonly System.Collections.Concurrent.ConcurrentBag<Task> _clients = new();
         internal readonly System.Collections.Concurrent.ConcurrentQueue<Request> Requests = new();
         internal bool Sse, Redirect, StallTool, LargeToolResult, ExpireTool, DefinitionChanged;
+        internal string? RawToolResponse;
         internal Server() { _listener.Start(); _loop = AcceptAsync(); }
         internal McpHttpOptions Options()
         {
@@ -288,6 +304,7 @@ public sealed class McpClientTests
                     { await Respond(stream, "200 OK", "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"tools\":[{\"name\":\"forbidden\",\"inputSchema\":{}},{\"name\":\"allowed\",\"inputSchema\":" + (DefinitionChanged ? "{\"required\":[\"new-privilege\"]}" : "{}") + "}]}}"); return; }
                     if (StallTool) { await Task.Delay(Timeout.Infinite, _stop.Token); return; }
                     if (ExpireTool) { await Respond(stream, "404 Not Found", ""); return; }
+                    if (RawToolResponse != null) { await Respond(stream, "200 OK", RawToolResponse.Replace("$id", id, StringComparison.Ordinal)); return; }
                     string result = "{\"jsonrpc\":\"2.0\",\"id\":" + id + ",\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"" + (LargeToolResult ? new string('x', 2048) : "hello") + "\"}]}}";
                     if (Sse)
                     {

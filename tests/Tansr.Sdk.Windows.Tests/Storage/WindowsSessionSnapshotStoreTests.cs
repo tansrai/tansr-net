@@ -70,6 +70,43 @@ public sealed class WindowsSessionSnapshotStoreTests
         f.Current = f.Identity; Assert.Equal(first.Bytes, (await store.ReadAsync()).Snapshot!.Bytes);
     }
 
+    [Theory]
+    [InlineData("read", "scope")]
+    [InlineData("read", "cancel")]
+    [InlineData("write", "scope")]
+    [InlineData("write", "cancel")]
+    public async Task KeyProviderCallbackCannotReleaseOrCommitSnapshotAfterAuthorityChanges(string operation, string change)
+    {
+        using var f = new Fixture();
+        using var canceled = new CancellationTokenSource();
+        int reads = 0;
+        bool armed = false;
+        f.Key = new CallbackKey(f.Key, () =>
+        {
+            // On read: initial check, decryption, final check before returning.
+            // On write: initial check, encryption, check before COMMIT.
+            if (!armed || ++reads != 3) return;
+            if (change == "scope") f.Current = new("https://serve.test", "app", "changed", "session");
+            else canceled.Cancel();
+        });
+        using var store = f.Open();
+        var first = new SessionSnapshotCopy("original", Encoding.UTF8.GetBytes("original-user-snapshot"));
+        await store.WriteAsync(0, first); armed = true;
+        Func<Task> action = operation == "read"
+            ? () => store.ReadAsync(canceled.Token)
+            : () => store.WriteAsync(1, new("late", Encoding.UTF8.GetBytes("late-user-snapshot")), canceled.Token);
+        if (change == "scope")
+            Assert.Equal("context_changed", (await Assert.ThrowsAsync<StorageException>(action)).Code);
+        else
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(action);
+        Assert.Equal(3, reads);
+        armed = false; f.Current = f.Identity;
+        store.Dispose();
+        using var reopened = f.Open();
+        var restored = await reopened.ReadAsync();
+        Assert.Equal(1, restored.Revision); Assert.Equal(first.Bytes, restored.Snapshot!.Bytes);
+    }
+
     [Fact]
     public async Task LimitsAndDamagedCiphertextFailWithoutReplacingTheExistingCopy()
     {
@@ -101,6 +138,11 @@ public sealed class WindowsSessionSnapshotStoreTests
     {
         public string KeyId => "synthetic-snapshot-key";
         public byte[] ReadKey() => Enumerable.Repeat(marker, 32).ToArray();
+    }
+    private sealed class CallbackKey(IArchiveKeyProvider inner, Action beforeRead) : IArchiveKeyProvider
+    {
+        public string KeyId => inner.KeyId;
+        public byte[] ReadKey() { beforeRead(); return inner.ReadKey(); }
     }
     private sealed class Fixture : IDisposable
     {

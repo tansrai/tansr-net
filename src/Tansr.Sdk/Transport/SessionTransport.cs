@@ -156,6 +156,9 @@ internal sealed class SessionTransport : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 int count = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken).ConfigureAwait(false);
+                // Closing a response stream on cancellation can complete a pending read with EOF
+                // rather than an exception. Never accept the already buffered body in that case.
+                cancellationToken.ThrowIfCancellationRequested();
                 if (count == 0) return output.ToArray();
                 if (output.Length + count > maximum) throw new TansrProtocolException("response_too_large");
                 output.Write(buffer, 0, count);

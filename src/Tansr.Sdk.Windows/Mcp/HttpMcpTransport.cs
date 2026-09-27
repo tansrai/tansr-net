@@ -19,7 +19,7 @@ internal sealed class HttpMcpTransport : IMcpTransport
     private bool _closed;
     private Task? _close;
 
-    internal HttpMcpTransport(McpHttpOptions options, int maximumBytes)
+    internal HttpMcpTransport(McpHttpOptions options, int maximumBytes, int maximumPendingRequests)
     {
         if (options == null) throw new ArgumentNullException(nameof(options));
         _endpoint = options.Endpoint;
@@ -41,6 +41,9 @@ internal sealed class HttpMcpTransport : IMcpTransport
             UseCookies = false,
             UseProxy = false,
             UseDefaultCredentials = false,
+            // Each pending request may hold an SSE response while replying to a server
+            // request. Keep one bounded connection free for those replies on .NET Framework.
+            MaxConnectionsPerServer = maximumPendingRequests + 1,
             AutomaticDecompression = DecompressionMethods.None
         })
         { Timeout = Timeout.InfiniteTimeSpan };
@@ -73,6 +76,9 @@ internal sealed class HttpMcpTransport : IMcpTransport
         string? charset = response.Content.Headers.ContentType?.CharSet?.Trim('"');
         if (charset != null && !string.Equals(charset, "utf-8", StringComparison.OrdinalIgnoreCase)) throw new McpException("invalid_encoding");
         using var stream = await response.Content.ReadAsStreamAsync().ConfigureAwait(false);
+        // Framework's response stream does not observe cancellation after a read has
+        // begun. Closing the owned body also lets CloseAsync actually drain operations.
+        using var closeOnCancellation = linked.Token.Register(stream.Dispose);
         var reader = new BoundedBody(stream, _maximumBytes);
         if (string.Equals(type, "application/json", StringComparison.OrdinalIgnoreCase))
         {
@@ -195,9 +201,12 @@ internal sealed class HttpMcpTransport : IMcpTransport
         internal BoundedBody(Stream stream, int maximum) { _stream = stream; _maximum = maximum; }
         private async Task<int> ReadByteAsync(CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
             if (_position == _length)
             {
-                _length = await _stream.ReadAsync(_buffer, 0, _buffer.Length, token).ConfigureAwait(false); _position = 0;
+                try { _length = await _stream.ReadAsync(_buffer, 0, _buffer.Length, token).ConfigureAwait(false); }
+                catch (Exception) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }
+                token.ThrowIfCancellationRequested(); _position = 0;
                 if (_length == 0) return -1;
                 _total += _length; if (_total > _maximum) throw new McpException("response_limit");
             }

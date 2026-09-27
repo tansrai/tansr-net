@@ -200,11 +200,23 @@ public sealed class WindowsSessionSnapshotStore : ISessionSnapshotStore, IDispos
     }
     private void Check(CancellationToken token)
     {
+        CheckAuthority(token);
+        _parent?.Check(); _file?.Check(); if (_check != null) _cipher!.VerifyCheck(_check);
+        // VerifyCheck invokes the host key provider. Do not release an old user's
+        // snapshot or commit a write if that callback changed the trusted scope.
+        CheckAuthority(token);
+    }
+    private void CheckAuthority(CancellationToken token)
+    {
+        CheckState(token);
+        if (!Scope.Equals(_readScope())) throw new StorageException("context_changed");
+        CheckState(token);
+    }
+    private void CheckState(CancellationToken token)
+    {
         if (_closed) throw new ObjectDisposedException(nameof(WindowsSessionSnapshotStore));
         if (_poisoned) throw new StorageException("commit_unknown_reopen_required");
         token.ThrowIfCancellationRequested();
-        if (!Scope.Equals(_readScope())) throw new StorageException("context_changed");
-        _parent?.Check(); _file?.Check(); if (_check != null) _cipher!.VerifyCheck(_check);
     }
     private JsonElement CipherIdentity() => ArchiveSecurityJson.Build(writer =>
     {

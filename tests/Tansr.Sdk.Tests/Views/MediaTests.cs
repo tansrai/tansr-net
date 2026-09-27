@@ -41,6 +41,33 @@ public sealed class MediaTests
         Assert.Equal("invalid", MediaArtifactParser.ParseHistory(Json("{\"v\":1,\"state\":\"available\",\"kind\":\"speech\",\"data\":" + invalid + "}")).State);
     }
 
+    [Theory]
+    [InlineData("audio/aac")]
+    [InlineData("audio/opus")]
+    [InlineData("AUDIO/OPUS")]
+    public async Task ValidHistoryAudioIsRetainedEvenWhenTheLocalDownloaderCannotDecodeItsType(string mime)
+    {
+        var data = Speech.Replace("audio/wav", mime);
+        var history = MediaArtifactParser.ParseHistory(Json("{\"v\":1,\"state\":\"available\",\"kind\":\"speech\",\"data\":" + data + "}"));
+        Assert.Equal("available", history.State);
+        Assert.Equal(data, history.Artifact!.Data.GetRawText());
+        var resource = Assert.Single(history.Artifact.Resources);
+        Assert.Equal("AQID", resource.Value);
+        using var downloader = new MediaDownloader(new MediaDownloadOptions());
+        Assert.Equal("media_type_not_supported", (await Assert.ThrowsAsync<MediaException>(() => downloader.ReadAsync(resource))).Code);
+        Assert.Equal("available", history.State);
+    }
+
+    [Theory]
+    [InlineData("text/plain", "AQID")]
+    [InlineData("audio/opus\r\n", "AQID")]
+    [InlineData("audio/opus", "AQJ=")]
+    public void HistoricalAudioValidationStillRejectsNonAudioAndNoncanonicalBase64(string mime, string base64)
+    {
+        var input = JsonSerializer.Serialize(new { v = 1, state = "available", kind = "speech", data = new { model = "m", billedChars = 1, audio = new { mime, b64 = base64, format = "opus" } } });
+        Assert.Equal("invalid", MediaArtifactParser.ParseHistory(Json(input)).State);
+    }
+
     [Fact]
     public async Task DownloaderUsesSeparateUnauthenticatedExactHostTransportAndCachesOnlyBytes()
     {

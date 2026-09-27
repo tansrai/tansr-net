@@ -82,6 +82,9 @@ public sealed partial class TansrClient
             foreach (var frame in decoder.Feed(bytes, count))
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                // One read may contain several frames. A callback can change the trusted
+                // principal before the next frame, so a read-level check is insufficient.
+                transport.AssertCurrent(access);
                 if (frame.Data.Length == 0 && frame.Name is null && frame.Id is null) continue;
                 var value = SessionJson.Parse(Encoding.UTF8.GetBytes(frame.Data));
                 if (frame.Name == "server.replay.gap")
@@ -89,6 +92,7 @@ public sealed partial class TansrClient
                     if (SessionJson.String(value, "type") != frame.Name || SessionJson.String(value, "sessionId") != session.Id || frame.Id is not null)
                         throw new TansrProtocolException("invalid_response");
                     await NotifyAsync(observer, new AgentEvent(frame.Name, null, value), cancellationToken).ConfigureAwait(false);
+                    transport.AssertCurrent(access);
                     if (stopOnGap) throw new TansrProtocolException("event_replay_gap");
                     if (value.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String && reason.GetString() == "ahead_of_log")
                     { cursor.Sequence = -1; cursor.Id = null; }
@@ -119,6 +123,7 @@ public sealed partial class TansrClient
                 if (sequence <= cursor.Sequence) continue;
                 // 仅在消费者成功处理后推进其独立游标；其他订阅不消费本订阅队列。
                 await NotifyAsync(observer, new AgentEvent(name, frame.Id, normalized), cancellationToken).ConfigureAwait(false);
+                transport.AssertCurrent(access);
                 cursor.Sequence = sequence; cursor.Id = frame.Id; session.ObserveSequence(sequence);
                 if (name == "session.ended") return true;
             }
@@ -152,7 +157,14 @@ public sealed partial class TansrClient
         using var idle = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         idle.CancelAfter(streamIdleTimeout);
         using var closeOnIdle = idle.Token.Register(stream.Dispose);
-        try { return await stream.ReadAsync(bytes, 0, bytes.Length, idle.Token).ConfigureAwait(false); }
+        try
+        {
+            var count = await stream.ReadAsync(bytes, 0, bytes.Length, idle.Token).ConfigureAwait(false);
+            // Disposing a stream can complete its pending read normally. Preserve cancellation
+            // or idle expiry instead of treating that completion as EOF or fresh event bytes.
+            idle.Token.ThrowIfCancellationRequested();
+            return count;
+        }
         catch (Exception) when (cancellationToken.IsCancellationRequested) { throw new OperationCanceledException(cancellationToken); }
         catch (Exception) when (idle.IsCancellationRequested) { throw new TansrProtocolException("stream_idle_timeout"); }
         catch (IOException) { throw new TansrProtocolException("network_error"); }

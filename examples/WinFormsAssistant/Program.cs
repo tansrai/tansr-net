@@ -106,7 +106,19 @@ internal sealed class AssistantForm : Form
         _textMode.SelectedIndexChanged += (_, _) => UpdateDelivery();
         _thinkingMode.SelectedIndexChanged += (_, _) => UpdateDelivery();
         _draft.TextChanged += (_, _) => { _draftRevision++; _saveTimer.Start(); };
-        _saveTimer.Tick += async (_, _) => { _saveTimer.Stop(); if (_busy) { _saveTimer.Start(); return; } try { await SelectPresentationAsync(); SaveLocal(); } catch (Exception error) { _status.Text = "本机保存失败，草稿仍在编辑器：" + ErrorText(error); } };
+        _saveTimer.Tick += async (_, _) =>
+        {
+            _saveTimer.Stop();
+            if (_busy) { _saveTimer.Start(); return; }
+            // A changed trusted identity may require asynchronous detach. Use
+            // the same command gate so a user action cannot detach twice.
+            await RunAsync(() =>
+            {
+                try { SaveLocal(); }
+                catch (Exception error) { _status.Text = "本机保存失败，草稿仍在编辑器：" + ErrorText(error); }
+                return Task.CompletedTask;
+            }, false);
+        };
         if (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") is { Length: > 0 } configuredEndpoint) _endpoint.Text = configuredEndpoint;
         try
         {
@@ -221,7 +233,7 @@ internal sealed class AssistantForm : Form
         _nativeTools = new NativeToolHost(session, "Tansr.WinForms", (title, ct) =>
         {
             if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) throw new InvalidOperationException("local_state_identity_changed");
-            return SetWindowTitleAsync(title, ct);
+            return SetWindowTitleAsync(title, ct, () => IsCurrentPresentation(session, sessionLocal, sessionEndpoint));
         }, code => { if (!IsDisposed) BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) _status.Text = code; })); }, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
         try { await _nativeTools.Ready; }
         catch { await DetachAsync(); throw; }
@@ -570,13 +582,18 @@ internal sealed class AssistantForm : Form
         finally { _closing = false; }
     }
     private static string? Empty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
-    private Task SetWindowTitleAsync(string title, CancellationToken token)
+    private Task SetWindowTitleAsync(string title, CancellationToken token, Func<bool> isCurrentPresentation)
     {
         var done = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         if (IsDisposed) return Task.FromException(new ObjectDisposedException(nameof(AssistantForm)));
         BeginInvoke(new Action(() =>
         {
-            try { token.ThrowIfCancellationRequested(); Text = title; done.TrySetResult(true); }
+            try
+            {
+                token.ThrowIfCancellationRequested();
+                if (!isCurrentPresentation()) throw new InvalidOperationException("local_state_identity_changed");
+                Text = title; done.TrySetResult(true);
+            }
             catch (OperationCanceledException) { done.TrySetCanceled(); }
             catch (Exception error) { done.TrySetException(error); }
         }));

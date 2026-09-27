@@ -166,7 +166,13 @@ public sealed class WindowsSkillCatalog
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (Volatile.Read(ref _revoked) != 0) throw new WindowsSkillException("trust_revoked");
-        if (name != null) _authorize?.Invoke(name, cancellationToken);
+        if (name != null)
+        {
+            // Lookup permits case-insensitive aliases, but trust belongs to the registered
+            // skill identity. An alias must not bypass a host's per-skill revocation.
+            var registered = _descriptors.FirstOrDefault(value => string.Equals(value.Name, name, StringComparison.OrdinalIgnoreCase));
+            _authorize?.Invoke(registered?.Name ?? name, cancellationToken);
+        }
         cancellationToken.ThrowIfCancellationRequested();
         if (Volatile.Read(ref _revoked) != 0) throw new WindowsSkillException("trust_revoked");
     }
