@@ -17,13 +17,50 @@ internal sealed class WindowsAudioRecorder : IDisposable
     private string? _failure;
     internal bool LimitReached { get; private set; }
 
-    internal WindowsAudioRecorder()
+    internal sealed class InputDevice
+    {
+        internal static InputDevice SystemDefault { get; } = new(uint.MaxValue, "系统默认（由 Windows 选择）", null);
+        internal uint Id { get; }
+        public string Name { get; }
+        private readonly WaveInputCapabilities? _capabilities;
+        private InputDevice(uint id, string name, WaveInputCapabilities? capabilities) { Id = id; Name = name; _capabilities = capabilities; }
+        internal static InputDevice FromCapabilities(uint id, WaveInputCapabilities capabilities) => new(id, capabilities.Name + " [" + id + "]", capabilities);
+        internal bool Matches(WaveInputCapabilities capabilities) => _capabilities is WaveInputCapabilities expected &&
+            expected.Manufacturer == capabilities.Manufacturer && expected.Product == capabilities.Product && expected.Version == capabilities.Version &&
+            expected.Name == capabilities.Name && expected.Formats == capabilities.Formats && expected.Channels == capabilities.Channels;
+        public override string ToString() => Name;
+    }
+
+    // 只枚举，不打开或启动输入设备。设备号不持久化；每次录音前后重新核对所选设备。
+    internal static IReadOnlyList<InputDevice> EnumerateInputDevices()
     {
         if (Environment.OSVersion.Platform != PlatformID.Win32NT) throw new PlatformNotSupportedException("recording_requires_windows");
+        var devices = new List<InputDevice>();
+        var count = waveInGetNumDevs();
+        for (uint id = 0; id < count; id++)
+            if (waveInGetDevCaps(new UIntPtr(id), out var capabilities, (uint)Marshal.SizeOf(typeof(WaveInputCapabilities))) == 0)
+                devices.Add(InputDevice.FromCapabilities(id, capabilities));
+        return devices;
+    }
+
+    internal WindowsAudioRecorder(InputDevice? input = null)
+    {
+        if (Environment.OSVersion.Platform != PlatformID.Win32NT) throw new PlatformNotSupportedException("recording_requires_windows");
+        input ??= InputDevice.SystemDefault;
+        if (input.Id != uint.MaxValue)
+        {
+            Check(waveInGetDevCaps(new UIntPtr(input.Id), out var capabilities, (uint)Marshal.SizeOf(typeof(WaveInputCapabilities))), "recording_device_unavailable");
+            if (!input.Matches(capabilities)) throw new InvalidOperationException("recording_device_changed");
+        }
         var format = new WaveFormat { FormatTag = 1, Channels = 1, SamplesPerSec = 16000, AvgBytesPerSec = 32000, BlockAlign = 2, BitsPerSample = 16 };
-        Check(waveInOpen(out _device, new UIntPtr(uint.MaxValue), ref format, IntPtr.Zero, IntPtr.Zero, 0), "recording_device_unavailable");
+        Check(waveInOpen(out _device, new UIntPtr(input.Id), ref format, IntPtr.Zero, IntPtr.Zero, 0), "recording_device_unavailable");
         try
         {
+            if (input.Id != uint.MaxValue)
+            {
+                Check(waveInGetOpenedDeviceCaps(_device, out var capabilities, (uint)Marshal.SizeOf(typeof(WaveInputCapabilities))), "recording_device_unavailable");
+                if (!input.Matches(capabilities)) throw new InvalidOperationException("recording_device_changed");
+            }
             for (var i = 0; i < 4; i++)
             {
                 var data = Marshal.AllocHGlobal(4096); var header = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(WaveHeader)));
@@ -115,10 +152,22 @@ internal sealed class WindowsAudioRecorder : IDisposable
         }
     }
     private static void Check(uint result, string code) { if (result != 0) throw new InvalidOperationException(code + ":" + result); }
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    internal struct WaveInputCapabilities
+    {
+        internal ushort Manufacturer, Product;
+        internal uint Version;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] internal string Name;
+        internal uint Formats;
+        internal ushort Channels, Reserved;
+    }
     [StructLayout(LayoutKind.Sequential, Pack = 2)]
     private struct WaveFormat { internal ushort FormatTag, Channels; internal uint SamplesPerSec, AvgBytesPerSec; internal ushort BlockAlign, BitsPerSample, ExtraSize; }
     [StructLayout(LayoutKind.Sequential)]
     private struct WaveHeader { internal IntPtr Data; internal uint BufferLength, BytesRecorded; internal IntPtr User; internal uint Flags, Loops; internal IntPtr Next, Reserved; }
+    [DllImport("winmm.dll")] private static extern uint waveInGetNumDevs();
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode)] private static extern uint waveInGetDevCaps(UIntPtr deviceId, out WaveInputCapabilities capabilities, uint size);
+    [DllImport("winmm.dll", CharSet = CharSet.Unicode, EntryPoint = "waveInGetDevCapsW")] private static extern uint waveInGetOpenedDeviceCaps(IntPtr device, out WaveInputCapabilities capabilities, uint size);
     [DllImport("winmm.dll")] private static extern uint waveInOpen(out IntPtr handle, UIntPtr deviceId, ref WaveFormat format, IntPtr callback, IntPtr instance, uint flags);
     [DllImport("winmm.dll")] private static extern uint waveInPrepareHeader(IntPtr handle, IntPtr header, uint size);
     [DllImport("winmm.dll")] private static extern uint waveInUnprepareHeader(IntPtr handle, IntPtr header, uint size);

@@ -534,7 +534,13 @@ internal sealed class AssistantWindow : Window
         if (_memoryDevice != null) { _status.Text = "设备仍领取记忆操作。请先在控制端核对记忆工作，再显式停止设备后退出；窗口关闭不冒充远端排空。"; return; }
         if (_busy) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
         _closing = true;
-        try { await CloseConnectionAsync(); _saveTimer.Stop(); _closed = true; Close(); }
+        try
+        {
+            // An already detached/closed session can finish cleanup synchronously.
+            // Leave this cancelled Closing callback before asking WPF to close again.
+            await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
+            await CloseConnectionAsync(); _saveTimer.Stop(); _closed = true; Close();
+        }
         catch (Exception error) { _status.Text = "关闭未确认，可重试或选择“仅断开本机连接”后退出：" + ErrorText(error); }
         finally { _closing = false; }
     }

@@ -18,6 +18,7 @@ internal sealed class MediaWindow : Window
     private CancellationTokenSource? _operation;
     private readonly ListBox _items = new() { Width = 350 };
     private readonly ComboBox _asr = new() { MinWidth = 180 };
+    private readonly ComboBox _recordingDevice = new() { MinWidth = 320 };
     private readonly ComboBox _model = new() { MinWidth = 180 };
     private readonly ComboBox _voice = new() { MinWidth = 100 };
     private readonly ComboBox _format = new() { MinWidth = 75 };
@@ -38,13 +39,16 @@ internal sealed class MediaWindow : Window
         AutomationProperties.SetAutomationId(_status, "MediaStatus"); AutomationProperties.SetAutomationId(_image, "MediaImage");
         AutomationProperties.SetAutomationId(_player, "MediaPlayer");
         AutomationProperties.SetAutomationId(_model, "MediaSpeechModel"); AutomationProperties.SetAutomationId(_asr, "MediaTranscriptionModel");
+        AutomationProperties.SetAutomationId(_recordingDevice, "MediaRecordingDevice");
+        AutomationProperties.SetName(_recordingDevice, "录音输入设备");
         AutomationProperties.SetAutomationId(_segment, "MediaAllowSegmentation");
         if (workspace.Speech != null) _text.Text = workspace.Speech.Plan.Text;
         Title = "媒体 · 原生预览 / 转写 / 分段朗读"; Width = 1100; Height = 760;
         var layout = new DockPanel { Margin = new Thickness(12) }; Content = layout;
         var controls = new StackPanel(); DockPanel.SetDock(controls, Dock.Top); layout.Children.Add(controls);
         controls.Children.Add(new TextBlock { Text = "下载主机来自 TANSR_MEDIA_HOSTS（逗号分隔）；空名单只允许内嵌材料。ASR 只回填草稿，不自动发送。系统缺少媒体解码器时可保存后在支持的播放器打开。", TextWrapping = TextWrapping.Wrap });
-        controls.Children.Add(Row(Button("刷新模型目录", CatalogAsync), _asr, Button("音频文件转草稿", FileAsrAsync), Button("开始麦克风录音", StartRecordingAsync), Button("停止并转草稿", FinishRecordingAsync)));
+        controls.Children.Add(Row(Button("刷新模型目录", CatalogAsync), _asr, Button("音频文件转草稿", FileAsrAsync)));
+        controls.Children.Add(Row(new TextBlock { Text = "录音输入（先选择，点击开始才采集）" }, _recordingDevice, Button("刷新录音设备", RecordingDevicesAsync), Button("开始麦克风录音", StartRecordingAsync), Button("停止并转草稿", FinishRecordingAsync)));
         controls.Children.Add(Row(_model, _voice, _format, _segment)); controls.Children.Add(_text);
         controls.Children.Add(Row(Button("建立新朗读批次", PrepareAsync), Button("合成 / 续合下一段", SpeakNextAsync), Button("恢复历史媒体", async () => { await _workspace.LoadHistoryAsync(Token); Refresh(); }), Button("刷新产物", () => { Refresh(); return Task.CompletedTask; })));
         var cancel = new Button { Content = "取消当前媒体请求", Margin = new Thickness(3), Padding = new Thickness(8, 4, 8, 4) };
@@ -52,7 +56,7 @@ internal sealed class MediaWindow : Window
         cancel.Click += (_, _) =>
         {
             _operation?.Cancel();
-            if (_recorder != null) { _recorder.Dispose(); _recorder = null; _status.Text = "录音已取消并丢弃，未上传或转写。"; }
+            if (_recorder != null) { _recorder.Dispose(); _recorder = null; _recordingDevice.IsEnabled = true; _status.Text = "录音已取消并丢弃，未上传或转写。"; }
         };
         controls.Children.Add(cancel);
         var bottom = new StackPanel(); DockPanel.SetDock(bottom, Dock.Bottom); layout.Children.Add(bottom);
@@ -63,7 +67,7 @@ internal sealed class MediaWindow : Window
         _model.SelectionChanged += (_, _) => SelectModel();
         _player.MediaFailed += (_, e) => _status.Text = "系统媒体解码失败：" + e.ErrorException.GetType().Name + "；可保存产物。";
         Closed += (_, _) => { _closed = true; _stop.Cancel(); _operation?.Cancel(); _recorder?.Dispose(); _recorder = null; _player.Close(); _image.Source = null; };
-        Loaded += async (_, _) => await RunAsync(CatalogAsync);
+        Loaded += async (_, _) => await RunAsync(async () => { await RecordingDevicesAsync(); await CatalogAsync(); });
         Refresh();
     }
     private CancellationToken Token => _operation?.Token ?? _stop.Token;
@@ -94,11 +98,23 @@ internal sealed class MediaWindow : Window
         var draft = await _workspace.TranscribeAsync(bytes, mime, model, Token); if (!_closed) { _draft(draft); _text.Text = draft; _status.Text = "转写已加入主窗口草稿，未发送。"; }
     }
     private Task StartRecordingAsync()
-    { _ = AsrModel; if (_recorder != null) throw new MediaException("recording_already_started"); _recorder = new WindowsAudioRecorder(); _status.Text = "录音中，16kHz 单声道 WAV，最多 120 秒；点击停止并转草稿。"; return Task.CompletedTask; }
+    {
+        _ = AsrModel; if (_recorder != null) throw new MediaException("recording_already_started");
+        var input = _recordingDevice.SelectedItem as WindowsAudioRecorder.InputDevice ?? throw new MediaException("recording_device_selection_required");
+        _recorder = new WindowsAudioRecorder(input); _recordingDevice.IsEnabled = false;
+        _status.Text = input.Name + "：录音中，16kHz 单声道 WAV，最多 120 秒；点击停止并转草稿。"; return Task.CompletedTask;
+    }
+    private Task RecordingDevicesAsync()
+    {
+        if (_recorder != null) throw new MediaException("recording_already_started");
+        _recordingDevice.ItemsSource = new[] { WindowsAudioRecorder.InputDevice.SystemDefault }.Concat(WindowsAudioRecorder.EnumerateInputDevices()).ToArray();
+        _recordingDevice.SelectedIndex = -1;
+        _status.Text = "请选择录音输入；刷新和选择不会采集，也不改变系统默认设备。"; return Task.CompletedTask;
+    }
     private async Task FinishRecordingAsync()
     {
         var recorder = _recorder ?? throw new MediaException("recording_not_started"); _recorder = null;
-        byte[] bytes; try { bytes = await recorder.StopAsync(); } finally { recorder.Dispose(); }
+        byte[] bytes; try { bytes = await recorder.StopAsync(); } finally { recorder.Dispose(); _recordingDevice.IsEnabled = true; }
         var draft = await _workspace.TranscribeAsync(bytes, "audio/wav", AsrModel, Token); if (!_closed) { _draft(draft); _text.Text = draft; _status.Text = "录音转写已加入草稿，未发送。"; }
     }
     private Task PrepareAsync()

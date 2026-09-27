@@ -80,7 +80,7 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 
 `RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。Windows 正确性门不接受依赖缺失造成的跳过；同机 Electron 时序性能测试单独准备并记录，尚未运行时不能关闭对应性能验收。
 
-2026-09-27 的本地包消费使用源码 `83f99f8`，同一对包已通过 net48 CLR4 WinForms、现代控制台、WPF self-contained 与核心 Native AOT 的实际运行，并完成安装／升级／回滚／卸载演练。消费进程的 PATH 中无 Node；当前身份为管理员，不能据此宣称已通过干净普通用户验收。真实 HTTP、界面与跨端结果另列于[开发记录](doc/development.md)，不以本地包运行替代这些门。
+本地候选包的消费范围包括 net48 CLR4 WinForms、现代控制台、WPF self-contained 和核心 Native AOT；消费进程不依赖 PATH 中的 Node。安装／升级／回滚／卸载、普通用户权限及文件／密钥隔离各有独立验收，普通用户环境为现有 Windows 主机的新用户配置。每个候选的源码、包指纹、实际结果及剩余条件统一见[开发记录](doc/development.md)，不将旧候选的结果冒充新包实证；正式 NuGet 发布尚未完成。
 
 ## English
 
@@ -92,4 +92,4 @@ Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the app
 
 This is an unpublished development candidate. It uses the existing REST/SSE and SDK2 contracts. New terminal streaming, memory management and dynamic control contracts are not exposed as stable APIs before Serve and .NET agree on the same schema and fixtures. The examples document their actual capabilities and remaining gaps; successful compilation is not a claim of full Electron parity. See the development record for commands, evidence and release status.
 
-Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). The independent package gate runs .NET Framework WinForms, a modern console, self-contained WPF and optional core Native AOT consumers with Node absent from their PATH. This is evidence about these processes; it does not pretend that Node was uninstalled from the host or that a clean standard-user operating system was tested.
+Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). Local package gates cover .NET Framework WinForms, a modern console, self-contained WPF and core Native AOT without Node on the consumer process PATH. Installation, upgrade, rollback, uninstall and standard-user file/key isolation have separate evidence. The standard-user environment is a fresh profile on the existing Windows host. Consult the [development record](doc/development.md) for each candidate's exact source, package hashes, results and remaining gates; an earlier package's result does not certify a later package. Formal NuGet publication is still pending.

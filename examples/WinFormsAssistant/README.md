@@ -17,6 +17,8 @@ dotnet build examples/WinFormsAssistant/WinFormsAssistant.csproj -c Release
 本轮已接同轮输入编辑器、自动本机草稿及离线呈现回看，公开 preview 的模型/思考与记忆控制有独立原生窗口。原输入键与目标在发送前保存，未知结果只查原键；输入不截断，不取消/重建会话。WinForms 草稿解除默认32767字符限制，协议上限仍明确拒绝超量而不裁剪。文件位置、可信scope装配及回执恢复操作见 [共享说明](../Shared/session-controls.md)。未配置preview时明确显示未启用。
 媒体窗口通过公开 `TranscribeAsync` / `SpeakAsync` 接真实 Serve：音频文件或 WinMM 麦克风录音（16kHz 单声道 WAV，120秒上限）转写后只加入草稿；模型、音色、格式和输入限额来自 `meta.media` 目录。朗读先规划，明确允许分段后逐段合成与续合；成功片段缓存，不重新计费，未知结果停止本批次，创建新批次须明确确认。
 
+录音前先在“录音输入设备”中选择输入，也可明确选择“系统默认（由 Windows 选择）”。打开窗口、刷新和选择均不采集，只有点击“开始录音”才启动；示例不改变系统默认设备，也不持久化可能随插拔变化的设备编号。所选设备变化时拒绝开始，请刷新后重选。“停止并转草稿”通过原录音器生成 WAV，再做 ASR 并回填草稿，不自动提交消息；取消录音则丢弃且不上传。文件 ASR 成功不等于录音链验收通过；虚拟设备录音也不代表人声识别准确率或音频环回已验证。
+
 实时结构化图片、视频、音频与转写产物可原生预览、停止和保存；WPF 使用 Image/MediaElement，WinForms 使用 PictureBox/Windows MCI。系统缺少解码器时显示实际错误并允许保存，不宣称跨系统解码器一致。历史按冻结 `tool_result.artifact` 恢复；无材料、历史裁剪和失效 URL 留可见状态，不从文本猜链接。SDK 下载组件默认不访问外链；通过宿主环境 `TANSR_MEDIA_HOSTS=cdn.example.com,other.example.com` 精确授权 HTTPS 主机，不带会话认证、不跟重定向、不读远端 path。音频输入最多16MiB，下载最多256MiB，本次会话呈现最多256项，缓存退出清理；用户保存的文件保留。
 
 可选本地 Serve 使用同一 `ExampleConnection`：配置 `TANSR_LOCAL_SERVE_EXE`（受信独立CLI/Serve安装物）、`TANSR_LOCAL_SERVE_SHA256`、`TANSR_LOCAL_WORKSPACE`；可选 `TANSR_LOCAL_SERVE_PORT`，专用Serve入口用 `TANSR_LOCAL_SERVE_DIRECT=1`。需要透传的运行环境名称必须逐个列入 `TANSR_LOCAL_ENV_NAMES`；随机 Serve token 由SDK管理，不使用票据输入框，不打印密钥。此模式会启动本机子进程，退出等待回收；“仅断开本机连接”仍会停止本实例拥有的本地Serve进程，远端Serve模式不会停止远端服务。安装、自动下载和升级UI仍未实现。

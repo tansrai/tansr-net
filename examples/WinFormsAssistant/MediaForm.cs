@@ -1,8 +1,7 @@
 using System.Drawing;
 using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
+using System.Windows.Forms.Integration;
 using Tansr.Examples;
 using Tansr.Sdk.Media;
 using Tansr.Sdk.Sessions;
@@ -17,39 +16,42 @@ internal sealed class MediaForm : Form
     private CancellationTokenSource? _operation;
     private readonly ListBox _items = new() { Dock = DockStyle.Left, Width = 350, HorizontalScrollbar = true };
     private readonly ComboBox _asr = Choice(180), _model = Choice(180), _voice = Choice(130), _format = Choice(80);
+    private readonly ComboBox _recordingDevice = Choice(340);
     private readonly CheckBox _segment = new() { Text = "允许分段（多次计费）", AutoSize = true };
     private readonly TextBox _text = new() { Multiline = true, ScrollBars = ScrollBars.Vertical, Height = 90, Width = 980 };
     private readonly Label _status = new() { Dock = DockStyle.Bottom, Height = 52 };
-    private readonly Panel _video = new() { Dock = DockStyle.Fill, BackColor = Color.Black };
+    private readonly ElementHost _video = new() { Dock = DockStyle.Fill, BackColor = Color.Black };
     private readonly PictureBox _image = new() { Dock = DockStyle.Fill, SizeMode = PictureBoxSizeMode.Zoom, Visible = false };
     private readonly List<Button> _actions = new();
-    private readonly string _alias = "tansr" + Guid.NewGuid().ToString("N");
+    private Action? _closePlayer;
     private WindowsAudioRecorder? _recorder;
-    private bool _busy, _closed, _playing;
+    private bool _busy, _closed;
     internal MediaForm(MediaWorkspace workspace, Action<string> draft, string text)
     {
         _workspace = workspace; _draft = draft; _text.Text = text; Text = "媒体 · 原生预览 / 转写 / 分段朗读"; Width = 1100; Height = 760; Padding = new Padding(10);
         Name = "MediaWindow"; _items.Name = "MediaItems"; _text.Name = "MediaText"; _status.Name = "MediaStatus";
         _image.Name = "MediaImage"; _video.Name = "MediaPlayer";
         _model.Name = "MediaSpeechModel"; _asr.Name = "MediaTranscriptionModel"; _segment.Name = "MediaAllowSegmentation";
+        _recordingDevice.Name = "MediaRecordingDevice"; _recordingDevice.AccessibleName = "录音输入设备";
         if (workspace.Speech != null) _text.Text = workspace.Speech.Plan.Text;
         var top = new FlowLayoutPanel { AutoSize = true, Dock = DockStyle.Top, FlowDirection = FlowDirection.TopDown, WrapContents = false };
         top.Controls.Add(new Label { Text = "媒体下载主机来自 TANSR_MEDIA_HOSTS；空名单只允许内嵌材料。ASR 只回填草稿。播放使用 Windows 媒体组件，缺少解码器时仍可保存。", AutoSize = true, MaximumSize = new Size(1000, 0) });
-        top.Controls.Add(Row(Button("刷新模型目录", CatalogAsync), _asr, Button("音频文件转草稿", FileAsrAsync), Button("开始录音", StartRecordingAsync), Button("停止并转草稿", FinishRecordingAsync)));
+        top.Controls.Add(Row(Button("刷新模型目录", CatalogAsync), _asr, Button("音频文件转草稿", FileAsrAsync)));
+        top.Controls.Add(Row(new Label { Text = "录音输入（先选择）", AutoSize = true }, _recordingDevice, Button("刷新录音设备", RecordingDevicesAsync), Button("开始录音", StartRecordingAsync), Button("停止并转草稿", FinishRecordingAsync)));
         top.Controls.Add(Row(_model, _voice, _format, _segment)); top.Controls.Add(_text);
         top.Controls.Add(Row(Button("建立新朗读批次", PrepareAsync), Button("合成 / 续合下一段", SpeakNextAsync), Button("恢复历史媒体", async () => { await _workspace.LoadHistoryAsync(Token); RefreshItems(); }), Button("刷新产物", () => { RefreshItems(); return Task.CompletedTask; })));
         var cancel = new Button { Name = "MediaCancel", Text = "取消当前媒体请求", AutoSize = true };
         cancel.Click += (_, _) =>
         {
             _operation?.Cancel();
-            if (_recorder != null) { _recorder.Dispose(); _recorder = null; _status.Text = "录音已取消并丢弃，未上传或转写。"; }
+            if (_recorder != null) { _recorder.Dispose(); _recorder = null; _recordingDevice.Enabled = true; _status.Text = "录音已取消并丢弃，未上传或转写。"; }
         };
         top.Controls.Add(cancel);
         var bottom = Row(Button("预览选中产物", PreviewAsync), Button("保存选中产物", SaveAsync), Button("停止播放", () => { StopPlayer(); return Task.CompletedTask; })); bottom.Dock = DockStyle.Bottom;
         Controls.Add(_video); Controls.Add(_image); Controls.Add(_items); Controls.Add(bottom); Controls.Add(_status); Controls.Add(top);
-        _model.SelectedIndexChanged += (_, _) => SelectModel(); _video.Resize += (_, _) => { if (_playing) mciSendString("put " + _alias + " window at 0 0 " + _video.Width + " " + _video.Height, null, 0, IntPtr.Zero); };
+        _model.SelectedIndexChanged += (_, _) => SelectModel();
         FormClosed += (_, _) => { _closed = true; _stop.Cancel(); _operation?.Cancel(); _recorder?.Dispose(); _recorder = null; StopPlayer(); var image = _image.Image; _image.Image = null; image?.Dispose(); };
-        Shown += async (_, _) => await RunAsync(CatalogAsync); RefreshItems();
+        Shown += async (_, _) => await RunAsync(async () => { await RecordingDevicesAsync(); await CatalogAsync(); }); RefreshItems();
     }
     private static ComboBox Choice(int width) => new() { Width = width, DropDownStyle = ComboBoxStyle.DropDownList };
     private CancellationToken Token => _operation?.Token ?? _stop.Token;
@@ -83,11 +85,24 @@ internal sealed class MediaForm : Form
         var bytes = await BoundedFiles.ReadAsync(dialog.FileName, 16 * 1024 * 1024); var draft = await _workspace.TranscribeAsync(bytes, AudioMime(dialog.FileName), model, Token);
         if (!_closed) { _draft(draft); _text.Text = draft; _status.Text = "转写已回填主窗口草稿，未发送。"; }
     }
-    private Task StartRecordingAsync() { _ = AsrModel; if (_recorder != null) throw new MediaException("recording_already_started"); _recorder = new WindowsAudioRecorder(); _status.Text = "16kHz 单声道 WAV 录音中，最长 120 秒。"; return Task.CompletedTask; }
+    private Task StartRecordingAsync()
+    {
+        _ = AsrModel; if (_recorder != null) throw new MediaException("recording_already_started");
+        var input = _recordingDevice.SelectedItem as WindowsAudioRecorder.InputDevice ?? throw new MediaException("recording_device_selection_required");
+        _recorder = new WindowsAudioRecorder(input); _recordingDevice.Enabled = false;
+        _status.Text = input.Name + "：16kHz 单声道 WAV 录音中，最长 120 秒。"; return Task.CompletedTask;
+    }
+    private Task RecordingDevicesAsync()
+    {
+        if (_recorder != null) throw new MediaException("recording_already_started");
+        _recordingDevice.Items.Clear(); _recordingDevice.Items.Add(WindowsAudioRecorder.InputDevice.SystemDefault);
+        _recordingDevice.Items.AddRange(WindowsAudioRecorder.EnumerateInputDevices().Cast<object>().ToArray()); _recordingDevice.SelectedIndex = -1;
+        _status.Text = "请选择录音输入；刷新和选择不会采集，也不改变系统默认设备。"; return Task.CompletedTask;
+    }
     private async Task FinishRecordingAsync()
     {
         var recorder = _recorder ?? throw new MediaException("recording_not_started"); _recorder = null;
-        byte[] bytes; try { bytes = await recorder.StopAsync(); } finally { recorder.Dispose(); }
+        byte[] bytes; try { bytes = await recorder.StopAsync(); } finally { recorder.Dispose(); _recordingDevice.Enabled = true; }
         var draft = await _workspace.TranscribeAsync(bytes, "audio/wav", AsrModel, Token); if (!_closed) { _draft(draft); _text.Text = draft; _status.Text = "录音转写已回填草稿，未发送。"; }
     }
     private Task PrepareAsync()
@@ -116,16 +131,61 @@ internal sealed class MediaForm : Form
         else
         {
             _image.Visible = false; _video.Visible = true;
-            // path 只来自本实例生成的无引号临时文件；MCI不接收模型字符串或外链。
-            var video = item.Resource?.Kind == MediaKind.Video;
-            Check(mciSendString("open \"" + path + "\" alias " + _alias + (video ? " parent " + _video.Handle.ToInt64() + " style child" : ""), null, 0, IntPtr.Zero));
-            _playing = true; if (video) Check(mciSendString("put " + _alias + " window at 0 0 " + _video.Width + " " + _video.Height, null, 0, IntPtr.Zero));
-            Check(mciSendString("play " + _alias, null, 0, IntPtr.Zero));
+            // 复用 Framework 自带的 WPF 媒体管道；只读取本实例已校验的本地材料。
+            await PlayAsync(path, item, Token);
         }
         _status.Text = item.Status;
     }
-    private void StopPlayer() { if (!_playing) return; mciSendString("stop " + _alias, null, 0, IntPtr.Zero); mciSendString("close " + _alias, null, 0, IntPtr.Zero); _playing = false; }
-    private static void Check(uint code) { if (code != 0) throw new MediaException("native_media_codec_or_playback_error_" + code); }
+    private async Task PlayAsync(string path, MediaItem item, CancellationToken ct)
+    {
+        var player = new System.Windows.Controls.MediaElement
+        {
+            LoadedBehavior = System.Windows.Controls.MediaState.Manual,
+            UnloadedBehavior = System.Windows.Controls.MediaState.Close,
+            Stretch = System.Windows.Media.Stretch.Uniform,
+        };
+        var opened = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var active = true;
+        MediaException? playbackFailure = null;
+        System.Windows.RoutedEventHandler onOpened = (_, _) =>
+        {
+            if (!active || _closed) return;
+            if (item.Resource?.Kind == MediaKind.Video && (player.NaturalVideoWidth <= 0 || player.NaturalVideoHeight <= 0))
+                opened.TrySetException(new MediaException("native_media_video_unavailable"));
+            else opened.TrySetResult(true);
+        };
+        EventHandler<System.Windows.ExceptionRoutedEventArgs> onFailed = (_, _) =>
+        {
+            if (!active || _closed) return;
+            _status.Text = "native_media_codec_or_playback_error";
+            playbackFailure = new MediaException("native_media_codec_or_playback_error");
+            opened.TrySetException(playbackFailure); StopPlayer();
+        };
+        System.Windows.RoutedEventHandler onEnded = (_, _) =>
+        {
+            // 保留末帧供用户查看；停止、换产物或关窗统一释放这唯一播放器。
+            if (active && !_closed) { player.Pause(); _status.Text = item.Status + "；原生播放已结束。"; }
+        };
+        player.MediaOpened += onOpened; player.MediaFailed += onFailed; player.MediaEnded += onEnded;
+        _closePlayer = () =>
+        {
+            active = false;
+            player.MediaOpened -= onOpened; player.MediaFailed -= onFailed; player.MediaEnded -= onEnded;
+            opened.TrySetCanceled(); player.Stop(); player.Close(); _video.Child = null;
+        };
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var cancel = ct.Register(() => opened.TrySetCanceled());
+        using var expired = timeout.Token.Register(() => opened.TrySetException(new MediaException("native_media_open_timeout")));
+        try
+        {
+            ct.ThrowIfCancellationRequested(); _video.Child = player; player.Source = new Uri(path); player.Play();
+            await opened.Task;
+            ct.ThrowIfCancellationRequested();
+            if (playbackFailure != null) throw playbackFailure;
+        }
+        catch { StopPlayer(); throw; }
+    }
+    private void StopPlayer() { var close = _closePlayer; _closePlayer = null; close?.Invoke(); }
     private async Task SaveAsync()
     {
         var item = Selected; var path = await _workspace.MaterializeAsync(item, Token); using var dialog = new SaveFileDialog { FileName = "tansr-media" + Path.GetExtension(path), Filter = "媒体文件|*" + Path.GetExtension(path) };
@@ -133,5 +193,4 @@ internal sealed class MediaForm : Form
     }
     private static string AudioMime(string path) => Path.GetExtension(path).ToLowerInvariant() switch
     { ".wav" => "audio/wav", ".mp3" => "audio/mpeg", ".m4a" => "audio/mp4", ".ogg" => "audio/ogg", ".webm" => "audio/webm", ".flac" => "audio/flac", _ => throw new MediaException("audio_format_unsupported") };
-    [DllImport("winmm.dll", CharSet = CharSet.Unicode)] private static extern uint mciSendString(string command, StringBuilder? result, uint resultLength, IntPtr callback);
 }
