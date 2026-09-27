@@ -2,7 +2,7 @@
 
 原生 C# 接入 Tansr Serve 的 SDK，供 Windows 桌面应用与 .NET 服务使用。
 
-当前处于集中验收阶段，尚未发布到 NuGet.org。两个产品包为 `Tansr.Sdk` 与 `Tansr.Sdk.Windows`；本地候选已经实际打包、安装和运行，正式能力以实际实现及验收记录为准。
+原生示例功能与本地候选包消费已完成验收，远端主线 CI、签名及正式发行仍待完成，尚未发布到 NuGet.org。两个产品包为 `Tansr.Sdk` 与 `Tansr.Sdk.Windows`；实际来源、验收范围和发行剩余项见开发记录。
 
 开发方案、六张工程卡和24项验收的事实源位于 `J:/tansr/tansr-cli/doc/report/NETSDK-*2026-09-26.md`。本仓实施与验证记录见 [开发记录](doc/development.md)。Serve 新协议独立由 Serve 会话维护，不能将候选协议当成生产能力。
 
@@ -90,6 +90,6 @@ The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `Wind
 
 Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 
-This is an unpublished development candidate. It uses the existing REST/SSE and SDK2 contracts. New terminal streaming, memory management and dynamic control contracts are not exposed as stable APIs before Serve and .NET agree on the same schema and fixtures. The examples document their actual capabilities and remaining gaps; successful compilation is not a claim of full Electron parity. See the development record for commands, evidence and release status.
+This is an unpublished development candidate. Native example behavior and local package consumption have been verified; remote mainline CI, signing and formal publication remain pending. It uses the existing REST/SSE and SDK2 contracts. Terminal streaming, memory management and dynamic control previews follow the agreed Serve schemas and fixtures. See the development record for the exact capability mapping, source identities, commands, evidence and remaining release conditions.
 
 Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). Local package gates cover .NET Framework WinForms, a modern console, self-contained WPF and core Native AOT without Node on the consumer process PATH. Installation, upgrade, rollback, uninstall and standard-user file/key isolation have separate evidence. The standard-user environment is a fresh profile on the existing Windows host. Consult the [development record](doc/development.md) for each candidate's exact source, package hashes, results and remaining gates; an earlier package's result does not certify a later package. Formal NuGet publication is still pending.

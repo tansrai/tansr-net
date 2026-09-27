@@ -1,15 +1,15 @@
 # NETSDK 实施记录
 
-更新日期：2026-09-27。当前为 `20260927-NET-full-delivery` 集中验收批；本地候选包源码 `83f99f8`，开发树后续示例与夹具提交 `e9b4881`。两个产品包已从独立源实际消费，核心884/884，Windows按同名用例去重为434通过、1项性能基线待执行；最新真实HTTP池27/33，余6条正在修复或复验，不能称全绿。完整证据、原卡独立结算条件及尚缺事项见[本批记录](#20260927-net-full-delivery集中实现与验收回填)。
+更新日期：2026-09-27。`20260927-NET-full-delivery` 已完整关闭NET-01—05，工程5/6（83.3%）；A01—23通过，验收23/24（95.8%）。本地main为 `a247abe`，NuGet产品为 `2958ed9`，示例主体隔离修复为 `a247abe`；Core914、Windows452个当前唯一用例均有通过证据，不是一次新全池。两GUI原业务及切用户已经实际消费并独立核对，历史失败与各自候选来源保留。NET-06/A24仍待最终交付与发行接线：没有remote、GitHub workflow/主线CI、签名或NuGet正式渠道完成事实。详见[本批记录](#20260927-net-full-delivery集中实现与验收回填)。
 
-原六张工程卡、24项验收、P01—P16不变。上一已收编状态为工程0/6、验收4/24（A03/A05/A06/A07）；本批新增可独立结算项在末节列示，正式跨仓单据由单写者同步，未将待UI、性能或五端联验写成通过。以下各日期段是历史快照，其旧“未齐”、旧候选、旧计数及红例保留，不代表本批实现仍未开始。尚未正式发行。
+原六张工程卡、24项验收、P01—P16不变。本批开始前的已收编状态为工程0/6、验收4/24（A03/A05/A06/A07）；本批当前原卡结算在末节列示，正式跨仓单据由单写者同步，未将待UI或发行条件写成通过。以下各日期段是历史快照，其旧“未齐”、旧候选、旧计数及红例保留，不代表当前状态。尚未正式发行。
 
 ## 责任、源码和边界
 
 用户已要求 SDK2.0 会话实施 Serve 补齐、本会话立即实施 C# SDK。已通过 Codex 会话消息完成交接。Serve 是运行内核和新 wire 的单一写者；本仓是协议消费者、设备执行器、存储和原生示例。原 Electron 完整 SDK/IPC 不变。
 
 - 固定目录 `J:/tansr/tansr-net`，主分支 `main`；初始工程提交 `9bcb40c`。
-- 开发树 `J:/tansr/worktrees/net-NET-01-sdk`，首批本地分支 `lane/net/NET-01-sdk`，当前分支 `lane/net/NET-06-full-delivery`；固定main已收编到`3ccb4578b6aa6a7f1269ac61ccf617c8f4f9cd85`，本批尚待最终门与收编。不推开发分支。
+- 开发树 `J:/tansr/worktrees/net-NET-01-sdk`，首批本地分支 `lane/net/NET-01-sdk`，当前分支 `lane/net/NET-06-full-delivery`；固定main已收编到`a247abe346d319bd088d388529becd36ca09ffd3`，包含产品`2958ed9ba827ab64d9ca5174da18a58eb3f8bee8`；主体隔离示例修复已入main；最终验收索引与文档增量仍由根统一收编。不推开发分支。
 - 原协议/同源源码 `tansr-cli 027de7e2d9b647374b7fe94cb0e4a7429a9195e2`。
 - SDK2 schema SHA256 `969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605`，详见 `contract/manifest.json`。
 - 首批 Serve terminal 候选 `2026-09-26.candidate-2`，SHA256 `3cbb311f568bdc6d85b816fafbdb95254664219fdbd625dcadc0dfbdf4df84ae`，当时仅只读反馈；当前使用 candidate-7，来源及显式 preview 边界见末批记录，不据历史快照回退当前合同。
@@ -354,58 +354,63 @@ NET产品提交 `c7be8aa`、最终夹具提交 `d70a4b4` 及本节文档收编�
 
 ## 20260927-NET-full-delivery：集中实现与验收回填
 
-本节替代上面的“当前批”描述，保留所有历史原红和当时数量。归档为 `J:/tansr/archive/20260927-NET-full-delivery`。本次仍只有原NET-01～06、A01～24、P01～16；源码实现、局部行为通过、完整验收关闭和正式发行分别记录。
+本节为当前状态，保留上面各历史批次的原红和当时数量。归档为 `J:/tansr/archive/20260927-NET-full-delivery`。仍只有原 NET-01～06、A01～24、P01～16；源码实现、局部行为、完整验收和正式发行分列。
 
 ### 当前来源与实际门
 
-- NET本地main仍为`3ccb4578b6aa6a7f1269ac61ccf617c8f4f9cd85`。本批产品先提交`9dd4c16`，测试`33b4805`；存储/文件修正`105bf9c`，目录保护修正`83f99f8`，随后示例/夹具提交`e9b4881`。正在处理的后续增量须经受影响门后再收编，不能冒称已在main或已发布。
-- 已实际消费的双包来自`83f99f88631e19e5ef95c57d073331924810799e`，版本`0.1.0-preview.1`。Core：549531字节，SHA256 `8a5ef981db4dec265992f4301c9255d1d360a275f377c3a1b1fbd69f6317d3cc`；Windows：329799字节，SHA256 `f6384b8ba9bda00646d375f96dd10471288cee471a460238c3f61f97b5f99c9d`。`consumers-final-r1/manifest.json`记录实际内容/依赖/运行来源。后续产品变化不能自动继承这两个包的消费结果。
-- 本轮HTTP r4读取Serve提交`1c7039e82e1010e501e53e21ee5e570c75e4d2c3`，3053文件快照SHA256 `965d2bf7fde7b6fc9a336c3ea1c79f01fcfe2e345f45629b391a1902ec4d7d09`，见`serve-source-r4.json`。所有上游模型/媒体响应为合成材料，真实的是Serve/kernel、HTTP/SSE、C# SDK、Windows进程/文件及SQLite链路。
+- 功能代码及示例的主线收编点为 `a247abe346d319bd088d388529becd36ca09ffd3`，包含下述产品2958；最终含工装与回填的主线SHA见本归档 `net-final-closure.json`。本批产品经 `9dd4c16`、`105bf9c`、`83f99f8` 及 `c8b6dfe` 补齐，后续示例/夹具经 `afc8e01` 等收编；开发树 `a71769c` 修复注册后刷新能力版本再绑定，`1304c92` 补原生媒体与窗口收尾，最新产品为 `2958ed9ba827ab64d9ca5174da18a58eb3f8bee8` 的显式紧凑日志。后续 `e477995` 仅新脚本，已随main收编；`a247abe` 已入main，仅修示例主体隔离，未改两NuGet产品。各次运行仍按实际源快照和文件摘要归属，未提交增量不能仅以HEAD标识，也不能将后续未收编脚本或证据提前归为主线。
+- 已实际消费的历史两个包来自 `c8b6dfe1ef074c466a140a8dd98f0d6482b9f8c3`，版本 `0.1.0-preview.1`。Core：559561 字节，SHA256 `c9d8c3f6e79d25c0f33f3754a6a5a4784e207101f470e5e40e72b8a3a4d71dfa`；Windows：330461 字节，SHA256 `a53134c5a91e3dfaf3e2b2311aeb3b937a111c6a40a9345a3ff0ef21c664d028`。见 `consumers-final-r2/manifest.json`。a717与2958已改变Core/Windows产品实现，`package-source-stability-r3.json` 的源码未变结论仅属当时历史，不能以旧包的通过代替新候选。
+- 产品2958的新包已在 `packages-final-r4` 重新产出，版本仍为 `0.1.0-preview.1`。Core：559748字节，SHA256 `faec64499dcf641d8a1d015b59b51635a82fd4d294edac0feec1b996d1c8eff5`；Windows：331017字节，SHA256 `e1ca8a555696e345138634005367a9110b9ce39fec7d8b8217aed4a010ffcfec`。`consumers-final-r3/manifest.json` outcome=passed，四类消费者实际运行；`api-compatibility-final-r2` 原公开兼容通过。实际NuGet三示例在 `A24/package-examples-r1` 构建3/3，完整业务由GUI/Console原入口继续验证，不以构建替代。
+- HTTP `http-closure-r4` 及性能 r5 使用 Serve `04c6472aacf0f169fcf9a6b28ecbbf0df83a74fb`，运行源快照 SHA256 `366780e4ed48a2802ad515a2acfdfa3a38c628f58c21e6be46c5899a935e5eb6`。后续预算恢复和可信扩展使用 `d0dc9cfb5b00313a6751d04c3813abf4fc97a380`，运行源快照 SHA256 `5d5093f6d1f82d96396c8e6098a457686dca8646b49b11c6fe74498196e12b2c`。均为 candidate-7；原 SDK1/SDK2 wire 锁不变。模型/媒体上游为合成材料，真实的是 Serve/kernel、HTTP/SSE、公开 C# SDK、Windows 文件/进程和本地存储。
+- 原配置错误分类修后UI r13使用Serve `b988eee00e51fa31133e13429bb84b54f9a61526`，运行源快照SHA256 `b8f96db8dbc823a5f05568e6c61f20ba43e9c38964b9c30358128ca86c67f32c`。A20 Ctrl+C复验使用此前不可变b9e独立SEA，该次Core/Windows为c8、仅Console示例增量，DLL SHA256 `7ec44124719a3d2c73a6bd49f30ffca809e1dfcfaa2835a2916da0b3ebd05f2b`；保留这次历史来源，不将其外推为后续a717候选或伪称同源新整池。
+- A23 最终 `shared-final-r10` 使用 Serve `3a0659fbc0ba91399a738df5c849ffa4fe5f9776`，源快照SHA256 `e36087ac3c1f3f713328e93398387c9f71f87d92ab539690d4fc65700594cf39`；同源3053文件、candidate-7。C#、Electron、Android、iOS、鸿蒙实际五客户端同场通过，具体客户端二进制与脚本SHA见 `A23/shared-final-r10/shared-manifest.json`，不能用单个当前HEAD替代它们各自的产物来源。
 
 | 本轮门 | 实际结果 | 证据与范围 |
 |---|---|---|
-| 核心池 | 884/884，0失败/跳过 | `core-r2/core.trx`；不与旧703/627等批次相加，新补产品另需受影响验证 |
-| Windows集中池 | 首轮435：433通过、1夹具失败、1性能测试未执行；同产品LocalHost夹具修正14/14后，按完整testName去重为**435唯一项，434通过、1性能待验** | `windows-final-r1/results/windows.trx`、`local-host-final-r1/local-host.trx`；不是433+14。未执行为`WindowsExecutionBenchmarkTests.OriginalElectronAndServeShareSameFlushedCommandAndQpcCollector`，不称性能已过 |
-| 协议/版本混装 | C#21/21；原Node共享向量及同票刷新对照通过 | `session-compatibility-final.log`、`session-compatibility-node-final.log`；默认SDK1无新发现请求，显式SDK2失效不降级/重建/换存储 |
-| 旧公开API兼容 | 四TFM5286个原公共/受保护成员实例通过；旧source→旧DLL、旧source→新DLL、旧binary→新DLL均通过 | `api-compatibility-r7/result.json`、`consumer-result.json`；成员实例含TFM重复，不是5286行为用例；保留旧源码`null`重载兼容见证 |
-| 完整入口归属 | 681符号/入口、16组、11源快照可复核；39职责路由对应具体实现/Serve委托/测试；10个检查器对抗用例通过 | `doc/compatibility/public-api-map.json`与`mapping-attribution-receipt.json`；新增漏项、删除困难成员、伪造入口、未验证据关闭均拒绝。16组完整业务验收仍未标绿 |
-| 真实HTTP集中链 | **33项，27通过、6失败**，原失败保留 | `http-r4-retry/runner.log`；不能因核心池或成功子链而称整池通过；具体余项见下表 |
-| 双包/实际消费者 | net48 CLR4 WinForms、现代控制台、WPF self-contained、核心NativeAOT均实际运行；NodeOnPath=false | `consumers-final-r1/manifest.json`；前两库四TFM选择正确，WPF不宣称NativeAOT |
-| 安装及依赖 | 中文空格路径安装→升级→回滚→卸载通过；两包与34依赖/native/许可已核 | `consumers-final-r1/installation/manifest.json`；保留用户合成数据。当前`elevatedToken=true`、`administratorMembership=true`，标准用户门未满足。3项legacy license URL原样登记，未推断SPDX |
+| Core / Windows 当前唯一用例 | **Core 914、Windows 452个唯一用例均有通过证据** | `coverage-final-r6.json` / `.md` 按当前DLL发现清单和完整testName（含Theory参数）选最近实际结果，缺证/未决均0。原r5为903/452；`identity-tests-r1/identity.trx` 14/14仅新增11、替代3；`identity-windows-r1/console-offline.trx` 16/16全部替代旧名。原日志17/17只增9及Hosting60/60只增5的事实保留。不是一次新1366项全池，也不是行覆盖率；原红/跳过及各池计数保留 |
+| 协议/版本混装 | C#21/21；原 Node 共享向量及同票刷新对照通过 | `session-compatibility-final.log`、`session-compatibility-node-final.log`；默认 SDK1 无新发现请求，显式 SDK2 失效不降级/重建/换存储 |
+| 旧公开 API 兼容 | 2958新候选四 TFM 5286 个原公共/受保护成员实例通过；旧 source→旧 DLL、旧 source→新 DLL、旧 binary→新 DLL 三类退出码均0 | `api-compatibility-final-r2/result.json`、`consumer-result.json`；r1保留为历史。含 TFM 重复，不是5286项行为验收，保留旧 `null` 重载兼容见证 |
+| 完整入口归属 | 681入口、16组、11源快照；39职责路由和10个检查器对抗用例通过 | `doc/compatibility/public-api-map.json`、`parity-final-main.log`、`parity-final-checker-tests-r2.log`；39条是索引，16组完整业务条件逐项结算。最终回填后原检查器测试3项仍依赖历史零完成初态，原7/10日志保留；仅将测试显式构造为待验状态并保留未验入口/剩余条件拒绝，原10项复验全过，检查器产品规则未改 |
+| 真实 HTTP 修复链 | `http-closure-r4` 原19项17过2红；随后预算恢复典型通过、可信扩展典型通过 | `http-budget-closure-r2/runner.log` 原2项1过1红，A08已过，原可信扩展文件帽红保留；`http-trusted-closure-r1/runner.log` 对后者独立1/1通过。按各自源码/夹具归属，不称同一次新完整池全绿 |
+| A09 同机输出性能 | 各100样本；Electron P95 **39.2560 ms**，Serve loopback **37.7073 ms ≤150**，受控20 ms RTT **57.1933 ms ≤250** | `benchmark-final-r5/acceptance-evidence.md`、原 `comparison.json` 和 `runner.log`；真实多块、单一执行、原 receipt/输出相等，八项资源清理均完成。C#终点为原 TerminalOutputView，非两GUI绘制或真实公网时延 |
+| 双包/实际消费者 | 2958新包的net48 CLR4 WinForms、现代控制台、WPF self-contained、核心 Native AOT 四类实际运行通过，NodeOnPath=false；实际NuGet Console本地/远端×新建/恢复4/4通过 | `consumers-final-r3/manifest.json` 对应packages-final-r4两新SHA；四 TFM 资产选择正确，不宣称 WPF Native AOT。r2旧包消费另行保留。三套真实NuGet示例构建3/3见 `A24/package-examples-r1`；Console业务见 `A24/console-package-r1/closure.json`：合成8次exchange、resourcesCompleted、7PID/2端口已回收，Serve为b988不可变SEA。GUI业务按原组合证据已完成，最终主体隔离消费另见 `A24/package-examples-identity-r1` 和 `native-user-switch-r3`；不重复计入原A20/Ctrl+C |
+| 依赖及标准用户安装 | 当前新两包与34依赖/native/许可已核；原新普通用户首次应用配置实际安装→升级→回滚→卸载、私有文件和跨用户 DPAPI 拒绝均通过 | `consumers-final-r3/dependency-audit.json`；标准用户完整安装链仍归原 `A21/standard-c8-r2/results/child-result.json`，不冒称在2958重新执行。原链非提权、非管理员组、不继承开发环境，账号/profile已回收。新包普通消费者进程与原标准用户链分列；现有Windows新用户不冒充全新OS，3项legacy license URL原样登记 |
+| A23 同 Serve 五客户端 | C#、Electron、Android、iOS、鸿蒙同场通过，原故障隔离、健康会话及宿主边界核验成立 | `A23/shared-final-r10/shared-manifest.json` passed=true，SHA256 `fde98055f7bed5177843da0ed0b892a9d731c6502a9df458e4d24192c53e8e43`；三个不同主体、移动三端共用其原主体，故障施加于C#，不是五端×四故障笛卡尔矩阵。独立Electron完整SDK/IPC原回归仍按自身证据归属 |
 
 ### 已实现与此次发现的实际差额
 
-本批高阶接线已包含：授权主模型目录/别名/能力和本人1d用量；可信Serve模型装饰/采样与原权限/预算调度；完整公开会话、档案、记忆、缓存和资源观察；三端共享原生工作台、MCP/Skills、媒体与录音/分段TTS、Worker、本地受信host-module及冷启动本地介质只读。存在实现不等于已跑完整UI；原Electron完整SDK/IPC继续保持。
+本批高阶接线包括授权主模型目录/别名/能力、本人1d用量；可信 Serve 模型装饰/采样、原权限/预算调度；公开会话、档案、记忆、缓存和资源观察；三端共享工作台、MCP/Skills、媒体与显式录音/分段TTS、Worker、本地受信 host-module 和冷启动介质只读。存在实现不等于完整 UI 已过，原 Electron 完整 SDK/IPC 保持不变。
 
-| 原卡内发现 | 实际原因与修正 | 当前验收边界 |
+| 原卡内发现 | 修正与当前事实 | 验收边界 |
 |---|---|---|
-| fs.inspect不存在文件返回unknown，阻断原Write | 仅将确定的`not_found`映射原`ENOENT`；未知IO/副作用不改成确定失败 | 2项真实Windows缺文件/缺父目录用例通过；HTTP随后继续暴露mkdir回执问题，后者不能被这2项替代 |
-| SQLite锁无限等候、FULL自动回滚被误判 | 有界锁期限；按实际事务状态处理SQLite FULL后的自动回滚 | 实际writer提交前/后杀进程、锁冲突与`max_page_count`触发FULL通过；不是宣称将整块系统盘填满 |
-| 进程目录保护阻断同盘原子媒体保存 | 祖先目录允许正常写入，仍防替换/删除；可执行文件身份与写保护保持，临时锚使用delete-on-close | `83f99f8`产品修正和同源包实际消费已通过；撤回的3个“重试等待锁”夹具不计入唯一测试数 |
-| 新的API重载造成旧null源码歧义 | 内联Skill改命名工厂`FromInline`，旧构造不变；原存储异常构造语义保留 | 旧source/binary兼容实际见证通过；未把IArchiveClient夹具编写中的短暂编译红误登记成产品继承破坏 |
-| 原P06增量Narrator被快照Formatter遗漏 | 新`SessionNarrator`消费同一事件，保留三档、原时间、思考只长度与回调异常隔离 | 产品及同源测试入口已补，仍`ready-not-run`，不能据本轮884旧池说新增已验 |
-| 原P06运行中切换呈现档位遗漏 | `SessionView.SetDelivery`不重建原视图；旧块档位及Off立即去思考按原语义处理 | 新实现/三端接线与最终受影响回执待结，不把构造时Options当完整动态能力 |
+| 缺文件回执与根目录 mkdir 阻断 Write | 确定的 `not_found` 映射原 `ENOENT`；仅 `fs.mkdir` 支持已存在 workspace 根的幂等结果，并重核根句柄，其他写/删不放开空路径 | 原真实 Read/Write/Edit/List/Glob/Grep/BusinessLookup、撤权零调用及 Serve 宿主不回落已通过；未知 IO 与重解析守卫保留 |
+| SQLite 锁/FULL与原子保存 | 锁有界；按事务实际状态处理 FULL 自动回滚。进程祖先目录 pin 修正避免阻断同盘原子移动，保留可执行文件身份、写保护和重解析边界 | writer 前/后 kill、锁、真实 SQLite 页帽 FULL、进程 lease 期间保存均有证据；无必要的媒体锁重试已撤回，不冒充整块物理盘耗尽 |
+| 旧 API 源码兼容 | 内联 Skill 使用 `FromInline`，旧构造及存储异常语义保留 | 旧 source/binary 实际通过，不以新接口存在替代兼容证明 |
+| P06 增量叙述与运行中呈现档位 | `SessionNarrator` 消费原事件，`SessionView.SetDelivery` 保留同一视图，Off 立即清思考且不复活 | `core-closure-r1/core.trx` 原9项覆盖叙述、动态档位及失败隔离；三端完整实际控件门仍归A17/A18 |
+| 预算终局后持久恢复被拒绝 | Serve 原稳定点修复预算 aborted 终局遗留 released/running 所有权的实际缺口；不放宽未知副作用的对账边界 | d0dc 上原快照/镜像链620→645、旧checkpoint仍645、fork父账不变、预算拒绝零新请求、再恢复下一轮累计800通过。原治理70费用/60预算、同ID恢复及零新模型/设备写也通过 |
+| A07 确定配置拒绝被误报未知 | 未授权模型原被Serve误映射503 `source_unavailable`；Serve原写者修正确定错误分类，客户端未知请求保护不变 | 原r10失败保留；b988源`native-ui-r13/ui/partial.json`实际通过非法模型确定拒绝→原配置不变→清thinking changed→原键replayed。A07及NET-02恢复通过，不以此称UI整批通过 |
+| A20 新 Ctrl+C 输入阻塞 | 原输入适配器同步读阻止取消等待；Console改为唯一顺序读者、取消只结束等待，input/service/device原寿命保留 | `A20/ctrlc-final-r1`原红保留；r2真实CTRL_C在原25秒内完成interrupt→quiesce→resourcesCompleted→device_cleanup，未关闭stdin或补发命令助跑。驱动exit0、Console取消exit130；A20恢复通过，见`A20/ctrlc-acceptance-evidence.md` |
+| 注册替换连接后使用旧能力版本绑定 | `DeviceSessionHost` 原私有RunAsync在注册后以同一初始化参数重新读取并校验有效能力，再进行唯一bind；保留原scope/platform/session核验，刷新失回不重试初始化、不绑定 | `a71769c` 产品修复；原类19/19含新增5项，最终 `device-rebind-hosting-r2/hosting.trx` 相关60/60，原装配顺序核验为两次initialize/一次bind；多目标构建零警告错误。该注册修复后来由两GUI原恢复/新工具链消费；新包和完整UI仍按各自回执归属，不把本60项局部通过冒称完整UI |
+| 默认执行日志预留耗尽阻断示例记忆 | r23实际254个已终结操作仍按每条256KiB耐久预留计量，66,893,580/67,108,864逻辑字节，剩215,284不足下次262,144字节claim。2958保留默认 `sdk2-execution-sqlite-v1`，显式 `CompactCompletedReceipts=true` 才使用独立 `sdk2-execution-sqlite-compact-v1`；pending仍全额预留，终态同事务释放未用padding，永久保留原键/完整回执/操作数；不隐式迁移旧库或重做unknown。示例JSON必须真bool，并只显示安全storage code | `r23-memory-journal-diagnosis.md` 原UI红保留；`compact-journal-r1/journal.trx` 17/17（新增9、原8）、locked restore及全Release构建0警告0错误、`format-compact-final-r1`退出0。新格式仍受字节/操作数/页帽约束；后来r26 WPF、r27 WinForms实际记忆链已过，各331个原操作全部completed、0pending/0reserve，逻辑字节922080/922358；两个原批整体exit1保留，只采用已完成记忆链及关闭事实。两端冷启动离线记忆控件亦实际通过，后续r30补齐net48朗读/保存/取消unknown链，A17/A19经原DoD独立核对通过；不以17单测代替 |
 
-### 按原条件独立结算，不追加其他卡的门
+双GUI记忆增量有实际控件证据：`native-ui-r26/ui/partial.json`（WPF）和`native-ui-r27/ui/partial.json`（WinForms）均完成提取→pin/query/replay→批准remember→forget→关闭。两原批整体仍exit1，不能重写为两次全批绿。`r26-compact-journal-readonly.json`、`r27-compact-journal-readonly.json`确认原64MiB帽、各331永久键、14次出版全部提交；只读数据库核账不作为授权来源。`native-offline-memory-r1/ui-r1/result.json`两端在无凭据、不连接Serve的冷进程中通过真实“离线授权记忆”控件读取，原forget删除内容未复活；离线许可由可信同scope/revision材料提供，不声称离线实时获知新的远端撤权。最后speech由 `native-ui-r30/ui/result.json` 完成，uiCode/fixtureCode均0；`original-native-card-closure-review.md` 已逐条核原条件，A17/A19可独立关闭，A18后续修后组合实证及独立核对见下段。
 
-以下是本地独立关卡判定及正式单据回填输入。上一收编的A03/A05/A06/A07维持；新增判定须由正式CLI单据单写者与本批最后候选同步，不能将尚待的产品复验、UI或性能提前填绿。
+原A18切用户已产生真实红例：`native-user-switch-r1/ui/partial.json` 中B尝试恢复A原会话得到403，B新会话历史、pending与模型轮次均正确隔离，但编辑器仍显示 `NATIVE_PRIVATE_DRAFT_A`。原因是示例按应用固定文件加载草稿，且未将呈现/异步保存绑定可信主体。`a247abe` 在共享示例层按来源与可信principal/application/endUser分区；三个示例在连接前绑定，换主体清原呈现/草稿/窗口，回调捕获原会话和原分区，读写重新核验，未知主体不自动认领旧文件，同主体续票保持原分区；显式无票据档案/记忆离线授权入口保留。不新增SDK或wire，也不伪造Serve认证。原14/14与16/16受影响回归、全解决方案构建0警告0错误、format退出0均有回执；`A24/package-examples-identity-r1` 已从2958原两包重建三个示例。`console-identity-offline-r1/receipt.json` 的四次实际新Console进程均exit0：A与同主体authRevision变化可读原草稿，B与未知主体不认领A或原无主legacy数据，原A种子文件SHA不变；不联网、不用票据、不启动Serve。`provenance.json` 同时绑定a247示例DLL、2958双库DLL和实际包构建manifest，原合成临时目录已按映射归档。两GUI原切用户场景现由 `native-user-switch-r3/manifest.json` 组合关闭：WinForms完整原场景exit0；WPF保留r3定位失败exit1，以原前段加同一B会话ID的 `ui-WPF-tail/result.json` exit0补齐公开恢复、空历史、B模型轮及A/B无票据cold草稿。不是一次WPF整轮绿。`cleanup-receipt.json` 记录fixture退出0、自有GUI0、SSE订阅/排队0及原源指纹未变；原r1真实草稿红、r2无效认证观察和r3定位红全部保留。完整GUI索引见 `native-ui-acceptance-final.md`；`original-native-card-closure-review.md` 已独立逐原DoD核对，允许关闭A18及NET-05。
 
-| 原项 | 本批可独立结算的证据/判定 | 不应追加的条件 |
-|---|---|---|
-| A01 | 681行已逐职责列具体本地实现/原Serve委托、已验及待验证据；39条只是索引。机械清点和故意漏项等10个检查器对抗通过；真实发现的P06差额没有被隐藏，已补入口待验。**完整映射条件已具备** | 不要求先通过所有P组、所有UI或正式发行；也不把681映射当681项行为测试 |
-| A02 | 同一83f99f8双包的net48 CLR4、net10控制台、WPF实际运行、正确资产/无Node消费/无绑定冲突通过 | 干净普通用户属于A21；NuGet正式上架属于A24 |
-| A04 | 原21项混装、真实旧SDK1链与独立新SDK2消费，失效/401/超时/坏响应不降级、不改存储；旧source/binary额外互证 | 不把16组全业务或UI强加给版本发现门 |
-| A13 | 真实writer杀进程/FULL/锁/损坏/跨域密文/耐久ACK失回与重开；本轮真实Serve加密档案SSE→ACK→供材通过 | 不等WPF/WinForms或正式渠道；不把SQLite FULL夸为系统盘物理耗尽 |
-| A14 | 本轮真实核心提取、Windows出版、审批检索、后轮采用、维护与删除，旧writer/旧备份来源均拒绝；原Node publication互通、第三方介质可注入 | 不等全部UI；合成主模型/提取响应与真实协议/存储层分别说明 |
-| A16 | 原操作失回/重启、真实Serve恢复跨runtime、两轮C2连续、异主体/撤权/删除旧票拒绝、自然ticket TTL真实两跳410且原键不重发；原API生产验证器到期边界1/1互证 | 不把epoch失效当ticket到期；没有供应商费用事实保持unknown，不以节费账单或UI为本卡新增门 |
-| A22 | 同一包的net48、WPF自包含、现代控制台和核心NativeAOT，包内资产/依赖/native/许可事实完整 | 目前只承诺本批win-x64实测；不把x86/arm64或WPF NativeAOT写成已支持 |
+### 按原条件结算
 
-存储证据：本域198个唯一Windows用例最终均有通过回执，包含原Node双向明文/密文两参数；不是将多轮重叠数相加。见`storage-affected-r2-results.json`、`storage-node-r3/node-storage.trx`与`storage-handoff.md`。记忆和缓存以本轮`http-r4-retry/runner.log`实际通过的对应方法为准，不沿用旧候选单链代表新候选。自然TTL的原API互证为`api-cache-expiry-r1/receipt.json`，源码`5f82170314c21e19c91677478b9b295246354bf1`；仅注入内存query/clock，不读取.env、不连生产数据库或网络。
+**工程已完整关闭5/6（83.3%），仅剩NET-06；相对本批开始前已收编状态新增5张，本次最终结算新增关闭NET-05一张。** NET-01 的 A01—04、NET-02 的 A05—08和完整可信扩展、NET-03 的 A09—12、NET-04 的 A13—16、NET-05的A17—20均已满足原条件。A07原错误分类新红已经实际修后通过，NET-02恢复；A11窗口效果补齐使NET-03可独立关闭。不能给已过协议/工具/存储卡追加全部UI或正式发行前置。
 
-**NET-01可以依据A01—04独立结算；NET-04仍只差原A15的最后受影响跨层消费，不等UI。** A15已有第三方HTTP双SQLite8、显式迁移/保源/中断DDL回滚/不支持组合拒绝29、原Node三类互通及原Serve S1/S2/S3组合；当前补在同一个`ServeSessionApiTests`典型内的本地镜像Enable→Flush→Disable→Enable需真实Serve回执，证明同session/原史/序号不变、原export图片保真。已定位的资金/用量Store恢复亦须此受影响链通过。代码已经落下，状态是待实际复验，不是未开发。跨仓S3证据在`archive/20260927-SRV-completion/storage/review.md`和`storage/candidate-final/receipt.json`；不能拿历史绿遮住新候选受影响路径。
+A15 同一会话实际 Enable→Flush→Disable→Enable 保留原ID/history/图片与SSE语义，SQLite密文可用原DPAPI key独立重开；默认不开盘、不自动导入、不冒充长档案/current-authority、不关掉 source-required 或平台留存。与旧 Node 三类介质互通、第三方Store、显式迁移/保源/中断回滚、不支持组合启动前拒绝和原 S1/S2/S3 组合互补，见 `storage-closure-review.md`。A16 的原票自然TTL拒绝由 `api-cache-expiry-r1/receipt.json` 互证，不将 epoch 失效或未观测费用改称供应商缓存收益。
 
-### 最小剩余与进度回填入口
+A11最后的自定义窗口工具已由`native-ui-r11/ui/partial.json`及同会话原journal核实：批准后实际标题更新，拒绝/过期标题不变，与真实文件/授权/宿主不回落链互补。见`net03-final-closure-review.md`。r11整批UI仍失败，仅采用实际完成的原窗口断言，不宣称A17—19通过。
 
-当前HTTP 6条红分别是文件工具mkdir后的Write链、资源排空delayed/failed两条、compact/快照/恢复与Store链、可信Skills/MCP/子代理/预算组合、background handoff=true。各自已分配原实现负责人修复或处理夹具，仍等同候选定向回执；不因名称已有就关闭A08/A10/A11/A12。A09原同机Electron时间与资源基线、A17—20真实UI/媒体及两模式、A23同Serve五端并发仍按原入口实跑。A21干净标准用户、A24主线CI/签名/渠道等外部条件显著保留；它们不抹掉已经通过的内部代码证据。
+A20双模式原链见`A20/acceptance-evidence.md`、`console-final-r1/manifest.json`：同一发布Console和独立SEA，本地/远端×新建/恢复4/4，原自动`/quit`、历史/会话归属、owned/shared退出正确；离线0 TCP/HTTP且可读历史和草稿。后来真实Ctrl+C红由`ctrlc-final-r2/manifest.json`修后消除，并补原12/12受影响回归；真实信号后原25秒内完整收尾，未关闭stdin助跑、未改变共享Serve归属。原r1红保留，A20恢复通过，该独立A20事实与已补齐的A17—19共同满足NET-05，不将其中任一局部通过单独充当父卡关闭依据。
 
-本地独立判定若由正式单据采纳，则新增可关A01/A02/A04/A13/A14/A16/A22共7项，连同原4项为**11/24，剩余13，45.8%**；NET-01为**1/6，剩余5，16.7%**。这是一份有证据的回填建议，最后提交、受影响复验和正式单据结算由本批负责人统一记录；尚无整版24/24或16/16声明。未将数量换算为代码完成比例，也未新增小卡。NET仓仍无remote，不存在GitHub推送/CI、NuGet上架、签名或生产部署事实。
+此外，A23 的最终 `shared-final-r10` 已取得五客户端真实同场回执：C#、Electron、Android、iOS、鸿蒙均完成原业务；C#失连不重发、容量拒绝、撤权、移动端三次真实文件写入及Serve宿主哨兵不变有原证据。此前MuMu系统runner缺失及各轮原红继续保留；最终使用原标准Android模拟器等已登记环境，未用单端通过替代同场。见 `A23/shared-final-r10/shared-manifest.json`；该项不替代A17—19原完整GUI/媒体条件。
+
+**对抗已通过23/24（95.8%），仅剩A24；相对本批开始前已收编4项净增19项，本次接续从20/24新增关闭3项（A17、A18、A19）。** A01—A23均按原条件通过；固定六张工程卡与24项验收分母不变。
+
+A24已有2958双包四类消费、旧API兼容、三NuGet示例和原Console/两GUI完整业务证据，尚不能标为完整交付：NET仓尚无remote，也尚无 `.github/workflows` 配置；远端仓库/工作流接线、主线推送与实际CI、签名及NuGet正式渠道仍须逐项完成或按用户决定登记延期。未签名、未上架、未部署；不能把本地pack或功能验收写成正式发布。最终候选/文档与归档收编由根登记最终main SHA。上述发行接线不追加为已过NET-01—05的门，A24/NET-06仍独立保留未关闭。
+
+本节按原卡完整条件记录，不以代码编写比例代替闭环进度；不增小卡，不把内部UI/生命周期缺口归为外部发行延期。正式跨仓六份单据仍由指定单写者同步。新产品或示例修正完成后只重验受影响入口，并更新这些当前事实；旧红和历史回执不删除。
