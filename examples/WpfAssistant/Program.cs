@@ -9,6 +9,7 @@ using Microsoft.Win32;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Storage;
 using Tansr.Sdk.Views;
 
 namespace WpfAssistant;
@@ -547,7 +548,7 @@ internal sealed class AssistantWindow : Window
 
     private static string? Empty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     private static string Get(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() ?? "" : "";
-    private static string ErrorText(Exception error) => error is TansrException sdk ? sdk.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
+    private static string ErrorText(Exception error) => error is TansrException sdk ? sdk.Code : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
 
     private sealed class RequestItem(SessionRequestView request)
     { public SessionRequestView Request { get; } = request; public string Label => Request.Kind + ": " + Request.Id; }

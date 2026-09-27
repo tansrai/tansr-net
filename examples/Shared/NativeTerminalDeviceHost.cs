@@ -88,6 +88,13 @@ internal sealed class NativeTerminalDeviceHost
         {
             var work = config.GetProperty("workspace"); var log = config.GetProperty("journal");
             var workPath = Absolute(work, "path"); var journalPath = Absolute(log, "path");
+            var compactCompletedReceipts = false;
+            if (log.TryGetProperty("compactCompletedReceipts", out var compact))
+            {
+                if (compact.ValueKind != JsonValueKind.True && compact.ValueKind != JsonValueKind.False)
+                    throw new InvalidOperationException("terminal_device_journal_compact_boolean_required");
+                compactCompletedReceipts = compact.GetBoolean();
+            }
             if (journalPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("terminal_journal_must_be_outside_workspace");
             workspace = new WindowsWorkspace(workPath, new WindowsWorkspaceOptions { AllWritersCooperate = work.TryGetProperty("allWritersCooperate", out var cooperate) && cooperate.GetBoolean() });
@@ -95,6 +102,7 @@ internal sealed class NativeTerminalDeviceHost
             journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
             {
                 Path = journalPath, Mode = Text(log, "mode") == "create" ? StorageOpenMode.Create : Text(log, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_device_open_mode_required"),
+                CompactCompletedReceipts = compactCompletedReceipts,
                 ExecutorId = executorId, ApplicationScopeId = Text(scope, "applicationScopeId"), EndUserId = Text(scope, "endUserId"), ReadContext = authority.ReadScope,
             }, ct).ConfigureAwait(false);
             var allowed = config.GetProperty("allowedTools").EnumerateArray().Select(x => x.GetString() ?? "").ToArray();

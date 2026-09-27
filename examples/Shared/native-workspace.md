@@ -37,7 +37,7 @@ The configuration window loads the authorized catalog into its model selector an
   "executorId": "windows-workstation",
   "bindingRequestId": "<保存的原绑定请求 ID>",
   "workspace": { "path": "C:\\AppData\\workspace", "id": "work", "revision": "1", "allWritersCooperate": false },
-  "journal": { "path": "C:\\AppData\\state\\execution.sqlite", "mode": "create" },
+  "journal": { "path": "C:\\AppData\\state\\execution.sqlite", "mode": "create", "compactCompletedReceipts": true },
   "allowedTools": ["Read", "List", "Shell", "SearchMemory"],
   "shell": {
     "executable": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
@@ -48,6 +48,8 @@ The configuration window loads the authorized catalog into its model selector an
 ```
 
 `trustedScopeFile` 沿 [设备记忆示例](device-memory.md) 的 `principal` 和 `scope` 结构。主窗口借用原 controller 客户端，不复制受控本地 Serve 私有口令；独立程序直接调用 wrapper 时才需额外 `controllerTokenEnvironment`。device 票据只拥有设备侧权限。未知绑定结果保留配置中的原身份，先对账，不换键重试。已有 journal 必须显式 `reopen`，损坏或锁占不会退回创建新库。
+
+上例的 `journal.compactCompletedReceipts: true` 显式选择新建 `sdk2-execution-sqlite-compact-v1` 介质：未完成操作仍保留完整回执预留；耐久写入最终回执时才在同一事务释放未用预留，操作、原回执和未知结果保护仍保留。只接受 JSON 布尔值；缺省或 `false` 使用原 `sdk2-execution-sqlite-v1`，不扩大原容量。重开必须保持创建时的模式，已有 v1 不自动迁移，也不能改为 `true` 强行打开。此字段属于三端共用的 `tansr-example-terminal-device-v1` 配置；旧独立 `--device-memory` 示例仍使用原 v1 介质。
 
 文件/进程操作同时受 Serve 审批和本机批准约束。WPF/WinForms 的本机批准窗口随取消失效；Console 使用 `/device-allow <原ID>` 或 `/device-deny <原ID>`，不会另开一个 stdin 读取器。固定解释器校验后才启动，模型不能指定解释器路径或环境变量。这个普通用户进程不是操作系统沙箱；不支持隐式提权。默认工作区只承诺读操作；只有全部写者协作且满足 SDK 用户私有 ACL 检查时，才显式启用 `allWritersCooperate` 以提供条件写入。
 
@@ -76,6 +78,8 @@ Console `--worker jobs.jsonl` 保持有界并发、原单轮接纳/终局和 SIG
 All three examples share the public SDK workflow. The workspace exposes capabilities, tasks, usage, history pages, checkpoint lifecycle, fork and controlled cwd. A fork returns an identity without replacing the active conversation. Configuration profiles are trusted Serve references, never uploaded code.
 
 The optional terminal device configuration owns one execution binding for files, a pinned shell and memory publication. `TerminalDeviceHost` owns protocol coordination; the application supplies trusted identity, local resources, durable storage and local consent. Output is observed from Serve with explicit channel/gap/seal state. A seal is not a successful process receipt, and stopping the device is not remote settlement.
+
+Set the JSON boolean `journal.compactCompletedReceipts: true` explicitly when creating a compact `sdk2-execution-sqlite-compact-v1` journal. Pending operations retain their full receipt reserve; unused reserve is released atomically only when the original final receipt becomes durable. Operations and receipts remain available, and unknown results never authorize re-execution. Omission or `false` retains the original v1 format and limits. Reopen with the same mode; existing v1 files are never migrated automatically. This option applies to the shared terminal device host, not the separate legacy `--device-memory` example.
 
 Inline/directory skills and allowlisted stdio/HTTP MCP calls can be revoked from the native UI or Console. Background jobs use the same session API and explicit unattended policy. Presentation copies and drafts remain separate from authoritative archives; they are never silently replayed into the model or treated as current authorization.
 

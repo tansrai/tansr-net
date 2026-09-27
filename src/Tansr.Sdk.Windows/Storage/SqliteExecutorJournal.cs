@@ -7,10 +7,11 @@ using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Windows.Storage;
 
-/// <summary>原 sdk2-execution-sqlite-v1 介质。首次耐久占用才授予执行，重开、超时和断线均不重新授予。</summary>
+/// <summary>默认兼容原 sdk2-execution-sqlite-v1，可显式选择独立紧凑介质。首次耐久占用才授予执行，重开、超时和断线均不重新授予。</summary>
 public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
 {
     public const string Format = "sdk2-execution-sqlite-v1";
+    public const string CompactFormat = "sdk2-execution-sqlite-compact-v1";
     private const int MaximumOperationBytes = 1048576;
     private const int ReceiptReserve = 262144;
     private static readonly string[] Schema =
@@ -26,6 +27,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     private readonly string _application, _user, _executor, _metadata;
     private readonly int _maximumOperations;
     private readonly long _maximumBytes;
+    private readonly bool _compactCompletedReceipts;
     private readonly Func<JsonElement> _readContext;
     private bool _busy, _poisoned, _uncertain, _closed;
     private (long Bytes, int Count)? _known;
@@ -36,6 +38,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         _connection = connection; _parent = parent; _file = file; _metadata = metadata;
         _application = options.ApplicationScopeId; _user = options.EndUserId; _executor = options.ExecutorId;
         _maximumOperations = options.MaxOperations; _maximumBytes = options.MaxStoredBytes; _readContext = options.ReadContext;
+        _compactCompletedReceipts = options.CompactCompletedReceipts;
     }
 
     public static Task<SqliteExecutorJournal> OpenAsync(SqliteExecutorJournalOptions options, CancellationToken cancellationToken = default)
@@ -48,6 +51,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         {
             Path = StorageFileIdentity.FullPath(options.Path),
             Mode = options.Mode,
+            CompactCompletedReceipts = options.CompactCompletedReceipts,
             ApplicationScopeId = options.ApplicationScopeId,
             EndUserId = options.EndUserId,
             ExecutorId = options.ExecutorId,
@@ -145,12 +149,22 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
             Require(row != null && row.Value.Operation == Canonical(op), "receipt_mismatch");
             if (row!.Value.Receipt != null)
             {
-                Require(row.Value.Receipt == text && Bytes(text) + row.Value.Reserved == ReceiptReserve, "receipt_mismatch");
+                Require(row.Value.Receipt == text && ValidTerminalReserve(text, row.Value.Reserved), "receipt_mismatch");
                 return null;
             }
             Require(row.Value.Reserved == ReceiptReserve);
-            Transaction(() => Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE id=$id",
-                ("$receipt", text), ("$reserve", ReceiptReserve - Bytes(text)), ("$id", id)), check);
+            Transaction(() =>
+            {
+                int unused = ReceiptReserve - Bytes(text);
+                Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE id=$id",
+                    ("$receipt", text), ("$reserve", _compactCompletedReceipts ? 0 : unused), ("$id", id));
+                if (_compactCompletedReceipts)
+                {
+                    // 与唯一终态同事务释放未用预留；不删除操作锚、不降低条数、也不重新授予未知结果。
+                    var state = State(); Require(state.Bytes >= unused);
+                    Exec("UPDATE state SET logical_bytes=$bytes WHERE id=1", ("$bytes", state.Bytes - unused));
+                }
+            }, check);
             return null;
         }, cancellationToken);
         return Task.CompletedTask;
@@ -364,9 +378,12 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
 
     private JsonElement ValidateStoredReceipt((string Operation, string? Receipt, int Reserved) row, JsonElement op)
     {
-        Require(row.Receipt != null && Bytes(row.Receipt) + row.Reserved == ReceiptReserve);
+        Require(row.Receipt != null && ValidTerminalReserve(row.Receipt, row.Reserved));
         return ValidateReceipt(Stored(row.Receipt!, "ExecutionReceiptRequest", ReceiptReserve), op);
     }
+
+    private bool ValidTerminalReserve(string receipt, int reserved) =>
+        _compactCompletedReceipts ? reserved == 0 : Bytes(receipt) + reserved == ReceiptReserve;
 
     private static ExecutorJournalClaim Pending((string Operation, string? Receipt, int Reserved) row)
     { Require(row.Reserved == ReceiptReserve); return ExecutorJournalClaim.Pending(); }
@@ -406,7 +423,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     }
     private static string BuildMetadata(SqliteExecutorJournalOptions options, StorageFileIdentity parent, StorageFileIdentity file) => Canonical(Object(writer =>
     {
-        writer.WriteString("format", Format);
+        writer.WriteString("format", options.CompactCompletedReceipts ? CompactFormat : Format);
         writer.WriteStartObject("identity"); writer.WriteStartObject("scope"); writer.WriteString("applicationScopeId", options.ApplicationScopeId); writer.WriteString("endUserId", options.EndUserId); writer.WriteEndObject(); writer.WriteString("executorId", options.ExecutorId); writer.WriteEndObject();
         writer.WriteStartObject("limits"); writer.WriteNumber("maxOperations", options.MaxOperations); writer.WriteNumber("maxStoredBytes", options.MaxStoredBytes); writer.WriteEndObject();
         writer.WriteNumber("maxPages", options.MaxPages); writer.WriteNumber("pageSize", 4096);

@@ -3,6 +3,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Storage;
 using Tansr.Sdk.Views;
 
 namespace ConsoleAssistant;
@@ -367,6 +368,6 @@ internal static class Program
     }
 
     private static string Required(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : throw new InvalidOperationException("missing_" + name);
-    private static string ErrorCode(Exception error) => error is TansrException sdk ? sdk.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
+    private static string ErrorCode(Exception error) => error is TansrException sdk ? sdk.Code : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
     private static void Write(string value) { lock (OutputLock) Console.WriteLine(value); }
 }

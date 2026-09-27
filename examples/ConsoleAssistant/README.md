@@ -55,3 +55,5 @@ dotnet restore Tansr.Sdk.slnx --locked-mode
 # 统一能力工作台
 
 `/workspace` 提供能力、任务、用量、分页历史及完整快照/cwd 操作；`/device-start`、`/device-allow`、`/device-deny` 接入与原生 UI 相同的受信终端设备；`/revoke-extensions` 撤销 Skills/MCP。完整配置见 [统一工作台说明](../Shared/native-workspace.md)。`--worker` 继续提供无 UI 的有界作业和显式授权政策。
+
+`/device-start` 的受信配置可显式设置 JSON 布尔值 `journal.compactCompletedReceipts: true` 新建紧凑执行日志；缺省为原 v1。重开必须保持原模式，旧 v1 不自动迁移；未完成操作仍保留预留，未知结果不重执行。完整配置样本见上述共享说明；独立 `--device-memory` 的旧配置不变。
