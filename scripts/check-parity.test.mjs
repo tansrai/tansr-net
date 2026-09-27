@@ -8,9 +8,22 @@ import { check, extractExports, extractMembers } from './check-parity.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const load = () => JSON.parse(readFileSync(join(root, 'doc/compatibility/public-api-map.json'), 'utf8'));
+const loadUnreviewed = () => {
+  const map = load();
+  // Acceptance is a test input, not a permanent assumption about project progress.
+  for (const group of map.groups) {
+    Object.assign(group, { complete: false, status: 'partial-unverified', remaining: 'Fixture: original group acceptance is still pending' });
+    delete group.acceptance;
+  }
+  for (const entry of map.entries) {
+    Object.assign(entry, { status: 'partial-unverified', remaining: 'Fixture: original entry acceptance is still pending' });
+    delete entry.acceptance;
+  }
+  return map;
+};
 
 test('all fixed public entries are inventoried without claiming behavior completion', () => {
-  const map = load();
+  const map = loadUnreviewed();
   assert.deepEqual(check(map), { entries: 681, enumerated: 681, groups: 16, sourceFiles: 11, acceptedBehavior: 0, referencedEvidence: map.behaviorEvidence.length });
 });
 
@@ -52,7 +65,7 @@ test('new public class members are collected but private fields and bodies are n
 });
 
 test('an individual reviewed behavior can progress without forcing all groups green', () => {
-  const map = load(), entry = map.entries.find(item => item.symbol === 'AgentSession.submitInput');
+  const map = loadUnreviewed(), entry = map.entries.find(item => item.symbol === 'AgentSession.submitInput');
   assert.ok(entry);
   Object.assign(entry, { status: 'verified', remaining: '', evidence: ['session-input'], acceptance: ['NET-A05: original target and inputId, once-only consumption and draft retention'] });
   assert.equal(check(map).acceptedBehavior, 0);
@@ -68,9 +81,12 @@ test('unrun evidence or an absent receipt cannot approve behavior', () => {
 });
 
 test('a complete group cannot hide open entries or remaining acceptance conditions', () => {
-  const map = load(), group = map.groups.find(item => item.id === 'P03');
-  Object.assign(group, { complete: true, remaining: '', acceptance: ['complete original behavior comparison'] });
+  const map = loadUnreviewed(), group = map.groups.find(item => item.id === 'P03');
+  Object.assign(group, { complete: true, status: 'verified', remaining: '', acceptance: ['complete original behavior comparison'] });
   assert.throws(() => check(map), /Group has open behavior entries/);
+  const pendingConditions = loadUnreviewed(), pendingGroup = pendingConditions.groups.find(item => item.id === 'P03');
+  Object.assign(pendingGroup, { complete: true, status: 'verified', acceptance: ['claimed complete while original conditions remain'] });
+  assert.throws(() => check(pendingConditions), /Closed item lacks complete acceptance conditions/);
 });
 
 test('behavior evidence must still point to a real executable entry', () => {
