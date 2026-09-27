@@ -24,7 +24,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
     public async Task FiveClientsRemainIsolatedWhileNativeExecutionFailsAndLosesAuthority()
     {
         using var deadline = new CancellationTokenSource(TimeSpan.FromMinutes(7)); var ct = deadline.Token;
-        var directory = Required("TANSR_SHARED_DIRECTORY");
+        var directory = Path.GetFullPath(Required("TANSR_SHARED_DIRECTORY"));
         using var control = new HttpClient { BaseAddress = new Uri("http://127.0.0.1:18890"), Timeout = TimeSpan.FromSeconds(10) };
         control.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "fixture-control");
         async Task<JsonElement> State() { using var response = await control.GetAsync("/state", ct); response.EnsureSuccessStatusCode(); return JsonDocument.Parse(await response.Content.ReadAsByteArrayAsync(ct)).RootElement.Clone(); }
@@ -44,6 +44,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
         using var mobile = Client("ui", "u-unified"); using var mobileDevice = Client("device", "u-unified");
         using var native = Client("csharp", "u-csharp"); using var nativeDevice = Client("csharp-device", "u-csharp");
         var resources = new List<IDisposable>(); var hosts = new List<DeviceSessionHost>(); var revoked = false;
+        JsonElement? evidence = null;
         async Task<(AgentSession Session, SqliteExecutorJournal Journal, string Work)> Open(TansrClient owner, TansrClient executor, string user, string id)
         {
             var work = Path.Combine(directory, id); Directory.CreateDirectory(work);
@@ -97,7 +98,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
             await Run("csharp-write", "Write", new { file_path = "/workspace/work/own.txt", contents = "CSHARP_PRIVATE_WORKSPACE" }, true);
             await Run("csharp-fail", "Read", new { file_path = "/workspace/work/missing.txt" }, false);
             var completed = await own.Journal.OperationsAsync(cancellationToken: ct); Assert.NotEmpty(completed);
-            var originalOperation = completed[0];
+            var originalOperation = Assert.Single(completed, operation => operation.GetProperty("request").GetProperty("operation").GetString() == "fs.write");
             await Denied("electron", own.Session.Id, "/executions/" + originalOperation.GetProperty("operationId").GetString() + "?protocol=sdk2-ext-v1");
             // Disconnect only the local observation. The original remote session and prior receipt survive.
             using (var observer = new CancellationTokenSource())
@@ -128,7 +129,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
                 Assert.True(backpressure.GetProperty("disconnected").GetBoolean()); Assert.True(backpressure.GetProperty("sawPaused").GetBoolean());
             }
             await Post("/revoke", new { }); revoked = true; await Denied("csharp", own.Session.Id, "");
-            await Post("/sessions", new { csharpFaultsComplete = true });
+            await Post("/sessions", new { csharpFaultsComplete = "done" });
             await Until(state => state.GetProperty("sessions").GetProperty("mobileStage").GetString() == "done");
             var final = await State(); Assert.True(final.GetProperty("hostSentinelUnchanged").GetBoolean());
             foreach (var platform in new[] { "android", "harmony", "ios" })
@@ -138,10 +139,21 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
             }
             Assert.Equal("CSHARP_PRIVATE_WORKSPACE", await File.ReadAllTextAsync(Path.Combine(own.Work, "own.txt"), ct));
             Assert.False(File.Exists(Path.Combine(shared.Work, "own.txt")));
-            var ledger = await shared.Journal.OperationsAsync(cancellationToken: ct); Assert.Equal(3, ledger.Count);
+            var ledger = await shared.Journal.OperationsAsync(cancellationToken: ct);
+            // A kernel Write includes inspect/mkdir operations. Count the actual write
+            // side effects, while retaining every operation for scope/replay checks.
+            var writes = ledger.Where(operation => operation.GetProperty("request").GetProperty("operation").GetString() == "fs.write").ToArray();
+            Assert.Equal(3, writes.Length);
+            Assert.Equal(new[] { "mobile-android.txt", "mobile-harmony.txt", "mobile-ios.txt" },
+                writes.Select(operation => operation.GetProperty("request").GetProperty("args").GetProperty("path").GetString()).OrderBy(path => path, StringComparer.Ordinal));
+            Assert.All(ledger, operation =>
+            {
+                Assert.Equal("u-unified", operation.GetProperty("scope").GetProperty("endUserId").GetString());
+                Assert.Equal(shared.Session.Id, operation.GetProperty("sessionId").GetString());
+            });
             foreach (var operation in ledger) await Denied("electron", shared.Session.Id, "/executions/" + operation.GetProperty("operationId").GetString() + "?protocol=sdk2-ext-v1");
             await Post("/timeline", new { platform = "csharp", stage = "finish", localOperations = count, mobileOperations = ledger.Count });
-            await File.WriteAllTextAsync(Path.Combine(directory, "csharp-evidence.json"), Json(new
+            evidence = Json(new
             {
                 passed = true,
                 sharedSession = shared.Session.Id,
@@ -150,8 +162,9 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
                 backpressure = pressure,
                 revoked = true,
                 mobileOperations = ledger.Count,
+                mobileWriteSideEffects = writes.Length,
                 ownOperations = count
-            }).GetRawText(), ct);
+            });
             output.WriteLine("Five-client shared Serve: C# real Windows tools, original mobile session, independent Electron scope; native faults did not leak workspaces or revoke other subjects.");
         }
         finally
@@ -169,5 +182,6 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
             foreach (var resource in resources.AsEnumerable().Reverse()) try { resource.Dispose(); } catch (Exception fault) { cleanup.Add(fault); }
             if (cleanup.Count > 0) throw new AggregateException("Same-Serve owned device cleanup failed.", cleanup);
         }
+        if (evidence is { } passed) await File.WriteAllTextAsync(Path.Combine(directory, "csharp-evidence.json"), passed.GetRawText(), ct);
     }
 }

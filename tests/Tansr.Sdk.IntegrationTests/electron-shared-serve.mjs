@@ -12,16 +12,27 @@ const abort = new AbortController(), events = [], denied = [], started = Date.no
 const guard = setTimeout(() => { abort.abort(); app.exit(3); }, 420000);
 const client = new Sdk2SessionClient({ baseUrl: config.url, readToken: () => 'demo1.unified.electron',
   readContext: () => ({ applicationScopeId: 'unified-app', endUserId: 'u-electron', authorizationRevision: '1' }) });
-let session, watch, window, failure;
+let session, watch, window, failure, stopping = false;
 async function state() { const r = await fetch(config.controlUrl + '/state'); assert.equal(r.status, 200); return r.json(); }
 async function post(route, value) { const r = await fetch(config.controlUrl + route, { method: 'POST', headers: { authorization: 'Bearer fixture-control', 'content-type': 'application/json' }, body: JSON.stringify(value) }); assert.equal(r.status, 200); return r.json(); }
-async function until(predicate) { while (!predicate(await state())) { assert.ok(Date.now() - started < 400000); await new Promise(resolve => setTimeout(resolve, 100)); } }
+async function until(predicate) { while (true) { if (failure) throw failure; if (predicate(await state())) return; assert.ok(Date.now() - started < 400000); await new Promise(resolve => setTimeout(resolve, 100)); } }
+// Electron waits for the entry ESM to evaluate before emitting ready. Keep this
+// asynchronous lifetime outside top-level await so app.whenReady can settle.
+async function main() {
 try {
   await app.whenReady(); window = new BrowserWindow({ show: false, webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
   await window.loadURL('data:text/html,<title>Same Serve protocol acceptance</title><main>Original Electron runtime</main>');
   session = await client.create({ tools: [], budget: { maxTokens: 10000 } });
-  watch = (async () => { for await (const event of client.events(session.sessionId, { signal: abort.signal })) events.push(event); })();
+  await client.initialize({ protocol: 'sdk2-ext-v1', sessionId: session.sessionId, requestedTools: [],
+    platform: { platform: 'windows', arch: process.arch, language: 'typescript', runtimeVersion: process.versions.electron, adapterVersion: 'sdk2-ext-v1' } });
+  watch = (async () => {
+    try {
+      for await (const event of client.events(session.sessionId, { signal: abort.signal })) events.push(event);
+      if (!stopping) throw new Error('Electron observation ended before requested shutdown.');
+    } catch (error) { if (!stopping) failure ??= error; throw error; }
+  })();
   void watch.catch(() => {});
+  await until(() => events.some(event => event.sessionId === session.sessionId));
   await post('/sessions', { electron: session.sessionId });
   await post('/timeline', { platform: 'electron', stage: 'ready', sessionId: session.sessionId, version: process.versions.electron });
   await until(s => s.barrier);
@@ -36,23 +47,28 @@ try {
     assert.equal(before.status, 'idle'); await client.send(session.sessionId, 'NET_SHARED:' + JSON.stringify({ id }));
     const end = Date.now() + 25000;
     while (!events.slice(from).some(e => e.type === 'turn.completed' && e.seq > before.lastSeq)) {
+      if (failure) throw failure;
       assert.ok(Date.now() < end, 'Own Electron turn must complete.'); await new Promise(resolve => setTimeout(resolve, 40));
     }
     assert.ok(events.slice(from).some(e => e.type === 'msg.text.delta' && e.text === `SHARED_SETTLED:${id}`));
   }
   await turn('electron-before-faults');
-  await until(s => s.sessions.csharpFaultsComplete === true);
+  await until(s => s.sessions.csharpFaultsComplete === 'done');
   await turn('electron-after-other-user-revocation');
   await post('/timeline', { platform: 'electron', stage: 'survived-faults' });
   await until(s => s.sessions.mobileStage === 'done');
   const history = await client.history(session.sessionId);
   assert.ok(!JSON.stringify(history).includes('native-mobile-') && !JSON.stringify(history).includes('CSHARP_PRIVATE_WORKSPACE'));
   await post('/timeline', { platform: 'electron', stage: 'finish', events: events.length });
-  writeFileSync(join(config.directory, 'electron-evidence.json'), JSON.stringify({ passed: true, versions: process.versions, session, denied, events,
-    role: 'Original Sdk2SessionClient inside Electron; complete integrated SDK/IPC compatibility is a separate original-app regression.' }, null, 2));
-} catch (error) { failure = error; writeFileSync(join(config.directory, 'electron-failure.json'), JSON.stringify({ error: error?.stack ?? String(error), events }, null, 2)); }
+} catch (error) { failure ??= error; }
 finally {
-  abort.abort(); await watch?.catch(error => { if (!abort.signal.aborted) failure ??= error; });
+  stopping = true; abort.abort(); await watch?.catch(() => {});
   if (session) await client.close(session.sessionId).catch(error => { failure ??= error; });
+  if (failure) writeFileSync(join(config.directory, 'electron-failure.json'), JSON.stringify({ error: failure?.stack ?? String(failure), events }, null, 2));
+  writeFileSync(join(config.directory, 'electron-evidence.json'), JSON.stringify({ passed: !failure, versions: process.versions, session, denied, events,
+    close: session && !failure ? 'accepted; fixture validates final resource drain' : 'not proven',
+    role: 'Original Sdk2SessionClient inside Electron; complete integrated SDK/IPC compatibility is a separate original-app regression.' }, null, 2));
   window?.destroy(); clearTimeout(guard); app.exit(failure ? 1 : 0);
 }
+}
+void main().catch(error => { console.error(error); app.exit(1); });

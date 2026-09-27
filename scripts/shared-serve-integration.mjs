@@ -54,8 +54,8 @@ function launch(name, tool, args, options = {}) {
   const entry = { name, tool, args, started: Date.now() }; commands.push(entry);
   const done = new Promise((resolveDone, reject) => { child.once('error', failure => { children.delete(child); if (!terminating) firstChildFailure ??= failure; reject(failure); }); child.once('exit', (code, signal) => {
     children.delete(child); Object.assign(entry, { code, signal, finished: Date.now() });
-    if (code === 0) resolveDone(text);
-    else { const failure = new Error(`${name} failed (${code}/${signal}); see its log.`); if (!terminating) firstChildFailure ??= failure; reject(failure); }
+    if (code === 0 && (!options.success || options.success.test(text))) resolveDone(text);
+    else { const failure = new Error(`${name} failed (${code}/${signal}${code === 0 ? '; required test result absent' : ''}); see its log.`); if (!terminating) firstChildFailure ??= failure; reject(failure); }
   }); }); void done.catch(() => {});
   if (options.input) child.stdin.end(options.input); else child.stdin.end();
   return { child, done, text: () => text };
@@ -109,11 +109,11 @@ try {
   mac = JSON.parse((await command('ios-prepare', c.ios.ssh, [...sshArgs, c.ios.host, 'python3 -'], { input: preparation })).trim());
   const android = launch('android-test', c.android.tool, ['-s', c.android.serial, 'shell', 'am', 'instrument', '-w', '-r', '-e', 'class',
     'com.tansr.sdk.receiver.android.AgentSessionHttpTest#testSharedServeAttachInputApprovalAndUiReconnect', '-e', 'unifiedUrl', fixture.url,
-    '-e', 'unifiedSession', mobileId, '-e', 'unifiedPrompt', 'USDK:windows:Write:mobile-android', 'com.tansr.sdk.receiver.android.test/android.test.InstrumentationTestRunner']);
+    '-e', 'unifiedSession', mobileId, '-e', 'unifiedPrompt', 'USDK:windows:Write:mobile-android', 'com.tansr.sdk.receiver.android.test/android.test.InstrumentationTestRunner'], { success: /OK \(1 test\)/ });
   const harmony = launch('harmony-test', c.harmony.tool, ['-t', c.harmony.serial, 'shell', 'aa', 'test', '-b', 'com.tansr.harmony.demo', '-m', 'entry_test', '-s', 'unittest', 'OpenHarmonyTestRunner',
-    '-s', 'class', 'UnifiedMobileTransport', '-s', 'unifiedUrl', fixture.url, '-s', 'unifiedSession', mobileId, '-s', 'unifiedPrompt', 'USDK:windows:Write:mobile-harmony', '-s', 'timeout', '360000', '-w', '420']);
+    '-s', 'class', 'UnifiedMobileTransport', '-s', 'unifiedUrl', fixture.url, '-s', 'unifiedSession', mobileId, '-s', 'unifiedPrompt', 'USDK:windows:Write:mobile-harmony', '-s', 'timeout', '360000', '-w', '420'], { success: /Tests run: 1, Failure: 0, Error: 0, Pass: 1, Ignore: 0/ });
   const iosCommand = `xcodebuild test-without-building -xctestrun ${quote(mac.path)} -destination ${quote('platform=iOS Simulator,id=' + c.ios.simulator)} -parallel-testing-enabled NO -only-testing:TansrClientTests/AgentSessionHttpTests/testSharedServeAttachInputApprovalAndUiReconnect -resultBundlePath ${quote(c.ios.evidence + '/shared.xcresult')} CODE_SIGNING_ALLOWED=NO`;
-  const ios = launch('ios-test', c.ios.ssh, [...sshArgs, c.ios.host, `printf '%s\\n' $$ > ${quote(c.ios.evidence + '/owned-xcode.pid')}; exec ${iosCommand}`]);
+  const ios = launch('ios-test', c.ios.ssh, [...sshArgs, c.ios.host, `printf '%s\\n' $$ > ${quote(c.ios.evidence + '/owned-xcode.pid')}; exec ${iosCommand}`], { success: /Executed 1 test, with 0 failures/ });
   // A real readiness barrier, not just simultaneous process starts. The original tests log their
   // two live subscriptions before waiting for their assigned stage. Match this unique session ID.
   await until(async () => {
@@ -135,13 +135,13 @@ try {
       { encoding: 'utf8', windowsHide: true, timeout: 10000, maxBuffer: 16 * 1048576 }), text => text.includes(marker), platform + ' native assertions');
   }
   // Keep all original mobile observers subscribed throughout the selected C# fault interval.
-  await until(state, s => s.sessions.csharpFaultsComplete === true && s.timeline.some(item => item.platform === 'electron' && item.stage === 'survived-faults'), 'Other subjects survive selected C# faults');
+  await until(state, s => s.sessions.csharpFaultsComplete === 'done' && s.timeline.some(item => item.platform === 'electron' && item.stage === 'survived-faults'), 'Other subjects survive selected C# faults');
   await post('/sessions', { mobileStage: 'done' });
   const outputs = await Promise.all([native.done, electron.done, android.done, harmony.done, ios.done]);
   assert.match(outputs[2], /OK \(1 test\)/); assert.match(outputs[3], /Tests run: 1, Failure: 0, Error: 0, Pass: 1, Ignore: 0/);
   assert.match(outputs[4], /Executed 1 test, with 0 failures/); assert.ok(!outputs[4].includes('Test skipped'));
   report = await state();
-  assert.ok(report.revoked && report.sessions.csharpFaultsComplete);
+  assert.ok(report.revoked && report.sessions.csharpFaultsComplete === 'done');
   assert.equal(report.results.filter(item => item.id.startsWith('USDK:')).length, 3, 'Three mobile subscriptions do not triple side effects.');
   verifyServeSourceSnapshot(c.source, c.sourceSnapshot);
   for (const item of implementation) assert.equal(hash(item.path), item.sha256, 'Acceptance code/binary drift during the run.');
@@ -155,7 +155,8 @@ finally {
   }
   for (const [platform, port] of ownedForwards) {
     try { await command(`${platform}-forward-cleanup-${port}`, platform === 'android' ? c.android.tool : c.harmony.tool,
-      platform === 'android' ? ['-s', c.android.serial, 'reverse', '--remove', `tcp:${port}`] : ['-t', c.harmony.serial, 'fport', 'rm', `tcp:${port} tcp:${port}`]); }
+      platform === 'android' ? ['-s', c.android.serial, 'reverse', '--remove', `tcp:${port}`] : ['-t', c.harmony.serial, 'fport', 'rm', `tcp:${port}`, `tcp:${port}`],
+      platform === 'harmony' ? { success: /Remove forward ruler success/ } : undefined); }
     catch (cleanup) { error ??= cleanup; }
   }
   try { await fixture?.close(); } catch (cleanup) { error ??= cleanup; }

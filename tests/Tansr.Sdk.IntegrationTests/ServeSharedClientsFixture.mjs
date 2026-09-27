@@ -123,13 +123,16 @@ export async function startSharedClientsFixture({ source, directory }) {
     if (req.method !== 'POST' || req.headers.authorization !== 'Bearer fixture-control') return reply(403, {});
     let bytes = ''; for await (const part of req) { bytes += part; assert.ok(Buffer.byteLength(bytes) <= 8192); }
     const input = JSON.parse(bytes);
-    if (url.pathname === '/sessions') Object.assign(sessions, input);
+    if (url.pathname === '/sessions') {
+      assert.ok(Object.values(input).every(value => typeof value === 'string'), 'Original mobile coordination sessions is a string dictionary.');
+      Object.assign(sessions, input);
+    }
     else if (url.pathname === '/barrier') barrier = true;
     else if (url.pathname === '/revoke') revoked = true;
     else if (url.pathname === '/pressure') {
       const spool = spools.get('u-csharp'), used = spool.snapshot().usage.global;
       spool.reserve({ bindingId: 'u-csharp', operationKey: 'test-pressure', intentDigest: 'a'.repeat(64),
-        originalMax: { bytes: cap.bytes - used.bytes, records: 1 }, terminalReserve: { bytes: 0, records: 0 } });
+        originalMax: { bytes: cap.bytes - used.bytes - 1, records: 1 }, terminalReserve: { bytes: 1, records: 1 } });
       assert.equal(spool.snapshot().usage.global.bytes, cap.bytes);
     } else if (url.pathname === '/timeline') { assert.ok(timeline.length < 64); timeline.push({ ...input, at: Date.now() }); }
     else return reply(404, {});
@@ -148,11 +151,21 @@ export async function startSharedClientsFixture({ source, directory }) {
         const stored = await sessionStore.get(user, sessions[key]);
         assert.ok(stored?.usageSnapshot, 'Actual persisted usage snapshot required: ' + key);
         for (const other of users.filter(value => value !== user)) assert.equal(await sessionStore.get(other, sessions[key]), null, 'Stored history and usage must be scoped to the original subject.');
-        billing.push({ user, sessionId: sessions[key], usageSnapshot: stored.usageSnapshot });
+        const prefix = user === 'u-unified' ? 'USDK:' : user === 'u-csharp' ? 'csharp-' : 'electron-';
+        const expectedMainCalls = [...calls].filter(([id]) => id.startsWith(prefix)).reduce((total, [, count]) => total + count, 0);
+        billing.push({ user, sessionId: sessions[key], expectedMainCalls, usageSnapshot: stored.usageSnapshot });
       }
       const value = { ...(await state()), requests, memoryCalls, billing, realKernel: true, controlledModel: true, failure: failure?.stack ?? null };
       await writeFile(join(directory, 'serve-shared-evidence.json'), JSON.stringify(value, null, 2));
       if (failure) throw failure; assert.equal(value.hostSentinelUnchanged, true); assert.deepEqual(value.serviceFiles, ['sentinel.txt']);
+      for (const item of billing) {
+        const snapshot = item.usageSnapshot.payload.snapshot, main = snapshot.byPurpose.main;
+        assert.equal(snapshot.sessionId, item.sessionId, 'Persisted usage belongs to the exact session.');
+        assert.equal(main?.lines ?? 0, item.expectedMainCalls, 'Other subjects and duplicate mobile subscriptions must not add model usage.');
+        assert.equal(main?.usage.inputTokens ?? 0, 11 * item.expectedMainCalls);
+        assert.equal(main?.usage.outputTokens ?? 0, 3 * item.expectedMainCalls);
+        assert.equal(snapshot.totals.costStatus, 'partial-unpriced', 'Synthetic tokens are not real price evidence.');
+      }
       return value;
       } finally { unsubscribe(); for (const spool of spools.values()) spool.close(); }
     } };
