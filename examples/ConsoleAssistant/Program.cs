@@ -43,7 +43,11 @@ internal static class Program
         }
         if (args.Length == 1 && args[0] == "--offline")
         {
-            try { var saved = LocalConversationState.ForApplication("console").Load(); Write(saved.OfflineText); Write("本机草稿（未发送）：\n" + saved.Draft); return 0; }
+            try
+            {
+                var offline = LocalConversationState.ForApplication("console", PresentationEndpoint(), TrustedExampleScope.CurrentPresentationIdentity);
+                var saved = offline.Load(); Write(saved.OfflineText); Write("本机草稿（未发送）：\n" + saved.Draft); return 0;
+            }
             catch (Exception error) { Write("local_state=" + ErrorCode(error)); return 1; }
         }
         if (args.Length > 0 && (args[0] == "--offline-archive" || args[0] == "--offline-memory"))
@@ -93,28 +97,30 @@ internal static class Program
         ExampleLocalStorage? storage = null;
         using var deviceApprovals = new ExampleDeviceApprovals(Write);
         var once = args.Length >= 2 && args[0] == "--once";
-        var local = LocalConversationState.ForApplication("console");
+        var localEndpoint = PresentationEndpoint();
+        LocalConversationState? local = null;
         string draft = "";
         IDisposable? localSubscription = null;
-        void SaveLocal(string? history = null) => local.Save(Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve", session?.Id ?? "", draft, SessionViewTextFormatter.Format(view.Snapshot), history);
+        void SaveLocal(string? history = null) => local!.Save(localEndpoint, session?.Id ?? "", draft, SessionViewTextFormatter.Format(view.Snapshot), history);
         try
         {
+            local = LocalConversationState.ForApplication("console", localEndpoint, TrustedExampleScope.CurrentPresentationIdentity);
             narrator = new SessionNarrator(line => Write("[narrator] " + line), new SessionNarratorOptions { Verbosity = ExampleSessionOptions.ReadNarratorVerbosity() });
             var saved = local.Load(); draft = saved.Draft;
             if (saved.Input != null && !saved.Input.CanStartAnother &&
-                (saved.SessionId != Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") || saved.Endpoint != (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve")))
+                (saved.SessionId != Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION") || saved.Endpoint != localEndpoint))
                 throw new InvalidOperationException("unresolved_input_requires_original_serve_and_resume_session");
             // Startup is cancellable; after startup, operation cancellation is
             // separate from destroying the underlying owned services.
             using (stop.Token.Register(serviceLifetime.Cancel))
                 connection = await ExampleConnection.ConnectAsync(Environment.GetEnvironmentVariable("TANSR_SERVE_URL"),
-                    _ => Task.FromResult(Required("TANSR_SESSION_TOKEN")), Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", serviceLifetime.Token);
+                    _ => { if (!local.IsCurrent(localEndpoint)) throw new InvalidOperationException("local_state_identity_changed"); return Task.FromResult(Required("TANSR_SESSION_TOKEN")); }, Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1", serviceLifetime.Token);
             client = connection.Client;
             var createOptions = ExampleSessionOptions.Create(Environment.GetEnvironmentVariable("TANSR_MODEL"),
                 Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"), NativeToolHost.GetDeclarations(connection.NativeTools));
             session = await client.CreateSessionAsync(createOptions, stop.Token);
             var active = session;
-            var input = new TurnInputEditor(session, saved.Endpoint == (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve") ? saved.Input : null, local.SaveInput);
+            var input = new TurnInputEditor(session, saved.Endpoint == localEndpoint ? saved.Input : null, local.SaveInput);
             var controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl,
                 Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve", session.Id, local.PathName, connection.Profile, connection.Contract);
             storage = new ExampleLocalStorage(client, session, connection.Endpoint);
@@ -149,6 +155,7 @@ internal static class Program
                 if (line == null || line == "/quit") break;
                 try
                 {
+                    if (!local.IsCurrent(localEndpoint)) throw new InvalidOperationException("local_state_identity_changed");
                     if (line.StartsWith("/device-start ", StringComparison.Ordinal))
                     {
                         if (terminalDevice != null) throw new InvalidOperationException("terminal_device_already_started");
@@ -262,6 +269,8 @@ internal static class Program
             Console.CancelKeyPress -= cancel;
         }
     }
+
+    private static string PresentationEndpoint() => Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve";
 
     private static async Task<string?> ReadCommandAsync(TextReader input, CancellationToken stop)
     {

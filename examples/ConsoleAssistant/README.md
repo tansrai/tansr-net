@@ -31,7 +31,7 @@ dotnet run --project examples/ConsoleAssistant/ConsoleAssistant.csproj -f net10.
 
 已增加 [多会话 worker](worker.md)：`--worker <jobs.jsonl> [--concurrency 1..8]` 用独立公开 SDK 会话处理每条作业，Ctrl+C/SIGTERM 停止排队，分别取消与关闭活动会话后回收共享连接。没有消息自动重发；输出分开记录接纳、终态、清理。
 
-同轮输入、自动本机草稿和 `--offline` 回看，以及 `/controls` 中显式启用的配置/记忆 preview，见 [共享说明](../Shared/session-controls.md)。`/insert` 不取消或重建会话；原输入键和完整正文先落盘再投递。离线呈现不作为当前授权的共享档案或模型材料。
+同轮输入、自动本机草稿和 `--offline` 回看，以及 `/controls` 中显式启用的配置/记忆 preview，见 [共享说明](../Shared/session-controls.md)。`/insert` 不取消或重建会话；原输入键和完整正文先落盘再投递。草稿与呈现按可信主体及 Serve 来源隔离，同主体可无票据离线读取；未知主体不自动恢复旧草稿，旧文件保留。主体分区见 [统一工作台说明](../Shared/native-workspace.md)。离线呈现不作为当前授权的共享档案或模型材料。
 
 待补：默认持久执行器/档案/记忆可信装配、安装与升级消费、裁剪/AOT实测。媒体真实付费与Windows录音/播放验收、Serve大帧端到端仍待集中验证。编译通过不表示这些功能完成，也不替代真实Serve联验。
 

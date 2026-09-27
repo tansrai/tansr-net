@@ -9,6 +9,7 @@
     <Compile Include="../../examples/Shared/NativeToolHost.cs" Link="Examples/NativeToolHost.cs" />
     <Compile Include="../../examples/Shared/TurnInputEditor.cs" Link="Examples/TurnInputEditor.cs" />
     <Compile Include="../../examples/Shared/LocalConversationState.cs" Link="Examples/LocalConversationState.cs" />
+    <Compile Include="../../examples/Shared/TrustedExampleScope.cs" Link="Examples/TrustedExampleScope.cs" />
     <Compile Include="../../examples/Shared/ExampleSessionControls.cs" Link="Examples/ExampleSessionControls.cs" />
     <Compile Include="../../examples/Shared/SessionContextText.cs" Link="Examples/SessionContextText.cs" />
     <Compile Include="../../examples/Shared/ExampleSessionOptions.cs" Link="Examples/ExampleSessionOptions.cs" />

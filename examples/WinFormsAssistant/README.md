@@ -46,4 +46,6 @@ dotnet restore Tansr.Sdk.slnx --locked-mode
 
 net48 示例与 WPF 共用完整控制面、受信设备工具、实时输出、Skills/MCP 及记忆接线，不另写 Agent Loop。配置、关闭语义与 Console 对应命令见 [统一工作台说明](../Shared/native-workspace.md)。
 
+草稿与呈现按可信主体及 Serve 来源隔离；切用户清旧界面和待发送草稿，保留旧文件及用户明确填写的恢复 ID，由 Serve 核对该会话。同主体续票不换分区，无票据也可离线读取该主体副本；未知身份不能自动恢复旧草稿。完整边界见上述共享说明。
+
 “连接本机设备工具”的受信配置可显式设置 JSON 布尔值 `journal.compactCompletedReceipts: true` 新建紧凑执行日志；缺省为原 v1。重开必须保持原模式，旧 v1 不自动迁移；未完成操作仍保留预留，未知结果不重执行。完整配置样本见上述共享说明；独立“设备记忆宿主”的旧配置不变。

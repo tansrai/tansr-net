@@ -53,7 +53,7 @@ internal sealed class AssistantForm : Form
     private CancellationTokenSource? _lifetime;
     private Task? _observation;
     private NativeToolHost? _nativeTools;
-    private readonly LocalConversationState _local = LocalConversationState.ForApplication("winforms");
+    private LocalConversationState _local = null!;
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 750 };
     private TurnInputEditor? _inputEditor;
     private ExampleSessionControls? _controls;
@@ -79,7 +79,7 @@ internal sealed class AssistantForm : Form
         top.Controls.Add(Row(Label("Serve 地址"), _endpoint, Label("短期票据"), _token, _loopback));
         _connect = Button("连接 / 创建", ConnectAsync, false);
         top.Controls.Add(Row(Label("恢复会话 ID"), _resume, Label("新会话模型"), _model, _connect,
-            Button("更新票据", () => { Volatile.Write(ref _currentToken, _token.Text); _status.Text = "内存票据已更新。"; return Task.CompletedTask; }, false)));
+            Button("更新票据", UpdateTokenAsync, false)));
         top.Controls.Add(Row(Label("正文"), _textMode, Label("思考"), _thinkingMode,
             Button("历史", ShowHistoryAsync), Button("状态", ShowMetadataAsync),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())), Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
@@ -106,9 +106,11 @@ internal sealed class AssistantForm : Form
         _textMode.SelectedIndexChanged += (_, _) => UpdateDelivery();
         _thinkingMode.SelectedIndexChanged += (_, _) => UpdateDelivery();
         _draft.TextChanged += (_, _) => { _draftRevision++; _saveTimer.Start(); };
-        _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); try { SaveLocal(); } catch (Exception error) { _status.Text = "本机保存失败，草稿仍在编辑器：" + ErrorText(error); } };
+        _saveTimer.Tick += async (_, _) => { _saveTimer.Stop(); if (_busy) { _saveTimer.Start(); return; } try { await SelectPresentationAsync(); SaveLocal(); } catch (Exception error) { _status.Text = "本机保存失败，草稿仍在编辑器：" + ErrorText(error); } };
+        if (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") is { Length: > 0 } configuredEndpoint) _endpoint.Text = configuredEndpoint;
         try
         {
+            _local = LocalConversationState.ForApplication("winforms", _endpoint.Text, TrustedExampleScope.CurrentPresentationIdentity);
             var saved = _local.Load();
             if (saved.Endpoint.Length > 0) { _endpoint.Text = saved.Endpoint; _resume.Text = saved.SessionId; }
             _draft.Text = saved.Draft; _conversation.Text = saved.Presentation;
@@ -124,6 +126,7 @@ internal sealed class AssistantForm : Form
         _textMode.Name = "TextDeliveryMode";
         _thinkingMode.Name = "ThinkingDeliveryMode";
         _narratorMode.Name = "NarratorVerbosity"; _narration.Name = "SessionNarration";
+        _token.TextChanged += async (_, _) => { if (!_busy && !PresentationIsCurrent()) await RunAsync(() => SelectPresentationAsync(), false); };
     }
 
     private static Label Label(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(4, 7, 4, 3) };
@@ -134,12 +137,20 @@ internal sealed class AssistantForm : Form
         var button = new Button { Text = text, AutoSize = true, Margin = new Padding(3) };
         button.Name = text;
         if (needsSession) _sessionButtons.Add(button);
-        button.Click += async (_, _) => await RunAsync(action); return button;
+        button.Click += async (_, _) => await RunAsync(action, needsSession); return button;
     }
-    private async Task RunAsync(Func<Task> action)
+    private async Task RunAsync(Func<Task> action, bool needsSession = false)
     {
         if (_busy) return; _busy = true; SetEnabled();
-        try { await action(); }
+        try
+        {
+            if (!PresentationIsCurrent())
+            {
+                await SelectPresentationAsync();
+                if (needsSession) { _status.Text = "可信用户或服务已改变；旧呈现已隔离，请重新连接。"; return; }
+            }
+            await action();
+        }
         catch (OperationCanceledException) { _status.Text = "操作取消或超时；保留草稿，先查状态再重试。"; }
         catch (Exception error) { _status.Text = ErrorText(error); }
         finally { _busy = false; SetEnabled(); }
@@ -153,8 +164,46 @@ internal sealed class AssistantForm : Form
         _endpoint.Enabled = _resume.Enabled = _session == null && !_busy;
     }
 
+    private bool PresentationIsCurrent()
+    {
+        try { return _local != null && _local.IsCurrent(_endpoint.Text); }
+        catch { return false; }
+    }
+    private bool IsCurrentPresentation(AgentSession session, LocalConversationState local, string endpoint)
+    {
+        try { return ReferenceEquals(_session, session) && ReferenceEquals(_local, local) && local.IsCurrent(endpoint); }
+        catch { return false; }
+    }
+    private async Task SelectPresentationAsync(bool newConnection = false)
+    {
+        if (PresentationIsCurrent() && (!newConnection || _local.HasTrustedIdentity)) return;
+        _saveTimer.Stop();
+        if (_session != null) await DetachAsync();
+        CloseSessionWindows(); _subscription?.Dispose(); _subscription = null;
+        _inputEditor = null; _controls = null; _workspace = null;
+        _draft.Clear(); _conversation.Clear(); _narration.Clear(); _terminalOutput.Clear();
+        _requests.Items.Clear(); _requestSummary.Text = ""; _questions.Controls.Clear(); _questionEditors.Clear();
+        Text = "Tansr · WinForms 原生 SDK"; _closeFailure = null; _localSaveFailure = null;
+        // Keep the operator's explicit resume ID. Serve must reject a foreign
+        // session; a change of identity never silently creates another session.
+        _local = null!;
+        try
+        {
+            _local = LocalConversationState.ForApplication("winforms", _endpoint.Text, TrustedExampleScope.CurrentPresentationIdentity);
+            var saved = _local.Load(); _draft.Text = saved.Draft; _conversation.Text = saved.Presentation;
+        }
+        finally { _saveTimer.Stop(); }
+    }
+    private async Task UpdateTokenAsync()
+    {
+        await SelectPresentationAsync(newConnection: _session != null && !_local.HasTrustedIdentity);
+        Volatile.Write(ref _currentToken, _token.Text);
+        _status.Text = _session == null ? "内存票据已更新；请显式连接。" : "同一可信用户的内存票据已更新。";
+    }
+
     private async Task ConnectAsync()
     {
+        await SelectPresentationAsync(newConnection: true);
         SaveLocal();
         Volatile.Write(ref _currentToken, _token.Text);
         var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.Checked);
@@ -164,11 +213,16 @@ internal sealed class AssistantForm : Form
         try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
         catch { await connection.CloseAsync(); throw; }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _lifetime = new CancellationTokenSource(); _closeFailure = null;
-        var savedInput = _local.Snapshot.Endpoint == _endpoint.Text ? _local.Snapshot.Input : null;
-        _inputEditor = new TurnInputEditor(session, savedInput, _local.SaveInput);
+        var sessionLocal = _local;
+        var sessionEndpoint = _endpoint.Text;
+        var savedInput = sessionLocal.Snapshot.Endpoint == _endpoint.Text ? sessionLocal.Snapshot.Input : null;
+        _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
         _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, _endpoint.Text, session.Id, _local.PathName, connection.Profile, connection.Contract);
-        _nativeTools = new NativeToolHost(session, "Tansr.WinForms", SetWindowTitleAsync,
-            code => { if (!IsDisposed) BeginInvoke(new Action(() => _status.Text = code)); }, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
+        _nativeTools = new NativeToolHost(session, "Tansr.WinForms", (title, ct) =>
+        {
+            if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) throw new InvalidOperationException("local_state_identity_changed");
+            return SetWindowTitleAsync(title, ct);
+        }, code => { if (!IsDisposed) BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) _status.Text = code; })); }, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
         try { await _nativeTools.Ready; }
         catch { await DetachAsync(); throw; }
         _view = new SessionView(new SessionViewOptions
@@ -176,14 +230,17 @@ internal sealed class AssistantForm : Form
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
             ThinkingDelivery = (ThinkingDeliveryMode)_thinkingMode.SelectedIndex,
         });
-        _subscription = _view.Subscribe(Render, SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext());
+        _subscription = _view.Subscribe(snapshot =>
+        {
+            if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) Render(snapshot);
+        }, SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext());
         _narration.Clear();
         _narrator = new SessionNarrator(line =>
         {
             if (IsDisposed) return;
             BeginInvoke(new Action(() =>
             {
-                if (!ReferenceEquals(_session, session)) return;
+                if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) return;
                 if (_narration.Text.Length > 65536) _narration.Text = _narration.Text.Substring(_narration.Text.Length - 32768);
                 _narration.AppendText(line + Environment.NewLine);
             }));
@@ -201,12 +258,12 @@ internal sealed class AssistantForm : Form
 
     private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
     {
-        var storage = _storage; var narrator = _narrator;
+        var storage = _storage; var narrator = _narrator; var nativeTools = _nativeTools;
         try
         {
             await session.ObserveAsync(async (item, ct) =>
         {
-            view.Apply(item); narrator?.Apply(item); _nativeTools?.HandleEvent(item);
+            view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { if (!IsDisposed) BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); })); }
@@ -232,8 +289,8 @@ internal sealed class AssistantForm : Form
     private Task OpenMediaAsync()
     {
         if (_mediaWindow != null) { _mediaWindow.Activate(); return Task.CompletedTask; }
-        var session = _session;
-        _mediaWindow = new MediaForm(_media!, text => { if (ReferenceEquals(_session, session)) _draft.Text += (_draft.Text.Length == 0 ? "" : Environment.NewLine) + text; }, _draft.Text);
+        var session = _session!; var local = _local; var endpoint = _endpoint.Text;
+        _mediaWindow = new MediaForm(_media!, text => { if (IsCurrentPresentation(session, local, endpoint)) _draft.Text += (_draft.Text.Length == 0 ? "" : Environment.NewLine) + text; }, _draft.Text);
         _mediaWindow.FormClosed += (_, _) => _mediaWindow = null; _mediaWindow.Show(this); return Task.CompletedTask;
     }
 
@@ -267,26 +324,35 @@ internal sealed class AssistantForm : Form
     private void TrySaveForExit() { try { SaveLocal(); _localSaveFailure = null; } catch (Exception error) { _localSaveFailure = "本机保存失败：" + ErrorText(error); _status.Text = _localSaveFailure; } }
     private async Task ShowHistoryAsync()
     {
-        var history = await _session!.GetHistoryAsync();
-        _local.Save(_endpoint.Text, _session.Id, _draft.Text, _conversation.Text, history.GetRawText());
+        var session = _session!; var local = _local; var endpoint = _endpoint.Text;
+        var history = await session.GetHistoryAsync();
+        if (!IsCurrentPresentation(session, local, endpoint))
+            throw new InvalidOperationException("local_state_identity_changed");
+        local.Save(endpoint, session.Id, _draft.Text, _conversation.Text, history.GetRawText());
         await ShowAsync("服务端历史（已保留本机展示副本）", Task.FromResult(history));
     }
     private Task ShowLocalAsync()
     {
-        var saved = _local.Snapshot;
+        var saved = _local.HasTrustedIdentity ? _local.Snapshot : LocalConversationState.ForApplication("winforms").Load();
         var dialog = new Form { Owner = this, Text = "本机离线呈现 · " + saved.SavedAt, Width = 850, Height = 560 };
-        dialog.Controls.Add(new TextBox { Text = saved.OfflineText, MaxLength = int.MaxValue, Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both }); dialog.Show(this);
+        dialog.Controls.Add(new TextBox { Text = saved.OfflineText, MaxLength = int.MaxValue, Multiline = true, ReadOnly = true, Dock = DockStyle.Fill, ScrollBars = ScrollBars.Both }); ShowSessionWindow(dialog);
         return Task.CompletedTask;
     }
-    private Task RestoreLocalDraftAsync() { _draft.Text = _local.Snapshot.Draft; _status.Text = "已恢复本机草稿；尚未发送。"; return Task.CompletedTask; }
+    private Task RestoreLocalDraftAsync()
+    {
+        if (!_local.HasTrustedIdentity) throw new InvalidOperationException("trusted_presentation_identity_required");
+        _draft.Text = _local.Snapshot.Draft; _status.Text = "已恢复本机草稿；尚未发送。"; return Task.CompletedTask;
+    }
     private async Task ReadOfflineStorageAsync(bool memory)
     {
+        var local = _local;
         using var picker = new OpenFileDialog { Title = "选择离线存储受信配置（只读、不连接 Serve）", Filter = "受信配置|*.json" };
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         var value = memory ? await NativeOfflineStorageReader.ReadMemoryAsync(picker.FileName) : await NativeOfflineStorageReader.ReadArchiveAsync(picker.FileName);
+        if (!ReferenceEquals(local, _local)) return;
         var output = new TextBox { Name = "OfflineStorageResult", Text = value, ReadOnly = true, Multiline = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
         var window = new Form { Name = "OfflineStorage", Text = "离线授权存储（已知本地授权，不代表实时服务端状态）", Width = 850, Height = 600 };
-        window.Controls.Add(output); window.Show(this);
+        window.Controls.Add(output); ShowSessionWindow(window);
     }
     private async Task InsertAsync()
     {
@@ -347,8 +413,9 @@ internal sealed class AssistantForm : Form
         using var picker = new OpenFileDialog { Title = "选择本机会话受信设备配置", Filter = "受信配置|*.json" };
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         var session = _session!;
+        var local = _local; var endpoint = _endpoint.Text;
         _terminalDevice = await NativeTerminalDeviceHost.StartAsync(picker.FileName, session.Id, _connection!.Endpoint,
-            ApproveDeviceAsync, text => { if (!IsDisposed) BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) AppendTerminalOutput(text); })); }, _lifetime!.Token, _connection.Client, _connection.Contract, _nativeTools);
+            ApproveDeviceAsync, text => { if (!IsDisposed) BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, local, endpoint)) AppendTerminalOutput(text); })); }, _lifetime!.Token, _connection.Client, _connection.Contract, _nativeTools);
         _status.Text = _terminalDevice.Status; _ = WatchTerminalDeviceAsync(_terminalDevice);
     }
     private Task<bool> ApproveDeviceAsync(string description, CancellationToken ct)
@@ -400,23 +467,27 @@ internal sealed class AssistantForm : Form
     }
     private async Task ShowMetadataAsync()
     {
-        var metadata = await _session!.ReadMetadataAsync(_lifetime!.Token);
-        if (IsDisposed) return;
+        var session = _session!; var local = _local; var endpoint = _endpoint.Text;
+        var metadata = await session.ReadMetadataAsync(_lifetime!.Token);
+        if (IsDisposed || !IsCurrentPresentation(session, local, endpoint)) return;
         var dialog = new Form { Text = "会话状态 / 上下文", Width = 850, Height = 640, Owner = this };
-        dialog.Controls.Add(new TextBox { Text = SessionContextText.Format(metadata).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); dialog.Show(this);
+        dialog.Controls.Add(new TextBox { Text = SessionContextText.Format(metadata).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); ShowSessionWindow(dialog);
     }
     private async Task ShowApplicationPromptAsync()
     {
-        var value = await _session!.ReadApplicationPromptAsync(_lifetime!.Token);
-        if (IsDisposed) return;
+        var session = _session!; var local = _local; var endpoint = _endpoint.Text;
+        var value = await session.ReadApplicationPromptAsync(_lifetime!.Token);
+        if (IsDisposed || !IsCurrentPresentation(session, local, endpoint)) return;
         var dialog = new Form { Text = "提示词来源", Width = 700, Height = 260, Owner = this };
-        dialog.Controls.Add(new TextBox { Text = ApplicationPromptText.Format(value).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); dialog.Show(this);
+        dialog.Controls.Add(new TextBox { Text = ApplicationPromptText.Format(value).Replace("\n", "\r\n"), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); ShowSessionWindow(dialog);
     }
     private async Task ShowAsync(string title, Task<JsonElement> value)
     {
+        var session = _session!; var local = _local; var endpoint = _endpoint.Text;
         var result = await value;
+        if (!IsCurrentPresentation(session, local, endpoint)) return;
         var dialog = new Form { Text = title, Width = 850, Height = 560, Owner = this };
-        dialog.Controls.Add(new TextBox { Text = result.GetRawText(), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); dialog.Show(this);
+        dialog.Controls.Add(new TextBox { Text = result.GetRawText(), Dock = DockStyle.Fill, Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Both }); ShowSessionWindow(dialog);
     }
     private async Task ManageCheckpointsAsync()
     {
@@ -432,7 +503,7 @@ internal sealed class AssistantForm : Form
         panel.Controls.Add(Row(Command("恢复", () => ShowAsync("恢复回执", _session.RestoreCheckpointAsync(id.Text))),
             Command("导出", async () => { using var save = new SaveFileDialog { Filter = "快照|*.json" }; if (save.ShowDialog(this) == DialogResult.OK) { var bytes = await _session.ExportCheckpointAsync(id.Text); using var output = File.Create(save.FileName); await output.WriteAsync(bytes, 0, bytes.Length); } }),
             Command("导入", async () => { using var open = new OpenFileDialog { Filter = "快照|*.json" }; if (open.ShowDialog(this) == DialogResult.OK) await ShowAsync("导入回执", _session.ImportCheckpointAsync(await BoundedFiles.ReadAsync(open.FileName, 8 * 1024 * 1024))); })));
-        dialog.Show(this);
+        ShowSessionWindow(dialog);
     }
     private async Task CloseConnectionAsync()
     {

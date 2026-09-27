@@ -4,6 +4,8 @@ WPF、WinForms net48 和 Console 使用相同的 `ExampleSessionWorkspace`、`Ex
 
 三个入口都读取短期票据 `TANSR_SESSION_TOKEN`、`TANSR_SERVE_URL`，本机开发 HTTP 必须显式 `TANSR_ALLOW_HTTP_LOOPBACK=1`。票据不写草稿或日志。本地 Serve 继续使用 `ExampleConnection` → `LocalServeHost` 的 PID/私有口令所有权检查，不另外启动 Node 客户端代理。
 
+本机草稿、呈现和未决插入记录按示例形态、规范 Serve 来源及可信宿主配置中的 `principal` / `applicationScopeId` / `endUserId` 分区。主体改变时清除当前窗口的旧草稿、呈现和待批状态，旧回调仍受原会话和分区约束；用户明确填写的恢复 ID 继续交 Serve 鉴权，不偷偷清空以新建会话。原文件不删除、不自动迁移；同主体续票或授权修订更新不换分区。同一可信主体可在无票据、无网络时读取自己的陈旧本机副本，不能据此证明实时权限。未配置可信身份时，每次连接都是新的未绑定交互，旧无主体副本不自动装入待发送草稿；不从票据正文、JWT 或旧文件推断身份。独立“离线授权档案 / 记忆”仍使用其原可信离线授权入口。
+
 开发者如需为本地 SEA 预置档案、记忆或受信扩展，可同时设置 `TANSR_LOCAL_SERVE_HOST_MODULE`（规范化绝对 `.cjs` 路径）与 `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256`（64 位十六进制 SHA256）。四种入口共用原 `LocalServeHost.AdditionalArguments` 传入 `--host-module` / `--host-module-sha256`；默认不加载模块，不接受聊天、工具参数或任意 argv 决定模块。Serve 在原进程中校验模块摘要并装配公开扩展，无须外置 Node。
 
 For a developer-provisioned local SEA extension, set both `TANSR_LOCAL_SERVE_HOST_MODULE` (canonical absolute `.cjs` path) and `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` (64 hexadecimal digits). The four entry points forward only this validated pair to the existing owned `LocalServeHost`; default startup is unchanged. Conversation input never selects host code, and the Serve process validates and loads its public extension factory without a separate Node installation.
@@ -76,6 +78,8 @@ Console `--worker jobs.jsonl` 保持有界并发、原单轮接纳/终局和 SIG
 ## Native host parity
 
 All three examples share the public SDK workflow. The workspace exposes capabilities, tasks, usage, history pages, checkpoint lifecycle, fork and controlled cwd. A fork returns an identity without replacing the active conversation. Configuration profiles are trusted Serve references, never uploaded code.
+
+Local drafts, presentation and pending insertions are partitioned by example, canonical Serve origin and the trusted host's principal, application and end user. Switching users clears the visible draft, conversation and pending requests; delayed callbacks remain tied to their original session and store. An explicitly entered resume ID is still checked by Serve, never silently replaced with a new session. Existing files are retained without automatic migration. Ticket renewal and authorization revisions for the same person preserve the partition. That trusted person can read their stale local copy offline without a token; it is not proof of current remote authority. Without trusted identity, each connection starts a fresh unbound interaction and cannot adopt an old draft. JWT contents and old files never establish identity. The separate authorized offline archive/memory readers retain their original offline authority checks.
 
 The optional terminal device configuration owns one execution binding for files, a pinned shell and memory publication. `TerminalDeviceHost` owns protocol coordination; the application supplies trusted identity, local resources, durable storage and local consent. Output is observed from Serve with explicit channel/gap/seal state. A seal is not a successful process receipt, and stopping the device is not remote settlement.
 
