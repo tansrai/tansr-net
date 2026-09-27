@@ -24,6 +24,7 @@ internal sealed class SessionTransport : IDisposable
 {
     private readonly Uri origin;
     private readonly HttpClient client;
+    private readonly HttpClient streamingClient;
     private readonly bool ownsClient;
     private readonly Func<CancellationToken, Task<string>> tokens;
     private readonly Func<string>? principalProvider;
@@ -50,11 +51,23 @@ internal sealed class SessionTransport : IDisposable
         if ((options.SessionContract == SessionContract.Sdk2OffloadV1 || options.ExecutionScopeProvider is not null) && principalProvider is null)
             throw new ArgumentException("SDK2 requires a trusted PrincipalProvider.", nameof(options));
         ownsClient = injected is null || ownsInjected;
-        client = injected ?? new HttpClient(new HttpClientHandler
-        { AllowAutoRedirect = false, UseCookies = false, AutomaticDecompression = DecompressionMethods.None })
-        { Timeout = Timeout.InfiniteTimeSpan };
+        client = injected ?? CreateOwnedClient(false);
         if (client.DefaultRequestHeaders.Authorization is not null)
             throw new ArgumentException("Use TokenProvider rather than default Authorization headers.", nameof(injected));
+        // Persistent event subscriptions must not occupy the control request pool on CLR4.
+        // Preserve a supplied client's handler, pooling policy and ownership unchanged.
+        try { streamingClient = injected is null ? CreateOwnedClient(true) : client; }
+        catch { if (injected is null) client.Dispose(); throw; }
+    }
+
+    private static HttpClient CreateOwnedClient(bool streaming)
+    {
+        var handler = new HttpClientHandler
+        { AllowAutoRedirect = false, UseCookies = false, AutomaticDecompression = DecompressionMethods.None };
+        // Bounded transport capacity: eight archive streams, eight output streams, plus
+        // session/notification headroom. This is not a protocol capability/session limit.
+        if (streaming) handler.MaxConnectionsPerServer = 32;
+        return new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan };
     }
 
     private string? ReadPrincipal()
@@ -116,7 +129,8 @@ internal sealed class SessionTransport : IDisposable
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType ?? "application/json");
         }
         HttpResponseMessage response;
-        try { response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false); }
+        var sender = string.Equals(accept, "text/event-stream", StringComparison.OrdinalIgnoreCase) ? streamingClient : client;
+        try { response = await sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException) { throw new TansrProtocolException("network_error"); }
         try
         {
@@ -203,5 +217,10 @@ internal sealed class SessionTransport : IDisposable
         throw new TansrHttpException((int)response.StatusCode, code, scope, reason);
     }
 
-    public void Dispose() { if (ownsClient) client.Dispose(); }
+    public void Dispose()
+    {
+        if (!ownsClient) return;
+        try { client.Dispose(); }
+        finally { if (!ReferenceEquals(streamingClient, client)) streamingClient.Dispose(); }
+    }
 }

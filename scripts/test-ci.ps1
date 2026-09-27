@@ -45,7 +45,7 @@ if (-not $PreviousPackageDirectory) { $scope.notRun += @{ name = 'Previous-packa
 $filter = ($scope.excludedWindowsMethods | ForEach-Object { 'FullyQualifiedName!=' + $_.name }) -join '&'
 $steps = @('toolchain', 'node-version', 'contract', 'parity', 'parity-tests', 'ci-receipt-tests')
 if ($CliRoot) { $steps += @('upstream-contract', 'upstream-parity', 'node-session-compatibility') }
-$steps += @('native-mcp-publish', 'locked-restore', 'release-build', 'core-tests', 'windows-tests', 'sandbox-golden', 'framework-mcp', 'format', 'pack-core', 'pack-windows', 'package-notices', 'package-consumers', 'package-examples')
+$steps += @('native-mcp-publish', 'locked-restore', 'release-build', 'core-tests', 'windows-tests', 'sandbox-golden', 'framework-mcp', 'framework-session', 'format', 'pack-core', 'pack-windows', 'package-notices', 'package-consumers', 'package-examples')
 if ($PreviousPackageDirectory) { $steps += 'public-api' }
 [IO.Directory]::CreateDirectory((Join-Path $target 'logs')) | Out-Null
 $manifest = [ordered]@{
@@ -114,7 +114,7 @@ function Export-Evidence {
         $directory = Join-Path $target $relative
         if (Test-Path -LiteralPath $directory) { $selected += @(Get-ChildItem -LiteralPath $directory -File -Recurse | Where-Object { $_.Extension -in @('.log', '.trx') } | ForEach-Object FullName) }
     }
-    foreach ($relative in @('consumers', 'consumers/installation', 'examples', 'api', 'framework-mcp')) {
+    foreach ($relative in @('consumers', 'consumers/installation', 'examples', 'api', 'framework-mcp', 'framework-session')) {
         $directory = Join-Path $target $relative
         if (Test-Path -LiteralPath $directory) { $selected += @(Get-ChildItem -LiteralPath $directory -File | Where-Object { $_.Extension -in @('.json', '.log') } | ForEach-Object FullName) }
     }
@@ -202,6 +202,7 @@ try {
             }
         }
         Invoke-CiStep 'framework-mcp' $pwsh @('-NoProfile', '-File', (Join-Path $repository 'tests/Tansr.Sdk.Windows.Tests/Mcp/test-framework-mcp.ps1'), '-LibraryDirectory', (Join-Path $repository 'examples/WinFormsAssistant/bin/Release/net48'), '-OutputDirectory', (Join-Path $target 'framework-mcp'))
+        Invoke-CiStep 'framework-session' $pwsh @('-NoProfile', '-File', (Join-Path $repository 'tests/Tansr.Sdk.Tests/Transport/test-framework-session.ps1'), '-LibraryDirectory', (Join-Path $repository 'examples/WinFormsAssistant/bin/Release/net48'), '-OutputDirectory', (Join-Path $target 'framework-session'))
         Invoke-CiStep 'format' 'dotnet' @('format', 'Tansr.Sdk.slnx', '--verify-no-changes', '--no-restore')
         $packages = Join-Path $target 'packages'
         Invoke-CiStep 'pack-core' 'dotnet' @('pack', 'src/Tansr.Sdk/Tansr.Sdk.csproj', '-c', 'Release', '--no-build', '--no-restore', '-o', $packages)

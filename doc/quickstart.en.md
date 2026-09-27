@@ -49,6 +49,8 @@ The default retains SDK1. SDK2 archive offload requires explicit `SessionContrac
 
 Serve/kernel owns the agent loop, context assembly, authorization, memory decisions and metering. `DeviceSessionHost`, the Windows backend, durable journals and execution notifications handle authorized terminal operations. Applications do not need to implement their own polling, SSE, heartbeat or ACK state machines. Never interpret model data as an assembly path, reflection type or trusted host code.
 
+The default transport uses separate connection pools for persistent event streams and control requests, so long-lived streams cannot occupy all control connections on .NET Framework. The SDK-owned event pool allows up to 32 connections per origin; additional requests wait within the existing request timeout. This is a transport limit, not a session or protocol limit. An injected `HttpClient` keeps the host's pool and ownership: provision capacity for both event streams and control requests, and retain the existing no-redirect and no-shared-cookie requirements.
+
 The [examples](../README.md#示例和开发) show business tools, same-turn input, approvals, questions, MCP, model/thinking controls, media and offline drafts. Their documentation distinguishes implementation from remaining validation. Electron retains its complete embedded SDK, Node dependencies and IPC; this client introduces no second agent loop.
 
 ## Error and recovery rules
