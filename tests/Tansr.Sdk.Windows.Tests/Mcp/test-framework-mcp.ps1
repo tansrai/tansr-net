@@ -73,7 +73,7 @@ internal static class FrameworkMcpProbe
                 // On a historical-product failure, release only our own stalled sockets,
                 // then wait for cleanup; do not let the probe itself leak a child or socket.
                 server.Stop();
-                try { await Within(close ?? client.CloseAsync(), 4000, "Failure cleanup did not settle."); } catch { }
+                try { Within(close ?? client.CloseAsync(), 4000, "Failure cleanup did not settle.").GetAwaiter().GetResult(); } catch { }
             }
         }
         Console.WriteLine("PASS " + mode);
@@ -100,7 +100,7 @@ internal static class FrameworkMcpProbe
                 Require(server.Calls == 2 && server.Replies == 2 && server.Deletes == 1, "Unexpected reverse flow or replay.");
                 Require(server.MaximumConnections <= 3, "Connection reserve is not bounded.");
             }
-            finally { server.Stop(); try { await Within(client.CloseAsync(), 4000, "Cleanup"); } catch { } }
+            finally { server.Stop(); try { Within(client.CloseAsync(), 4000, "Cleanup").GetAwaiter().GetResult(); } catch { } }
         }
         Console.WriteLine("PASS reverse-reserved-connection");
     }
@@ -192,8 +192,25 @@ internal static class FrameworkMcpProbe
 '@ | Set-Content -LiteralPath $program -Encoding utf8NoBOM
 ('<configuration><startup><supportedRuntime version="v4.0" sku=".NETFramework,Version=v4.8"/></startup><runtime><assemblyBinding xmlns="urn:schemas-microsoft-com:asm.v1">' + ($redirects -join '') + '</assemblyBinding></runtime></configuration>') | Set-Content -LiteralPath ($executable + '.config') -Encoding utf8NoBOM
 $framework = Join-Path $env:WINDIR 'Microsoft.NET/Framework64/v4.0.30319'
-$compile = @('/nologo', '/target:exe', '/langversion:5', ('/out:' + $executable), '/r:System.Net.Http.dll', '/r:System.Web.Extensions.dll', ('/r:' + (Join-Path $framework 'Facades/netstandard.dll'))) + $references + @($program)
+$facades = @(
+    (Join-Path $library 'netstandard.dll'),
+    (Join-Path $framework 'Facades/netstandard.dll'),
+    (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Reference Assemblies/Microsoft/Framework/.NETFramework/v4.8/Facades/netstandard.dll')
+)
+$packageRoots = @($env:NUGET_PACKAGES, (Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget/packages')) | Where-Object { $_ } | Select-Object -Unique
+foreach ($packageRoot in $packageRoots) {
+    $referencePackage = Join-Path $packageRoot 'microsoft.netframework.referenceassemblies.net48'
+    if (Test-Path -LiteralPath $referencePackage -PathType Container) {
+        foreach ($installed in Get-ChildItem -LiteralPath $referencePackage -Directory | Sort-Object Name -Descending) {
+            $facades += Join-Path $installed.FullName 'build/.NETFramework/v4.8/Facades/netstandard.dll'
+        }
+    }
+}
+$netstandard = $facades | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
 try {
+    if (-not $netstandard) { throw 'Install the existing net48 reference-assemblies dependency or supply its netstandard.dll beside the approved candidate; no reference assembly was downloaded.' }
+    $manifest.netstandardReference = @{ path = $netstandard; sha256 = (Get-FileHash -LiteralPath $netstandard -Algorithm SHA256).Hash.ToLowerInvariant() }
+    $compile = @('/nologo', '/target:exe', '/langversion:5', ('/out:' + $executable), '/r:System.Net.Http.dll', '/r:System.Web.Extensions.dll', ('/r:' + $netstandard)) + $references + @($program)
     & (Join-Path $framework 'csc.exe') @compile 2>&1 | Tee-Object -FilePath (Join-Path $output 'compile.log')
     $manifest.compileExitCode = $LASTEXITCODE
     if ($manifest.compileExitCode -ne 0) { throw 'Framework probe compilation failed; no product was rebuilt.' }
