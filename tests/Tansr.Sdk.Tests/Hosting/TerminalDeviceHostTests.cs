@@ -21,7 +21,7 @@ public sealed class TerminalDeviceHostTests
         await Assert.ThrowsAsync<InvalidOperationException>(() => rig.Output!.OpenAsync(rig.Adapter.ExistingOperation, default));
         await rig.Host.StartAsync(); await rig.Notifications.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(DeviceSessionState.Ready, rig.Host.State); Assert.NotNull(rig.Host.Binding);
-        Assert.Equal(new[] { "initialize", "bind" }, rig.Controller.Actions); Assert.Equal(new[] { "register", "poll" }, rig.Device.Actions);
+        Assert.Equal(new[] { "initialize", "initialize", "bind" }, rig.Controller.Actions); Assert.Equal(new[] { "register", "poll" }, rig.Device.Actions);
         Assert.Equal(1, rig.BindingPosts); Assert.Equal(1, rig.BackendCreations);
         using var capture = await rig.Output!.OpenAsync(rig.Adapter.ExistingOperation, default);
         Assert.True(capture.Append("stdout", "utf-8", Encoding.UTF8.GetBytes("中文 output")));

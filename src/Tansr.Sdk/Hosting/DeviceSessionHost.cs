@@ -156,13 +156,19 @@ public sealed class DeviceSessionHost : IDisposable
             SetState(DeviceSessionState.Initializing);
             var scope = _client.ReadScope();
             WireJson.ValidateNamed("Scope", scope);
-            var capabilities = await _client.InitializeAsync(Initialization(), token).ConfigureAwait(false);
-            VerifyCapabilities(capabilities, scope);
+            var initialized = await _client.InitializeAsync(Initialization(), token).ConfigureAwait(false);
+            VerifyCapabilities(initialized, scope);
             SetState(DeviceSessionState.Connecting);
             await _execution.RunAsync(async (connection, ct) =>
             {
                 VerifyScope(scope);
                 SetState(DeviceSessionState.Binding);
+                // Registering a replacement connection invalidates the prior target and
+                // can change effective tools (and their capability revision). Re-read
+                // the same initialization before the one binding attempt; never retry
+                // an unknown binding result or replace the caller's requested scope.
+                var capabilities = await _client.InitializeAsync(Initialization(), ct).ConfigureAwait(false);
+                VerifyCapabilities(capabilities, scope);
                 var target = ExecutionJson.Object(writer =>
                 {
                     foreach (var name in new[] { "executorId", "connectionId", "connectionRevision" })

@@ -69,7 +69,7 @@ public sealed class DeviceSessionHostTests
         using var host = New(client, journal);
         await host.StartAsync();
         Assert.Equal(DeviceSessionState.Ready, host.State);
-        Assert.Equal(new[] { "initialize", "register", "bind", "poll" }, client.Actions);
+        Assert.Equal(new[] { "initialize", "register", "initialize", "bind", "poll" }, client.Actions);
         Assert.Equal("workspace-1", client.Target!.Value.GetProperty("workspaceId").GetString());
         Assert.Equal("1", client.Target.Value.GetProperty("workspaceRevision").GetString());
         Assert.Equal(new string('a', 64), client.BindingRequest!.Value.GetProperty("expectedCapabilityRevision").GetString());
@@ -98,7 +98,7 @@ public sealed class DeviceSessionHostTests
             }, (_, _) => Task.CompletedTask);
         await host.StartAsync();
         Assert.True(configured);
-        Assert.Equal(new[] { "initialize", "bind" }, controller.Actions);
+        Assert.Equal(new[] { "initialize", "initialize", "bind" }, controller.Actions);
         Assert.Equal(new[] { "register", "poll" }, executor.Actions);
         await host.StopAsync();
     }
@@ -130,12 +130,52 @@ public sealed class DeviceSessionHostTests
     }
 
     [Fact]
+    public async Task ReplacementConnectionBindsTheRefreshedCapabilityRevisionUsingTheSameInitialization()
+    {
+        var client = new Client { ChangeCapabilityAtRegister = true };
+        using var host = New(client);
+        await host.StartAsync();
+        Assert.Equal(new[] { "initialize", "register", "initialize", "bind", "poll" }, client.Actions);
+        Assert.Equal(new string('b', 64), client.BindingRequest!.Value.GetProperty("expectedCapabilityRevision").GetString());
+        Assert.Equal(2, client.Initializations.Count);
+        Assert.Equal(client.Initializations[0].GetRawText(), client.Initializations[1].GetRawText());
+        Assert.Equal("session-1", client.BindingRequest.Value.GetProperty("sessionId").GetString());
+        Assert.Equal(DeviceSessionState.Ready, host.State);
+        await host.StopAsync(); Assert.True(client.PollStopped);
+    }
+
+    [Theory]
+    [InlineData("scope")]
+    [InlineData("session")]
+    [InlineData("platform")]
+    public async Task ForeignAuthorityDuringCapabilityRefreshPreventsBindingAndPolling(string changed)
+    {
+        var client = new Client { ChangeOnRefresh = changed };
+        using var host = New(client);
+        await Assert.ThrowsAsync<InvalidDataException>(() => host.StartAsync());
+        Assert.Equal(new[] { "initialize", "register", "initialize" }, client.Actions);
+        Assert.Null(client.BindingRequest); Assert.Equal(DeviceSessionState.Failed, host.State);
+        await Assert.ThrowsAsync<InvalidDataException>(() => host.Completion);
+    }
+
+    [Fact]
+    public async Task LostCapabilityRefreshNeverRetriesInitializationOrBinds()
+    {
+        var client = new Client { LoseRefreshResponse = true };
+        using var host = New(client);
+        await Assert.ThrowsAsync<IOException>(() => host.StartAsync());
+        Assert.Equal(new[] { "initialize", "register", "initialize" }, client.Actions);
+        Assert.Null(client.BindingRequest); Assert.Equal(DeviceSessionState.Failed, host.State);
+        await Assert.ThrowsAsync<IOException>(() => host.Completion);
+    }
+
+    [Fact]
     public async Task BindingResponseLossDoesNotRetryOrPoll()
     {
         var client = new Client { LoseBindingResponse = true };
         using var host = New(client);
         await Assert.ThrowsAsync<IOException>(() => host.StartAsync());
-        Assert.Equal(new[] { "initialize", "register", "bind" }, client.Actions);
+        Assert.Equal(new[] { "initialize", "register", "initialize", "bind" }, client.Actions);
         Assert.Equal(DeviceSessionState.Failed, host.State);
         await Assert.ThrowsAsync<IOException>(() => host.Completion);
     }
@@ -225,28 +265,44 @@ public sealed class DeviceSessionHostTests
     private sealed class Client : IDeviceExecutionClient
     {
         public readonly List<string> Actions = [];
+        public readonly List<JsonElement> Initializations = [];
         public bool ChangeIdentity, LoseBindingResponse, SubstituteTarget, StallInitialization, PollStopped;
-        public bool ChangeIdentityAtPoll;
+        public bool ChangeIdentityAtPoll, ChangeCapabilityAtRegister, LoseRefreshResponse;
+        public string? ChangeOnRefresh;
         public JsonElement? PollOperation;
         public JsonElement? Target, BindingRequest;
         private string user = "user";
+        private string capabilityRevision = new('a', 64);
         public JsonElement ReadScope() => ExecutionFixture.Scope(user);
         public async Task<JsonElement> InitializeAsync(JsonElement input, CancellationToken ct)
         {
             Actions.Add("initialize");
             WireJson.ValidateNamed("SessionInitializeRequest", input);
+            Initializations.Add(input.Clone());
             if (StallInitialization) await Task.Delay(Timeout.Infinite, ct);
             if (ChangeIdentity) user = "other";
-            return Capabilities(null);
+            var refresh = Initializations.Count > 1;
+            if (refresh && LoseRefreshResponse) throw new IOException("synthetic refresh response loss");
+            if (refresh && ChangeOnRefresh == "scope") user = "other";
+            var capabilities = Capabilities(null);
+            if (refresh && ChangeOnRefresh == "session") return ExecutionFixture.Set(capabilities, "sessionId", JsonSerializer.SerializeToElement("other-session"));
+            if (refresh && ChangeOnRefresh == "platform")
+                return ExecutionFixture.Set(capabilities, "platform", ExecutionFixture.Set(capabilities.GetProperty("platform"), "platform", JsonSerializer.SerializeToElement("linux")));
+            return capabilities;
         }
         public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken ct)
-        { Actions.Add("register"); return Task.FromResult(ExecutionFixture.Connection()); }
+        {
+            Actions.Add("register");
+            if (ChangeCapabilityAtRegister) capabilityRevision = new string('b', 64);
+            return Task.FromResult(ExecutionFixture.Connection());
+        }
         public Task<JsonElement> HeartbeatAsync(JsonElement connection, CancellationToken ct) => Task.FromResult(connection);
         public Task<JsonElement> BindExecutionAsync(JsonElement request, JsonElement target, CancellationToken ct)
         {
             Actions.Add("bind"); WireJson.ValidateNamed("ExecutionBindingRequest", request);
             WireJson.ValidateNamed("ExecutionTarget", target);
             Target = target; BindingRequest = request;
+            if (request.GetProperty("expectedCapabilityRevision").GetString() != capabilityRevision) throw new InvalidDataException("stale_generation");
             if (LoseBindingResponse) throw new IOException("synthetic response loss");
             if (SubstituteTarget) target = ExecutionFixture.Set(target, "connectionRevision", JsonSerializer.SerializeToElement("2"));
             return Task.FromResult(Capabilities(JsonSerializer.SerializeToElement(new { bindingId = "binding-1", revision = "1", target })));
@@ -261,12 +317,12 @@ public sealed class DeviceSessionHostTests
         }
         public Task<JsonElement> SubmitAsync(JsonElement receipt, CancellationToken ct) => throw new NotSupportedException();
         public Task<JsonElement> GetStatusAsync(string session, string operation, CancellationToken ct) => throw new NotSupportedException();
-        private static JsonElement Capabilities(JsonElement? binding) => JsonSerializer.SerializeToElement(new
+        private JsonElement Capabilities(JsonElement? binding) => JsonSerializer.SerializeToElement(new
         {
             protocol = "sdk2-ext-v1",
             sessionId = "session-1",
             platform = ExecutionFixture.Registration().GetProperty("platform"),
-            capabilityRevision = new string('a', 64),
+            capabilityRevision,
             effectiveTools = Array.Empty<object>(),
             binding
         });
