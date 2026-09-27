@@ -31,7 +31,7 @@
 
 运行子进程的 PATH 仅含系统目录，不继承开发机模型凭据；self-contained 子进程的 DOTNET_ROOT 指向不存在的目录。每个消费回执记录实际进程、框架/体系结构、加载的 SDK/SQLite 程序集位置及身份令牌状态。此证据证明这些消费进程不依赖 PATH 中的 Node；不是“已从开发机卸载 Node”或“已经在干净系统验证”的替代说法。
 
-`package-audit.json` 核两个包的 ID、版本、TFM、README、net48 native 复制目标、依赖、内容及 SHA256。`dependency-audit.json` 记录恢复后的许可证声明和 native 资产摘要。遗留包只有 license URL 时保留原 URL 和待发行审查状态，不推测 SPDX；审计清单不能替发行方履行许可证/NOTICE 分发义务，也不构成包签名验证。根 `LICENSE`、`NOTICE` 及依赖原文必须随相应发行方式处理。
+`package-audit.json` 核两个包的 ID、版本、TFM、README、net48 native 复制目标、依赖、内容及 SHA256。两产品包现在显式包含根 `LICENSE` 和 `NOTICE`；发行检查应使用 `scripts/audit-packages.ps1 -RequireNotices`，缺少任一文件即失败，默认不强制的入口仍可审查历史候选。`dependency-audit.json` 记录恢复后的许可证声明和 native 资产摘要。遗留包只有 license URL 时保留原 URL 和待发行审查状态，不推测 SPDX；包内NOTICE不替代各依赖完整许可证分发义务，内容审计也不构成签名验证。
 
 ## 从候选包构建三个原示例
 
@@ -115,9 +115,85 @@ if (!stopped.CleanupConfirmed || !stopped.IoSettled)
 
 可将批准的正式格式可执行候选追加给包门：`-LocalServeExecutable <绝对路径> -LocalServeSha256 <SHA256>`。它通过包内公开 `StartAsync → ListSessionsAsync → StopAsync` 验证真实产物与本机归属，失败直接保留；不启动模型，不伪造自动记忆已经装配，也不把未签名候选写成正式发行。
 
+## 主线 CI 接线与本地入口
+
+`.github/workflows/ci.yml` 已接线，仅在 `main` 推送或针对 `main` 显式手动触发时运行；不为开发分支或PR运行远端CI。工作流在 `windows-2025` 使用 `global.json` 指定的.NET SDK（当前10.0.301、latestPatch）及Node22.22.1，权限为 `contents: read`，不克隆其它私库、不签名、不发布，也不保存检出凭据。当前仓库尚无remote，因此**已配置不等于真实远端CI已运行或通过**。
+
+共享入口要求Windows x64、64位PowerShell7、对应.NET SDK、Node及本地AOT所需C++工具链。输出目录必须是仓库外的新目录。先只列本批计划与缺失范围：
+
+```powershell
+./scripts/test-ci.ps1 `
+  -OutputDirectory J:/tansr/archive/NET-release/ci-plan `
+  -PlanOnly
+```
+
+`-PlanOnly` 记录源码/锁文件指纹与步骤，结果为 `planned-not-run`，不恢复、构建、测试或打包。要执行本地基础门，去掉该开关并选择另一新目录；可选输入如下，均须是批准的既有路径：
+
+| 参数 | 实际范围 |
+|---|---|
+| `OutputDirectory` | 必填；输出manifest、步骤日志、TRX、两包、消费者与示例构建回执 |
+| `CliRoot` | 原冻结CLI源码与已安装依赖；启用原合同/映射/会话对照及旧存储互通 |
+| `RecoveryCliRoot` | 冻结恢复协议源码与已安装依赖；启用原恢复账本和记忆出版互通 |
+| `PreviousPackageDirectory` | 已批准旧两包；启用旧公开API兼容及安装/升级/回滚，不能用新包自己充当旧基线 |
+
+执行入口串行运行仓内合同/能力映射检查、MCP消费产物准备、锁定restore、Release build、Core与适用Windows用例、独立sandbox金样、format、两包pack、严格LICENSE/NOTICE审计、包含AOT的包消费和三个原示例构建。包版本取仓库 `Directory.Build.props`，不是可临时覆盖的CI参数。失败立即停止后续步骤；零用例、未执行或失败用例不写成通过；运行期间源码或正式锁变化也失败。
+
+默认未提供两份CLI源码时，明确排除四个跨仓互通方法及其参数项；Electron/Serve性能基准始终走其原独立入口。真实Serve联验、五客户端、GUI、标准用户OS、签名和发布均不由此脚本补造。`manifest.json` 的 `scope.excludedWindowsMethods`、`scope.notRun`、每步状态及TRX列出实际范围；即使本入口通过，状态仍为 `passed-with-external-gates-not-run`，不能将这些未运行项或A01—24全单视为新通过。工作流只上传 `evidence/` 白名单内日志、回执和未签名候选包，不上传私有缓存或完整self-contained应用目录。
+
+## 只读发行候选检查
+
+`scripts/test-release.ps1` 不签名、不创建证书、不上传包；它持有原包及检查副本，核两包内容并实际调用 `dotnet nuget verify --all`，最后复核字节未变。使用PowerShell7和.NET SDK；签名校验仍依赖主机正常证书根与吊销策略，不表示全程断网。
+
+```powershell
+./scripts/test-release.ps1 `
+  -CorePackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.0.1.0-preview.1.nupkg `
+  -WindowsPackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg `
+  -Version 0.1.0-preview.1 `
+  -OutputDirectory J:/tansr/archive/NET-release/release-check `
+  -RequireNotices
+```
+
+以上四个值参数必填，输出目录必须不存在。可同时提供 `-CoreSha256` 和 `-WindowsSha256` 锁定已批准字节，不能只给其中一个；均为64位十六进制。`-VerifyTimeoutSeconds` 默认120，允许1—600秒，只控制每个dotnet校验进程超时。回执为 `manifest.json`、`package-audit.json` 和原verify标准输出/错误日志，检查副本保存在 `packages/`。
+
+默认允许**记录未签名事实**：仅在包没有签名且真实校验唯一诊断为 `NU3004` 时记 `readiness=unsigned`；检查流程可退出0，但 `signaturesVerified=false`。有签名却校验失败、其它校验不可用/超时或字节变更一律失败。`-RequireSigned` 拒绝未签名包；`-CertificateFingerprint <批准证书SHA256>` 传入实际verify，要求两个包均验证该签名者，即使不加RequireSigned也不能以unsigned成功。不传指纹时 `signerPinned=false`，有效信任链不证明签名者获本项目批准。所有模式的 `releaseReady`、`published` 均保持false，不把本地内容/签名检查等同于完整发行或渠道授权。
+
 ## 发行剩余项
 
 本地 pack、消费、合并、推送、主线 CI、代码签名、NuGet 包签名和上传是独立事实。没有仓库 remote、渠道所有权或签名材料时登记待办，不擅自创建仓库或上传包。源码完整验收后按项目纪律收编主线，再核对远端主线 CI。当前两个包不可因本地成功自动宣称已上架。
+
+### 本机证书签名与校验
+
+签名只使用发行负责人批准、已安装在本机 `CurrentUser/My` 且带可用私钥的正式代码签名证书，以及批准的时间戳服务。本轮该存储中尚无有效可用签名证书；以下是待满足前置后的操作入口，尚无真实签名通过事实。不导出或远端托管私钥，不把密码放入命令，不用自签证书代替正式发行。
+
+使用仓库要求的 .NET 10 SDK。`$certificateSha256` 是证书内容的64位十六进制SHA256指纹，不是Windows常见的SHA1 `Thumbprint`；.NET 10的签名命令要求SHA-2指纹。[Microsoft签名文档](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-sign)
+
+```powershell
+# 替换为已批准候选、证书SHA256及时间戳服务；signed目录必须是新目录。
+$candidate = 'J:/tansr/archive/NET-release/packages'
+$signed = 'J:/tansr/archive/NET-release/signed'
+$certificateSha256 = '<approved-certificate-sha256>'
+$timestampUrl = '<approved-rfc3161-timestamp-url>'
+dotnet nuget sign `
+  "$candidate/Tansr.Sdk.0.1.0-preview.1.nupkg" `
+  "$candidate/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg" `
+  --certificate-store-location CurrentUser --certificate-store-name My `
+  --certificate-fingerprint $certificateSha256 `
+  --hash-algorithm SHA256 --timestamp-hash-algorithm SHA256 `
+  --timestamper $timestampUrl --output $signed
+```
+
+显式新输出目录保留原未签名包，不使用 `--overwrite`。签名成功后，在已具备有效代码签名及时间戳信任链的机器上核验两个新包：
+
+```powershell
+dotnet nuget verify `
+  "$signed/Tansr.Sdk.0.1.0-preview.1.nupkg" `
+  "$signed/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg" `
+  --all --certificate-fingerprint $certificateSha256
+```
+
+记录命令退出码、签名前后包SHA和校验回执；指纹匹配用于绑定批准签名者，不能证明NuGet账号的包所有权或上传授权。NuGet包签名也不等于应用EXE的Authenticode签名。[Microsoft校验文档](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify)
+
+随后对新签名目录运行上述 `test-release.ps1`，使用新包实际SHA并追加 `-RequireNotices -RequireSigned -CertificateFingerprint $certificateSha256`，保存新的回执。当前尚无已确认NuGet发布账号/组织权限，也尚无真实签名或远端主线CI成功回执；新增工作流与脚本只完成发行接线，NET-06/A24仍按实际剩余条件结算。
 
 ## English
 
@@ -140,7 +216,7 @@ An isolated candidate feed, source mapping and caches pin both packages by SHA25
 
 `test-installation.ps1` copies approved payloads into a new per-user path containing spaces and Chinese characters. It verifies the bytes, selects versions atomically, runs install/upgrade/rollback scenarios, and uninstalls only the unchanged files it owns. Synthetic user data and an ownership marker remain and are recorded. Unknown files are preserved. `-RequireStandardUser` rejects administrator group membership, including a filtered UAC token. Without it, evidence states the actual identity rather than claiming standard-user acceptance. Clean-user OS, cross-user ACL/DPAPI denial and real archive migration require their own evidence.
 
-The content/license audit records SDK identities, targets, dependencies, hashes, declared license terms and native assets. Legacy license URLs remain explicitly subject to distribution review. It does not replace license/NOTICE obligations or signature verification.
+The content/license audit records SDK identities, targets, dependencies, hashes, declared license terms and native assets. Both product packages now include the root `LICENSE` and `NOTICE`; use `scripts/audit-packages.ps1 -RequireNotices` for release candidates. Historical inspection can omit that switch. Legacy license URLs remain explicitly subject to distribution review. Bundled notices do not replace complete dependency license obligations or signature verification.
 
 Local Serve uses the existing `LocalServeHost`: approve an executable and digest, provide a controlled workspace, call `StartAsync`, obtain `CreateClient`, and await `StopAsync`. The host generates private credentials, validates authenticated readiness and verifies the actual TCP peer belongs to its original child process before sending credentials or bodies. It does not download code, inherit arbitrary credentials, silently connect to another port owner or add a Node client proxy. Executable hashing alone does not authenticate adjacent apphost DLLs; the complete installation remains a trusted distributor responsibility.
 
@@ -149,3 +225,29 @@ All three examples share `ExampleConnection`. Set `TANSR_LOCAL_SERVE_EXE`, `TANS
 For the existing Serve trusted-host entry, set `TANSR_LOCAL_SERVE_HOST_MODULE` to an approved absolute `.cjs` path and `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` to its digest. The original Serve assembles the core and deployment extensions; this requires no external client Node runtime. A verified module is developer-trusted code, not a sandbox for arbitrary JavaScript. The deployment must authenticate the end user independently of the local process Bearer and must not trust client-declared identity or platform. The examples explicitly transmit `TANSR_SERVE_USER_TOKEN` as `x-tansr-demo-user-token`. Direct consumers set `ReadinessHeaders` and the six-argument `CreateClient` overload's `additionalRequestHeaders` separately; readiness credentials are not implicitly copied to clients. SDK2 contract and trusted-scope selection remain explicit, with SDK1 the default.
 
 Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. This candidate has no automatic NuGet publication; missing ownership/signing/CI conditions remain visible.
+
+### Mainline CI and release inspection
+
+`.github/workflows/ci.yml` is wired for pushes to `main` and manual dispatch on `main` only, with read-only repository permissions. It uses `windows-2025`, the SDK from `global.json` and Node22.22.1. It neither clones other private repositories nor signs/publishes packages. There is currently no repository remote, so this wiring is not evidence of a successful GitHub run.
+
+From Windows x64 PowerShell7, with the .NET/Node/C++ AOT toolchains installed, use a new evidence directory outside the checkout:
+
+```powershell
+./scripts/test-ci.ps1 -OutputDirectory J:/tansr/archive/NET-release/ci-plan -PlanOnly
+# Actual local execution uses a different new directory and omits -PlanOnly.
+# Optional approved inputs: -CliRoot, -RecoveryCliRoot, -PreviousPackageDirectory.
+```
+
+`PlanOnly` inventories source/locks and returns `planned-not-run`; it does not run gates. Actual execution runs repository contract/parity checks, native MCP preparation, locked restore, Release build, applicable tests and sandbox vectors, format, two-package creation, strict notices audit, package consumers including AOT, and the three example builds. Version comes from `Directory.Build.props`. Failed steps or changed source/locks stop acceptance; missing test executions are not passes.
+
+`CliRoot` and `RecoveryCliRoot` supply approved frozen upstream source with installed dependencies for their original comparisons/interoperability. Without them, four cross-repository Windows methods are explicitly excluded. The Electron/Serve benchmark always remains separate. `PreviousPackageDirectory` enables old-package API compatibility and upgrade/rollback; a new package cannot be its own baseline. Real Serve, five-client, GUI, standard-user, signing and publication gates remain separate. Read `scope.excludedWindowsMethods`, `scope.notRun`, step statuses and TRX; `passed-with-external-gates-not-run` is not full A01–24 acceptance. Only allowlisted evidence and unsigned packages are uploaded, not caches or complete application payloads.
+
+For read-only release inspection, use `scripts/test-release.ps1 -CorePackage <core.nupkg> -WindowsPackage <windows.nupkg> -Version <exact-version> -OutputDirectory <new-directory> -RequireNotices`. Optionally provide both `CoreSha256` and `WindowsSha256`; each must be 64 hex digits. `VerifyTimeoutSeconds` defaults to120 (range1–600). The script audits pinned copies, invokes the real NuGet verifier with normal trust/revocation policy, and preserves source hashes and logs. It does not sign or publish.
+
+Unsigned packages may be recorded successfully only when the real verifier reports the sole unsigned diagnostic `NU3004`; the manifest then says `readiness=unsigned`, `signaturesVerified=false`. Invalid signatures, other verification failures, timeouts or changed bytes fail. `RequireSigned` rejects unsigned inputs. `CertificateFingerprint` pins an approved SHA256 signer on both packages and also rejects unsigned inputs; without it `signerPinned=false`. `releaseReady` and `published` remain false in every mode: successful local inspection is not release completion or NuGet account authorization.
+
+For signing, use an approved production code-signing certificate with its private key already available in the local `CurrentUser/My` store. The commands above use .NET 10, a SHA256 certificate fingerprint, an approved RFC3161 service and a new output directory; never substitute the usual SHA1 Windows Thumbprint. Do not pass passwords in commands or export private keys for this workflow. This host currently has no suitable certificate, so signing remains unexecuted. See [Microsoft's sign command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-sign).
+
+Verify both signed packages with `dotnet nuget verify --all --certificate-fingerprint <approved-sha256>`, preserve original candidates and record new hashes and exit codes. Certificate and timestamp trust must succeed. A matched signer does not establish NuGet ownership or publication permission; NuGet signatures do not sign application executables. Self-signed test certificates are not production acceptance. See [Microsoft's verify command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify).
+
+Run `test-release.ps1` again against the signed outputs with their new expected hashes and `-RequireNotices -RequireSigned -CertificateFingerprint <approved-sha256>`. This task has no confirmed NuGet account/organization authority, usable signing certificate or successful remote mainline CI receipt. NET-06/A24 remain open until their actual remaining conditions are satisfied or explicitly deferred.

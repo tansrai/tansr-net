@@ -1,0 +1,51 @@
+name: Main .NET gates
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: net-main-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Windows standalone gates (external integration separate)
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: windows-2025
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: '1'
+      DOTNET_NOLOGO: '1'
+      CI_OUTPUT: ${{ runner.temp }}/tansr-net-ci/${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout this main commit only
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0; official immutable commit
+        with:
+          persist-credentials: false
+      - name: Install SDK selected by global.json
+        uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Install Node for existing contract and crypto checks
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: '22.22.1'
+          package-manager-cache: false
+      - name: Run standalone gates and record external omissions
+        run: ./scripts/test-ci.ps1 -OutputDirectory $env:CI_OUTPUT
+      - name: Preserve logs, receipts and unsigned candidate packages
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: net-ci-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ env.CI_OUTPUT }}/evidence
+          if-no-files-found: warn
+          retention-days: 14

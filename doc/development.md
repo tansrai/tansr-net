@@ -414,3 +414,15 @@ A20双模式原链见`A20/acceptance-evidence.md`、`console-final-r1/manifest.j
 A24已有2958双包四类消费、旧API兼容、三NuGet示例和原Console/两GUI完整业务证据，尚不能标为完整交付：NET仓尚无remote，也尚无 `.github/workflows` 配置；远端仓库/工作流接线、主线推送与实际CI、签名及NuGet正式渠道仍须逐项完成或按用户决定登记延期。未签名、未上架、未部署；不能把本地pack或功能验收写成正式发布。最终候选/文档与归档收编由根登记最终main SHA。上述发行接线不追加为已过NET-01—05的门，A24/NET-06仍独立保留未关闭。
 
 本节按原卡完整条件记录，不以代码编写比例代替闭环进度；不增小卡，不把内部UI/生命周期缺口归为外部发行延期。正式跨仓六份单据仍由指定单写者同步。新产品或示例修正完成后只重验受影响入口，并更新这些当前事实；旧红和历史回执不删除。
+
+## NET-06 发行机制接续（2026-09-27）
+
+本节接续本地功能收编点 `13d1520e6095cd029b8edf0073880dce6b904ffb`，归档为 `archive/20260927-NET-full-delivery/release-preparation-r1`。只继续原 NET-06／A24，不增卡；NET-01—05、A01—23和原16组的功能结论保留。本次不改 SDK 的 C# 运行逻辑、协议及 Electron 集成模式。
+
+- 增加主线专用 `.github/workflows/ci.yml` 和同一个本地 `scripts/test-ci.ps1`。仅 main push／main 手动调度运行，使用只读权限和固定官方 Action 提交，不自动检出其它私库，不托管密钥，不签名或发布。runner 记录实际命令、源码/锁文件摘要、退出码、TRX与产物；缺少私有源码的原跨语言／Serve／多端门逐项保留未执行，不把独立Windows CI标为24项完整重验。
+- 两个产品包增加原 `LICENSE`／`NOTICE`。`audit-packages.ps1 -RequireNotices` 核对原文存在及与候选源的字节一致性，并原子创建回执；默认仍可审旧包用于原兼容与回滚。旧r4包的宽松审计通过、严格新候选条件准确拒绝缺失原文，见 `notice-negative-receipt.json`。
+- `scripts/test-release.ps1` 对两个显式包路径、版本、可选批准SHA及签名者SHA256指纹进行真实内容／NuGet验证，保持原文件并锁定检查副本。未签名可作为本地候选，明确 `signaturesVerified=false`／`releaseReady=false`；`-RequireSigned` 拒绝未签名，损坏签名在任意模式均失败。已在原r4双包上实测未签名分类、强制签名拒绝、ZIP内容篡改摘要拒绝、无效签名拒绝；没有创建证书或签名，详见 `cases.json`。
+- 新统一入口的集中运行、当前包SHA与本地收编结果由本节最终回执补齐；本段机制实现本身不冒称运行通过。原2958产品包、a247示例、13d1520回填及本次候选保持各自身份，不把内容变动的新包写成旧包。
+- Serve 新增独立公开包介质互开证据位于 `archive/20260927-SRV-independent-closure/journal-interop/receipt.json`，SHA256 `de4971befd8c17ca7b6456b1c179126041767c739f47c0bd2d26d527b4ea78ef`。原r4 NuGet与实际API-client包在同一Windows物理SQLite上完成5场景、23次消费进程，原pending/unknown、格式与复制身份拒绝通过，无NET产品缺陷。正向范围是无 `workspaceBinding` 公共子集；TS可选带绑定库被NET明确拒绝，不能称所有格式都可互开。本轮只核对并引用该回执，未重复运行。
+
+原完整进度仍为工程 **5/6（83.3%），剩1；对抗23/24（95.8%），剩1；本次新增完整关闭0**。NET-06／A24待实际主线远端CI、批准签名及正式渠道；仓库/工作流机制与外部账号条件分别登记。当前未配置remote、未推送、未发布；本机CurrentUser/My未发现有效且含私钥的代码签名证书，不推断其它外部签名环境不存在。正式计划/对抗单仍由Serve任务单写同步。

@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$PackageDirectory,
     [Parameter(Mandatory = $true)][string]$OutputFile,
     [string]$Version = '0.1.0-preview.1',
-    [string]$RestoredPackageDirectory
+    [string]$RestoredPackageDirectory,
+    [switch]$RequireNotices
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -32,9 +33,30 @@ foreach ($id in @('Tansr.Sdk', 'Tansr.Sdk.Windows')) {
         $expected = if ($id -eq 'Tansr.Sdk') { @('lib/netstandard2.0/Tansr.Sdk.dll', 'lib/net10.0/Tansr.Sdk.dll') } else { @('lib/net48/Tansr.Sdk.Windows.dll', 'lib/net10.0-windows7.0/Tansr.Sdk.Windows.dll') }
         if (@(Compare-Object $expected $dlls).Count -ne 0) { throw "Unexpected SDK target assets: $id ($dlls)" }
         if (-not $names.Contains('README.md')) { throw "Missing package README: $id" }
+        $noticeRecords = @()
+        foreach ($noticeName in @('LICENSE', 'NOTICE')) {
+            $noticeEntry = $archive.GetEntry($noticeName)
+            if (-not $noticeEntry) {
+                if ($RequireNotices) { throw "Missing package notice: $id/$noticeName" }
+                continue
+            }
+            $stream = $noticeEntry.Open()
+            try {
+                $sha = [Security.Cryptography.SHA256]::Create()
+                try { $noticeHash = [Convert]::ToHexString($sha.ComputeHash($stream)).ToLowerInvariant() }
+                finally { $sha.Dispose() }
+            } finally { $stream.Dispose() }
+            if ($RequireNotices) {
+                $original = Join-Path (Split-Path -Parent $PSScriptRoot) $noticeName
+                if ($noticeEntry.Length -eq 0 -or $noticeHash -cne (Get-FileHash -LiteralPath $original -Algorithm SHA256).Hash.ToLowerInvariant()) {
+                    throw "Package notice differs from the candidate source: $id/$noticeName"
+                }
+            }
+            $noticeRecords += @{ path = $noticeName; bytes = $noticeEntry.Length; sha256 = $noticeHash }
+        }
         if ($id -eq 'Tansr.Sdk.Windows' -and -not $names.Contains('buildTransitive/net48/Tansr.Sdk.Windows.targets')) { throw 'Missing net48 native asset integration.' }
         $dependencies = @($xml.SelectNodes("//*[local-name()='dependency']") | ForEach-Object { @{ id = $_.id; version = $_.version } })
-        $records += @{ id = $id; version = $Version; sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $path).Length; entries = $entries; dependencies = $dependencies; license = 'MIT' }
+        $records += @{ id = $id; version = $Version; sha256 = (Get-FileHash -LiteralPath $path).Hash.ToLowerInvariant(); bytes = (Get-Item -LiteralPath $path).Length; entries = $entries; dependencies = $dependencies; license = 'MIT'; notices = $noticeRecords }
     }
     finally { $archive.Dispose() }
 }
@@ -63,8 +85,15 @@ if ($RestoredPackageDirectory) {
     }
     if ($dependencyRecords.Count -eq 0) { throw 'No restored package metadata was found.' }
 }
-@{
+$auditJson = @{
     outcome = 'passed'; packages = $records; restoredDependencies = $dependencyRecords
-    supportedConsumerRid = 'win-x64'; measuredAt = [DateTime]::UtcNow.ToString('o')
+    supportedConsumerRid = 'win-x64'; measuredAt = [DateTime]::UtcNow.ToString('o'); requireNotices = [bool]$RequireNotices
     boundary = 'Package content and declared dependency-license inventory, not a substitute for distributor notice obligations, signature verification or runtime evidence for other RIDs.'
-} | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $OutputFile -Encoding utf8
+} | ConvertTo-Json -Depth 10
+$receiptStream = [IO.File]::Open([IO.Path]::GetFullPath($OutputFile), [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+try {
+    $writer = [IO.StreamWriter]::new($receiptStream, [Text.UTF8Encoding]::new($false))
+    try { $writer.WriteLine($auditJson) }
+    finally { $writer.Dispose() }
+}
+finally { $receiptStream.Dispose() }
