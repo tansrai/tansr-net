@@ -209,7 +209,7 @@ internal sealed class HttpMcpTransport : IMcpTransport
                 try
                 {
                     _length = _streaming
-                        ? await StreamingBodyReader.ReadAsync(_stream, _buffer, 0, _buffer.Length, token).ConfigureAwait(false)
+                        ? await StreamingBodyReader.ReadAsync(_stream, _buffer, 0, _buffer.Length, token, true).ConfigureAwait(false)
                         : await _stream.ReadAsync(_buffer, 0, _buffer.Length, token).ConfigureAwait(false);
                 }
                 catch (Exception) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }

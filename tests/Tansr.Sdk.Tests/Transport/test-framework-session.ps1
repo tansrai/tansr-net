@@ -13,7 +13,7 @@ foreach ($name in @('Tansr.Sdk.dll', 'System.Text.Json.dll')) {
     if (-not (Test-Path -LiteralPath (Join-Path $library $name) -PathType Leaf)) { throw "Missing approved net48 input: $name" }
 }
 [IO.Directory]::CreateDirectory($output) | Out-Null
-$manifest = [ordered]@{ source = $library; startedAt = [DateTime]::UtcNow.ToString('o'); outcome = 'incomplete'; inputs = @(); compileExitCode = $null; runExitCode = $null; boundary = 'Real CLR4 public session HTTP/SSE calls against owned loopback sockets; no product build, external network, credentials, signing or publication.' }
+$manifest = [ordered]@{ source = $library; startedAt = [DateTime]::UtcNow.ToString('o'); outcome = 'incomplete'; inputs = @(); compileExitCode = $null; runExitCode = $null; boundary = 'Real CLR4 public session calls against owned loopback sockets and an injected async-only SSE stream; no product build, external network, credentials, signing or publication.' }
 $references = @(); $redirects = @()
 foreach ($file in Get-ChildItem -LiteralPath $library -File -Filter '*.dll') {
     $copy = Join-Path $output $file.Name
@@ -36,6 +36,8 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
@@ -99,12 +101,106 @@ internal static class FrameworkSessionProbe
             }
         }
         Console.WriteLine("CLEANUP owned listener, streams and client disposed; no global limit changed.");
+        await InjectedAsyncOnlyStream();
+    }
+    private static async Task InjectedAsyncOnlyStream()
+    {
+        using (var handler = new AsyncOnlyHandler())
+        using (var http = new HttpClient(handler))
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var options = new TansrClientOptions { BaseUri = new Uri("http://127.0.0.1:1/"), AllowInsecureLoopback = true,
+                TokenProvider = token => Task.FromResult("synthetic-injected-token"), RequestTimeout = TimeSpan.FromSeconds(5),
+                StreamIdleTimeout = TimeSpan.FromSeconds(30), MaxReconnectAttempts = 0 };
+            Task observation = null;
+            using (var client = new TansrClient(options, http))
+            try
+            {
+                var session = await client.GetSessionAsync("s");
+                observation = session.ObserveAsync((item, token) => Task.FromResult(true), new EventStreamOptions { Reconnect = false }, cancellation.Token);
+                Task reached = await Task.WhenAny(observation, handler.Stream.Waiting.Task, Task.Delay(3000));
+                if (reached == observation) await observation;
+                Require(reached == handler.Stream.Waiting.Task && !observation.IsCompleted,
+                    "Injected async-only stream did not deliver its heartbeat and remain subscribed.");
+                Require(handler.Stream.AsyncReads >= 2 && handler.Stream.SyncReads == 0,
+                    "Injected stream was not read through its asynchronous contract.");
+                cancellation.Cancel();
+                await Settle(observation);
+                Require(handler.Metadata == 1 && handler.Events == 1, "Injected requests were unexpectedly retried.");
+                Require(handler.Stream.Disposed, "Canceled injected SSE response stream was not disposed.");
+                Console.WriteLine("PASS CLR4 injected async-only SSE heartbeat and cancellation; asyncReads=" + handler.Stream.AsyncReads + " syncReads=" + handler.Stream.SyncReads);
+            }
+            finally
+            {
+                cancellation.Cancel();
+                if (observation != null)
+                {
+                    // Preserve an earlier protocol failure while still settling our own subscription.
+                    try { Settle(observation).GetAwaiter().GetResult(); } catch { }
+                }
+            }
+            Require(!handler.Disposed, "The SDK disposed the caller-owned injected HTTP client.");
+        }
+        Console.WriteLine("CLEANUP injected stream and caller-owned client disposed.");
     }
     private static async Task Settle(Task task)
     { try { await Within(task, 4000, "Owned observation failed to settle."); throw new Exception("Canceled observation returned success."); } catch (OperationCanceledException) { } }
     private static int Main()
     { try { Run().GetAwaiter().GetResult(); return 0; } catch (Exception error) { Console.Error.WriteLine(error); return 1; } }
 
+    private sealed class AsyncOnlyHandler : HttpMessageHandler
+    {
+        internal readonly AsyncOnlyStream Stream = new AsyncOnlyStream();
+        internal int Metadata, Events;
+        internal bool Disposed;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
+        {
+            Require(request.Method == HttpMethod.Get, "Unexpected injected request method.");
+            if (request.RequestUri.AbsolutePath == "/v2/sessions/s/events")
+            {
+                Interlocked.Increment(ref Events);
+                var content = new StreamContent(Stream);
+                content.Headers.ContentType = new MediaTypeHeaderValue("text/event-stream");
+                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+            }
+            Require(request.RequestUri.AbsolutePath == "/v2/sessions/s", "Unexpected injected request route.");
+            Interlocked.Increment(ref Metadata);
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent("{\"sessionId\":\"s\",\"lastSeq\":-1}", Encoding.UTF8, "application/json") });
+        }
+        protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
+    }
+    private sealed class AsyncOnlyStream : Stream
+    {
+        internal readonly TaskCompletionSource<bool> Waiting = new TaskCompletionSource<bool>();
+        internal int AsyncReads, SyncReads;
+        internal bool Disposed;
+        public override int Read(byte[] buffer, int offset, int count)
+        { Interlocked.Increment(ref SyncReads); throw new NotSupportedException("Synthetic async-only SSE cannot use synchronous Read."); }
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken token)
+        {
+            if (Interlocked.Increment(ref AsyncReads) == 1)
+            {
+                byte[] heartbeat = Encoding.UTF8.GetBytes(": heartbeat\n\n");
+                Require(count >= heartbeat.Length, "Unexpected SSE read buffer size.");
+                Buffer.BlockCopy(heartbeat, 0, buffer, offset, heartbeat.Length);
+                return heartbeat.Length;
+            }
+            Waiting.TrySetResult(true);
+            await Task.Delay(Timeout.Infinite, token);
+            return 0;
+        }
+        protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
+        public override bool CanRead { get { return true; } }
+        public override bool CanSeek { get { return false; } }
+        public override bool CanWrite { get { return false; } }
+        public override long Length { get { throw new NotSupportedException(); } }
+        public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+        public override void Flush() { throw new NotSupportedException(); }
+        public override long Seek(long offset, SeekOrigin origin) { throw new NotSupportedException(); }
+        public override void SetLength(long value) { throw new NotSupportedException(); }
+        public override void Write(byte[] buffer, int offset, int count) { throw new NotSupportedException(); }
+    }
     private sealed class Server : IDisposable
     {
         private readonly TcpListener listener = new TcpListener(IPAddress.Loopback, 0);

@@ -33,6 +33,7 @@ internal sealed class SessionTransport : IDisposable
     private string? principal;
     private bool principalBound;
     internal Uri Origin => origin;
+    internal bool UsesDefaultHttpClient { get; }
 
     internal SessionTransport(TansrClientOptions options, HttpClient? injected, bool ownsInjected = false)
     {
@@ -51,6 +52,7 @@ internal sealed class SessionTransport : IDisposable
         if ((options.SessionContract == SessionContract.Sdk2OffloadV1 || options.ExecutionScopeProvider is not null) && principalProvider is null)
             throw new ArgumentException("SDK2 requires a trusted PrincipalProvider.", nameof(options));
         ownsClient = injected is null || ownsInjected;
+        UsesDefaultHttpClient = injected is null;
         client = injected ?? CreateOwnedClient(false);
         if (client.DefaultRequestHeaders.Authorization is not null)
             throw new ArgumentException("Use TokenProvider rather than default Authorization headers.", nameof(injected));

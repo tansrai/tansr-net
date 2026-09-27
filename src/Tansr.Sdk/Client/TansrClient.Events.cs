@@ -159,7 +159,7 @@ public sealed partial class TansrClient
         using var closeOnIdle = idle.Token.Register(stream.Dispose);
         try
         {
-            var count = await StreamingBodyReader.ReadAsync(stream, bytes, 0, bytes.Length, idle.Token).ConfigureAwait(false);
+            var count = await StreamingBodyReader.ReadAsync(stream, bytes, 0, bytes.Length, idle.Token, transport.UsesDefaultHttpClient).ConfigureAwait(false);
             // Disposing a stream can complete its pending read normally. Preserve cancellation
             // or idle expiry instead of treating that completion as EOF or fresh event bytes.
             idle.Token.ThrowIfCancellationRequested();
