@@ -100,14 +100,16 @@ internal static class FrameworkMcpProbe
                 Require(server.Calls == 2 && server.Replies == 2 && server.Deletes == 1, "Unexpected reverse flow or replay.");
                 Require(server.MaximumConnections <= 3, "Connection reserve is not bounded.");
             }
-            finally { server.Stop(); try { Within(client.CloseAsync(), 4000, "Cleanup").GetAwaiter().GetResult(); } catch { } }
+            finally { Console.WriteLine(server.Diagnostics()); server.Stop(); try { Within(client.CloseAsync(), 4000, "Cleanup").GetAwaiter().GetResult(); } catch { } }
         }
         Console.WriteLine("PASS reverse-reserved-connection");
     }
     private static async Task<bool> Scenario(string name, Func<Task> run)
     {
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
         try { await run(); return true; }
         catch (Exception error) { Console.Error.WriteLine("FAIL " + name + ": " + error); return false; }
+        finally { Console.WriteLine("TIME " + name + " milliseconds=" + elapsed.Elapsed.TotalMilliseconds.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)); }
     }
     private static async Task Run()
     {
@@ -131,11 +133,13 @@ internal static class FrameworkMcpProbe
         private readonly ConcurrentBag<Task> workers = new ConcurrentBag<Task>();
         private readonly Task loop;
         private readonly TaskCompletionSource<bool> allReplies = new TaskCompletionSource<bool>();
+        private readonly ConcurrentQueue<string> trace = new ConcurrentQueue<string>();
         internal readonly TaskCompletionSource<bool> Headers = new TaskCompletionSource<bool>();
         internal readonly TaskCompletionSource<bool> ReleasePings = new TaskCompletionSource<bool>();
         internal int Calls, Replies, Deletes, Cancellations, MaximumConnections;
         private int active;
         internal Uri Endpoint;
+        internal string Diagnostics() { return "STATE calls=" + Calls + " replies=" + Replies + " active=" + active + " maximum=" + MaximumConnections + " servicePointLimit=" + ServicePointManager.FindServicePoint(Endpoint).ConnectionLimit + " trace=" + string.Join(";", trace); }
         internal Server(string value)
         { mode = value; listener.Start(); Endpoint = new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/mcp"); loop = Accept(); }
         internal McpHttpOptions Options() { return new McpHttpOptions(Endpoint, new[] { Endpoint }) { AllowLoopbackHttp = true }; }
@@ -159,6 +163,7 @@ internal static class FrameworkMcpProbe
                 var body = new byte[length]; for (int read = 0; read < length;) { int n = await stream.ReadAsync(body, read, length-read, stop.Token); if (n == 0) return; read += n; }
                 var json = new JavaScriptSerializer(); var message = length == 0 ? new Dictionary<string, object>() : json.Deserialize<Dictionary<string, object>>(Encoding.UTF8.GetString(body));
                 string method = message.ContainsKey("method") ? (string)message["method"] : null;
+                trace.Enqueue(DateTime.UtcNow.ToString("O") + " " + lines[0].Split(' ')[0] + " " + (method ?? "response") + " id=" + (message.ContainsKey("id") ? message["id"].ToString() : "none"));
                 if (lines[0].StartsWith("DELETE ")) { Interlocked.Increment(ref Deletes); await Reply(stream, "204 No Content", "", "application/json", ""); return; }
                 if (method == "initialize")
                 { await Reply(stream, "200 OK", json.Serialize(new { jsonrpc = "2.0", id = message["id"], result = new { protocolVersion = "2025-11-25", capabilities = new { }, serverInfo = new { name = "owned-clr4", version = "1" } } }), "application/json", "Mcp-Session-Id: owned-clr4\r\n"); return; }
@@ -168,11 +173,15 @@ internal static class FrameworkMcpProbe
                 if (method.StartsWith("notifications/")) { await Reply(stream, "202 Accepted", "", "application/json", ""); return; }
                 Require(method == "tools/call", "Unexpected request."); int call = Interlocked.Increment(ref Calls);
                 string type = mode == "deadline-json" ? "application/json" : "text/event-stream";
-                await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nConnection: close\r\n\r\n");
-                if (mode != "reverse") { await Write(stream, mode == "deadline-json" ? "{" : ": open\n\n"); Headers.TrySetResult(true); await Task.Delay(Timeout.Infinite, stop.Token); return; }
+                string headers = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nConnection: close\r\n\r\n";
+                if (mode != "reverse") { await Write(stream, headers + (mode == "deadline-json" ? "{" : ": open\n\n")); Headers.TrySetResult(true); await Task.Delay(Timeout.Infinite, stop.Token); return; }
                 if (call == 2) Headers.TrySetResult(true);
                 await ReleasePings.Task;
-                await Write(stream, "data: " + json.Serialize(new { jsonrpc = "2.0", id = 900 + call, method = "ping" }) + "\n\n");
+                trace.Enqueue("ping-start " + call);
+                // Headers and the first complete event share one write, exercising the
+                // Framework response buffer without relying on packet timing luck.
+                await Write(stream, headers + "data: " + json.Serialize(new { jsonrpc = "2.0", id = 900 + call, method = "ping" }) + "\n\n");
+                trace.Enqueue("ping-sent " + call);
                 await allReplies.Task;
                 await Write(stream, "data: " + json.Serialize(new { jsonrpc = "2.0", id = message["id"], result = new { ok = true } }) + "\n\n");
             }

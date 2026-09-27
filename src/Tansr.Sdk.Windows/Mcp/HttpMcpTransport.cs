@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Windows.Mcp;
 
@@ -79,7 +80,7 @@ internal sealed class HttpMcpTransport : IMcpTransport
         // Framework's response stream does not observe cancellation after a read has
         // begun. Closing the owned body also lets CloseAsync actually drain operations.
         using var closeOnCancellation = linked.Token.Register(stream.Dispose);
-        var reader = new BoundedBody(stream, _maximumBytes);
+        var reader = new BoundedBody(stream, _maximumBytes, string.Equals(type, "text/event-stream", StringComparison.OrdinalIgnoreCase));
         if (string.Equals(type, "application/json", StringComparison.OrdinalIgnoreCase))
         {
             string raw = await reader.ReadAllAsync(linked.Token).ConfigureAwait(false);
@@ -197,14 +198,20 @@ internal sealed class HttpMcpTransport : IMcpTransport
     private sealed class BoundedBody
     {
         private readonly Stream _stream; private readonly int _maximum; private readonly byte[] _buffer = new byte[4096];
+        private readonly bool _streaming;
         private int _position, _length, _total;
-        internal BoundedBody(Stream stream, int maximum) { _stream = stream; _maximum = maximum; }
+        internal BoundedBody(Stream stream, int maximum, bool streaming) { _stream = stream; _maximum = maximum; _streaming = streaming; }
         private async Task<int> ReadByteAsync(CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
             if (_position == _length)
             {
-                try { _length = await _stream.ReadAsync(_buffer, 0, _buffer.Length, token).ConfigureAwait(false); }
+                try
+                {
+                    _length = _streaming
+                        ? await StreamingBodyReader.ReadAsync(_stream, _buffer, 0, _buffer.Length, token).ConfigureAwait(false)
+                        : await _stream.ReadAsync(_buffer, 0, _buffer.Length, token).ConfigureAwait(false);
+                }
                 catch (Exception) when (token.IsCancellationRequested) { throw new OperationCanceledException(token); }
                 token.ThrowIfCancellationRequested(); _position = 0;
                 if (_length == 0) return -1;

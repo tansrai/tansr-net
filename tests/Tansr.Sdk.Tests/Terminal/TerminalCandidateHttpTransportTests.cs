@@ -71,6 +71,62 @@ public sealed class TerminalCandidateHttpTransportTests
     {
         public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) => base.ReadAsync(buffer, offset, Math.Min(count, 1), cancellationToken);
     }
+    private sealed class DisposeReleasedStream(byte[] bytes) : Stream
+    {
+        private readonly TaskCompletionSource<int> released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private bool started;
+        public bool Disposed { get; private set; }
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        {
+            if (started) return Task.FromResult(0);
+            started = true; Assert.True(bytes.Length <= count); bytes.CopyTo(buffer, offset);
+            // A stream may unblock a pending read normally when Dispose closes the connection.
+            // The next read is EOF so the unfixed product cannot spin or hang the regression.
+            return released.Task;
+        }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override void Flush() => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        protected override void Dispose(bool disposing)
+        { Disposed = true; released.TrySetResult(bytes.Length); base.Dispose(disposing); }
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task IdleExpiryThatDisposesToNormalReadNeverEmitsTerminalEvents(bool executor, bool returnsBytes)
+    {
+        var value = executor ? JsonSerializer.SerializeToElement(new
+        { contract = "terminal-services-v1", eventId = "1", type = "operations-available", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null }) : StatusEvent();
+        var bytes = returnsBytes ? Encoding.UTF8.GetBytes(OutputFrame(value, executor ? "1" : null)) : Array.Empty<byte>();
+        using var stream = new DisposeReleasedStream(bytes);
+        var requests = 0; var observed = 0;
+        using var http = new HttpClient(new Handler(_ =>
+        {
+            requests++;
+            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StreamContent(stream) { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } } });
+        }));
+        var options = Options(); options.StreamIdleTimeout = TimeSpan.FromMilliseconds(30);
+        using var transport = new TerminalCandidateHttpTransport(options, http);
+        Task Observe(JsonElement received, CancellationToken token) { observed++; return Task.CompletedTask; }
+
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => (executor
+            ? transport.ObserveExecutorAsync("sdk2-offload-v1", "executor-1", "connection-1", null, Observe, default)
+            : transport.ObserveOutputAsync(Session, Reference, null, Observe, default)).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        Assert.Equal("stream_idle_timeout", error.Code);
+        Assert.Equal(0, observed); Assert.Equal(1, requests); Assert.True(stream.Disposed);
+    }
     [Fact]
     public async Task OutputUsesFull64BitAfterSequenceAndEofNeverBecomesCompletion()
     {

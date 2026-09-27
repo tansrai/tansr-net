@@ -161,7 +161,7 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
             using (var idle = CancellationTokenSource.CreateLinkedTokenSource(connection.Token))
             {
                 idle.CancelAfter(idleTimeout); using var closeIdle = idle.Token.Register(stream.Dispose);
-                try { count = await stream.ReadAsync(buffer, 0, buffer.Length, idle.Token).ConfigureAwait(false); }
+                try { count = await StreamingBodyReader.ReadAsync(stream, buffer, 0, buffer.Length, idle.Token).ConfigureAwait(false); }
                 catch (Exception) when (connection.IsCancellationRequested) { throw new OperationCanceledException(connection.Token); }
                 catch (Exception) when (idle.IsCancellationRequested) { throw new TansrProtocolException("stream_idle_timeout"); }
                 catch (IOException) { throw new TansrProtocolException("network_error"); }
