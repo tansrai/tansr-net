@@ -52,7 +52,7 @@ async function fixture() {
     assert.ok(['127.0.0.1', 'localhost', '[::1]'].includes(url.hostname)); return nativeFetch(input, init);
   };
   const { startExecutionPipelineFixture } = await import('../tests/Tansr.Sdk.IntegrationTests/ServeExecutionPipelineFixture.mjs');
-  const origin = await startExecutionPipelineFixture({ source, directory: join(required('TANSR_SERVE_TEST_DIRECTORY'), 'execution-pipeline'),
+  const origin = await startExecutionPipelineFixture({ source, directory: join(required('TANSR_SERVE_TEST_DIRECTORY'), 'execution-pipeline'), foregroundOnly: true,
     authenticate(request) {
       const actual = request.headers.authorization, expected = `Bearer ${token}`;
       if (typeof actual === 'string' && Buffer.byteLength(actual) === Buffer.byteLength(expected) && timingSafeEqual(Buffer.from(actual), Buffer.from(expected)))

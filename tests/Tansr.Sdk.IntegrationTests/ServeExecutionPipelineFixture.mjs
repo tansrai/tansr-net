@@ -6,7 +6,7 @@ import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-export async function startExecutionPipelineFixture({ source, directory, authenticate, shellSandbox = false }) {
+export async function startExecutionPipelineFixture({ source, directory, authenticate, shellSandbox = false, foregroundOnly = false }) {
   await mkdir(directory, { recursive: true });
   const load = file => import(pathToFileURL(join(source, file)).href);
   const { createAgentSessionFactory, createServeAgentSessionStore, startServer } = await load('packages/server/src/index.ts');
@@ -71,12 +71,18 @@ export async function startExecutionPipelineFixture({ source, directory, authent
       if (planned) {
         const action = JSON.parse(planned[1]);
         assert.ok(['Shell', 'ShellTask', 'ShellOutput'].includes(action.name));
-        assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Shell', 'ShellOutput', 'ShellTask']);
+        if (foregroundOnly) assert.equal(action.name, 'Shell');
+        assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), foregroundOnly ? ['Shell'] : ['Shell', 'ShellOutput', 'ShellTask']);
         const count = (modelCalls.get(action.id) ?? 0) + 1; modelCalls.set(action.id, count);
         assert.ok(count <= 2, 'Each background business action has one proposal and one original result.');
         if (count === 1) { backgroundActions.push(action); return response(request, null, action); }
         const original = request.thread.flatMap(item => item.blocks ?? []).findLast(block => block.t === 'tool_result' && block.toolUseId === action.id);
         assert.ok(original, 'Background results must be returned by the real kernel.');
+        if (foregroundOnly) {
+          assert.notEqual(original.isError, true, 'The benchmark must settle the successful original process.');
+          assert.equal(new Set([...JSON.stringify(original).matchAll(/QPC_SAMPLE\|(\d+)\|/g)].map(match => Number(match[1]))).size, 100,
+            'All original native benchmark samples must reach the kernel tool result.');
+        }
         return response(request, `${action.id}:settled`);
       }
       assert.deepEqual((request.tools ?? []).map(tool => tool.name).sort(), ['Shell']);

@@ -113,19 +113,19 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
             await TurnAsync(context.Session, "NET_FOREGROUND_CHILD", events, ct);
             await PlanAsync("SpawnAgent", new { label = "bounded resident", prompt = "Synthetic resident task", tools = new[] { "Read" } }, ct: ct);
             await TurnAsync(context.Session, "NET_RESIDENT_CHILD", events, ct);
-            await WaitNoticesAsync(1, ct);
+            await WaitNoticesAsync(context.Session, events, 1, ct);
             var before = await InspectAsync(ct); var originalId = before.GetProperty("childId").GetString();
             Assert.False(string.IsNullOrEmpty(originalId));
             await PlanAsync("AgentFollowup", new { agent_id = "original-from-trusted-host", message = "Continue the synthetic task" }, ct: ct);
             await TurnAsync(context.Session, "NET_CHILD_FOLLOWUP", events, ct);
-            await WaitNoticesAsync(2, ct);
+            await WaitNoticesAsync(context.Session, events, 2, ct);
             var followed = await InspectAsync(ct); Assert.Equal(originalId, followed.GetProperty("childId").GetString());
             Assert.True(followed.GetProperty("childCalls").GetInt32() > before.GetProperty("childCalls").GetInt32());
             var executionsBeforeRevoke = context.Executions; Assert.True(executionsBeforeRevoke > 0);
             await CommandAsync(new { action = "revoke" }, ct);
             await PlanAsync("AgentFollowup", new { agent_id = originalId, message = "Must not run after authority changes" }, ct: ct);
             await TurnAsync(context.Session, "NET_REVOKED_CHILD", events, ct);
-            await WaitNoticesAsync(3, ct);
+            await WaitNoticesAsync(context.Session, events, 3, ct);
             var revoked = await InspectAsync(ct);
             Assert.Equal(followed.GetProperty("childCalls").GetInt32(), revoked.GetProperty("childCalls").GetInt32());
             Assert.Equal(executionsBeforeRevoke, context.Executions);
@@ -178,15 +178,7 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
     private static async Task<SessionRunResult> TurnAsync(AgentSession session, string prompt, ConcurrentQueue<AgentEvent> events, CancellationToken ct, bool denyWrites = false)
     {
         using var turn = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var running = session.SendAndObserveAsync(prompt, observer: async (item, token) =>
-        {
-            events.Enqueue(item);
-            if (item.Name == "server.permission.request")
-            {
-                var permission = item.Data.GetProperty("payload");
-                await session.PermissionAsync(permission.GetProperty("requestId").GetString()!, permission.GetProperty("digest").GetString()!, !denyWrites || permission.GetProperty("name").GetString() != "Write", token);
-            }
-        }, cancellationToken: turn.Token);
+        var running = session.SendAndObserveAsync(prompt, observer: (item, token) => ObserveAsync(session, events, item, token, denyWrites), cancellationToken: turn.Token);
         while (!running.IsCompleted)
         {
             var failed = Path.Combine(Root, "host-failure.json");
@@ -206,10 +198,49 @@ public sealed class ServeTrustedExtensionsTests(McpNativeFixture nativeMcp) : IC
     private static Task<JsonElement> PlanAsync(string? tool, object? args, string hookMode = "allow", bool promptBlocked = false, CancellationToken ct = default)
         => CommandAsync(tool == null ? new { action = "plan", hookMode, promptBlocked } : (object)new { action = "plan", tool, args, hookMode, promptBlocked }, ct);
     private static Task<JsonElement> InspectAsync(CancellationToken ct) => CommandAsync(new { action = "inspect" }, ct);
-    private static async Task WaitNoticesAsync(int expected, CancellationToken ct)
+    private static async Task ObserveAsync(AgentSession session, ConcurrentQueue<AgentEvent> events, AgentEvent item, CancellationToken ct, bool denyWrites = false)
     {
-        while ((await InspectAsync(ct)).GetProperty("notices").EnumerateArray().Count(item => item.GetProperty("channel").GetString() == "settled") < expected)
-            await Task.Delay(10, ct);
+        if (item.Name == "server.permission.request")
+        {
+            var permission = item.Data.GetProperty("payload");
+            await session.PermissionAsync(permission.GetProperty("requestId").GetString()!, permission.GetProperty("digest").GetString()!, !denyWrites || permission.GetProperty("name").GetString() != "Write", ct);
+        }
+        events.Enqueue(item);
+    }
+    private static bool BelongsTo(AgentEvent item, AgentSession session) => item.Data.TryGetProperty("sessionId", out var id) && id.GetString() == session.Id;
+    private static async Task WaitNoticesAsync(AgentSession session, ConcurrentQueue<AgentEvent> events, int expected, CancellationToken ct)
+    {
+        // SendAndObserve has completed and released its sole pump. A resident child
+        // can still need original device permission after the parent turn ends.
+        // Resume at the callback-consumed cursor: SessionRun may observe later frames
+        // while tearing down without handing them to this application callback.
+        var last = events.LastOrDefault(item => item.Id != null && BelongsTo(item, session)); Assert.NotNull(last);
+        using var observation = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var pump = session.ObserveAsync((item, token) => ObserveAsync(session, events, item, token),
+            new EventStreamOptions { LastEventId = last.Id, StopOnGap = true, Reconnect = false }, observation.Token);
+        Exception? primary = null;
+        try
+        {
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            while (true)
+            {
+                if (pump.IsCompleted) { await pump; throw new InvalidOperationException("Resident child observation ended before settlement."); }
+                var facts = await InspectAsync(ct);
+                if (facts.GetProperty("notices").EnumerateArray().Count(item => item.GetProperty("channel").GetString() == "settled") >= expected &&
+                    events.Count(item => item.Name == "agent.settled" && BelongsTo(item, session)) >= expected) break;
+                if (elapsed.Elapsed >= TimeSpan.FromSeconds(10)) throw new TimeoutException("Original child did not settle within 10 seconds: " + facts.GetRawText());
+                await Task.WhenAny(pump, Task.Delay(500, ct)); ct.ThrowIfCancellationRequested();
+            }
+        }
+        catch (Exception error) { primary = error; }
+        finally
+        {
+            observation.Cancel();
+            try { await pump; }
+            catch (OperationCanceledException) when (observation.IsCancellationRequested) { }
+            catch (Exception error) { primary = primary == null ? error : new AggregateException("Child observation and cleanup failed.", primary, error); }
+        }
+        if (primary != null) ExceptionDispatchInfo.Capture(primary).Throw();
     }
     private static async Task<JsonElement> CommandAsync(object request, CancellationToken ct)
     {

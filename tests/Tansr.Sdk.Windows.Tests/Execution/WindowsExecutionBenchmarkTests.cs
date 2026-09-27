@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO.Pipes;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.ExceptionServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -152,6 +153,7 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
         using var release = new EventWaitHandle(false, EventResetMode.ManualReset, releaseName);
         var sink = new BoundSink(); TerminalBinding? binding = null, deviceBinding = null;
         var original = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
+        string? operationId = null, requestDigest = null;
         var command = "native-benchmark-" + delayEachDirectionMs; var launches = 0;
         var backend = new WindowsExecutorBackend("net-native-pc", [new WindowsExecutorWorkspace("work", "1", workspace)],
             interpreter: Json(new { id = "net-native-fixture", revision = "1", hostShell = "powershell" }), processFactory: (args, location) =>
@@ -159,7 +161,7 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
                 Assert.Equal(command, args.GetProperty("command").GetString()); Interlocked.Increment(ref launches);
                 var request = new WindowsProcessRequest(program.Executable, ["benchmark", releaseName], () => location.AcquireProcessDirectory()) { ChunkBytes = 1024, MaxPendingChunks = 256 };
                 request.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows); return request;
-            }, output: (chunk, _) => { Record("native.read", new { stream = chunk.Stream.ToString(), text = chunk.Text }); return Task.CompletedTask; }, executionOutput: sink);
+            }, output: (chunk, _) => { Record("native.read", new { operationId, requestDigest, stream = chunk.Stream.ToString(), text = chunk.Text }); return Task.CompletedTask; }, executionOutput: sink);
         using var host = new DeviceSessionHost(new ExecutionClient(controller), new ExecutionClient(device), backend, journal,
             new DeviceSessionOptions
             {
@@ -180,10 +182,26 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
                     deviceBinding = terminal.AttachBinding(binding); sink.Inner = terminal.CreateOutputSink(deviceBinding);
                 },
                 ExecutionNotifications = (_, _) => Task.FromResult<IExecutionNotificationSource>(new TerminalExecutionNotifications(terminal, deviceBinding!))
-            }, (operation, _) => { original.TrySetResult(operation.Clone()); return Task.CompletedTask; });
+            }, (operation, _) =>
+            {
+                // Shell first validates its cwd through the same bound-device executor.
+                // Only the original process operation owns the output observation.
+                if (operation.GetProperty("request").GetProperty("operation").GetString() == "process.exec")
+                {
+                    operationId = operation.GetProperty("operationId").GetString(); requestDigest = operation.GetProperty("digest").GetString();
+                    original.TrySetResult(operation.Clone());
+                }
+                return Task.CompletedTask;
+            });
         using var observing = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        Task? stream = null; SessionRun? run = null; TerminalOutputView? view = null; string? operationId = null;
+        Task? stream = null; SessionRun? run = null; TerminalOutputView? view = null;
         var streams = new Dictionary<string, StringBuilder> { ["stdout"] = new(), ["stderr"] = new() }; var seen = new HashSet<int>();
+        JsonElement? result = null; Exception? primaryFailure = null; var cleanupFailures = new List<Exception>();
+        async Task CleanupAsync(string stage, Func<Task> action)
+        {
+            try { await action(); Record(stage, new { completed = true }); }
+            catch (Exception error) { cleanupFailures.Add(error); Record(stage, new { error = error.ToString() }); }
+        }
         try
         {
             await host.StartAsync(ct);
@@ -206,7 +224,7 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
                     {
                         foreach (var segment in view.ApplyEvent(item))
                         {
-                            Record("view.consume", new { segment.Channel, segment.Sequence, bytes = segment.Bytes.Length });
+                            Record("view.consume", new { operationId, requestDigest = operation.GetProperty("digest").GetString(), segment.Channel, segment.Sequence, bytes = segment.Bytes.Length });
                             if (!streams.TryGetValue(segment.Channel, out var text)) continue;
                             text.Append(segment.Text);
                             foreach (Match match in Sample.Matches(text.ToString()))
@@ -222,15 +240,26 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
             }
             await collector.AllSamplesAsync(ct); collector.AssertProducerAlive(); Assert.False(run.Completion.IsCompleted); release.Set();
             var final = await run.Completion.WaitAsync(TimeSpan.FromSeconds(25), ct); Assert.False(final.WasAborted);
+            Assert.Equal("turn.completed", final.TerminalEvent.Name);
+            var receipt = await WaitReceiptAsync(journal, operation, ct);
+            Assert.Equal("completed", receipt.GetProperty("status").GetString());
+            var args = receipt.GetProperty("result").GetProperty("args");
+            Assert.Equal("0", args.GetProperty("exitCode").GetString());
+            Assert.False(args.GetProperty("aborted").GetBoolean());
+            var remote = await new ExecutionClient(controller).GetStatusAsync(session.Id, operationId, ct);
+            Assert.Equal(WireJson.CanonicalString(receipt), WireJson.CanonicalString(remote.GetProperty("receipt")));
+            Record("execution.receipt.verified", new { operationId, receipt });
             var sealDeadline = DateTime.UtcNow.AddSeconds(15);
             while (!view.SealVerified) { if (stream.IsFaulted) await stream; Assert.True(DateTime.UtcNow < sealDeadline, "Original output seal missing."); await Task.Delay(10, ct); }
             Assert.False(view.HasPresentationGap); Assert.Null(backend.LastOutputFailure); Assert.Equal(1, launches);
+            Assert.Equal(args.GetProperty("stdout").GetString(), streams["stdout"].ToString());
+            Assert.Equal(args.GetProperty("stderr").GetString(), streams["stderr"].ToString());
             Assert.Single(await File.ReadAllLinesAsync(Path.Combine(work, "launches.txt"), ct));
             var accepted = (await File.ReadAllLinesAsync(Path.Combine(Required("TANSR_SERVE_TEST_DIRECTORY"), "execution-pipeline", "serve-pipeline.jsonl"), ct))
                 .Select(line => JsonDocument.Parse(line).RootElement.Clone()).Where(item => item.GetProperty("stage").GetString() == "serve.output.accepted" && item.GetProperty("operationId").GetString() == operationId).ToArray();
             Assert.True(accepted.Length >= 100, "All flushed blocks must traverse the original Serve accepted-output boundary.");
             await File.WriteAllLinesAsync(Path.Combine(directory, "serve-accepted.jsonl"), accepted.Select(item => item.GetRawText()), ct);
-            return collector.Summary(delayEachDirectionMs == 0 ? "serve-loopback" : "serve-controlled-rtt20", new
+            result = collector.Summary(delayEachDirectionMs == 0 ? "serve-loopback" : "serve-controlled-rtt20", new
             {
                 operationId,
                 acceptedBlocks = accepted.Length,
@@ -243,20 +272,40 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
                 serveClock = "Serve native UTC/hrtime records are retained without cross-runtime clock subtraction."
             });
         }
+        catch (Exception error) { primaryFailure = error; Record("primary.failed", new { error = error.ToString() }); }
         finally
         {
-            release.Set(); observing.Cancel();
-            if (stream != null) await stream.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None);
-            run?.Dispose();
-            await host.QuiesceNotificationsAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            await session.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10)); await host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10));
-            await File.WriteAllLinesAsync(Path.Combine(directory, "dotnet-stages.jsonl"), stages.Select(item => item.GetRawText()), CancellationToken.None);
+            await CleanupAsync("cleanup.release", () => { release.Set(); observing.Cancel(); return Task.CompletedTask; });
+            if (stream != null) await CleanupAsync("cleanup.observation", () => stream.WaitAsync(TimeSpan.FromSeconds(10), CancellationToken.None));
+            await CleanupAsync("cleanup.view", () => { view?.Dispose(); return Task.CompletedTask; });
+            await CleanupAsync("cleanup.run", () => { run?.Dispose(); return Task.CompletedTask; });
+            await CleanupAsync("cleanup.quiesce", () => host.QuiesceNotificationsAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            await CleanupAsync("cleanup.session", () => session.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            await CleanupAsync("cleanup.host", () => host.StopAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            if (sink.Inner != null) await CleanupAsync("cleanup.output", () => sink.Inner.CloseAsync().WaitAsync(TimeSpan.FromSeconds(10)));
+            try { await File.WriteAllLinesAsync(Path.Combine(directory, "dotnet-stages.jsonl"), stages.Select(item => item.GetRawText()), CancellationToken.None); }
+            catch (Exception error) { cleanupFailures.Add(error); }
+        }
+        if (primaryFailure != null && cleanupFailures.Count == 0) ExceptionDispatchInfo.Capture(primaryFailure).Throw();
+        if (primaryFailure != null) cleanupFailures.Insert(0, primaryFailure);
+        if (cleanupFailures.Count > 0) throw new AggregateException("Benchmark failed; original failure precedes cleanup failures.", cleanupFailures);
+        return result ?? throw new InvalidOperationException("Benchmark completed without a result.");
+    }
+
+    private static async Task<JsonElement> WaitReceiptAsync(SqliteExecutorJournal journal, JsonElement operation, CancellationToken ct)
+    {
+        var until = DateTime.UtcNow.AddSeconds(25);
+        while (true)
+        {
+            var receipt = await journal.ReceiptAsync(operation, ct); if (receipt.HasValue) return receipt.Value;
+            if (DateTime.UtcNow >= until) throw new TimeoutException("Original benchmark operation receipt did not settle.");
+            await Task.Delay(15, ct);
         }
     }
 
     private sealed class BoundSink : IExecutionOutputSink
     {
-        internal IExecutionOutputSink? Inner;
+        internal TerminalOutputSink? Inner;
         public Task<IExecutionOutputCapture> OpenAsync(JsonElement operation, CancellationToken ct) => (Inner ?? throw new InvalidOperationException("Terminal binding missing.")).OpenAsync(operation, ct);
     }
 
@@ -264,7 +313,17 @@ public sealed class WindowsExecutionBenchmarkTests(ITestOutputHelper output, Win
     {
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
-            if (request.RequestUri!.AbsolutePath.EndsWith("/output-batches", StringComparison.Ordinal)) record("client.output.send", new { path = request.RequestUri.AbsolutePath });
+            if (request.RequestUri!.AbsolutePath.EndsWith("/output-batches", StringComparison.Ordinal))
+            {
+                using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+                record("client.output.send", new
+                {
+                    path = request.RequestUri.AbsolutePath,
+                    operation = body.RootElement.GetProperty("operation").Clone(),
+                    blocks = body.RootElement.GetProperty("blocks").EnumerateArray().Select(block => new
+                    { seq = block.GetProperty("seq").Clone(), channel = block.GetProperty("channel").GetString(), byteLength = block.GetProperty("byteLength").GetInt32() }).ToArray()
+                });
+            }
             return await base.SendAsync(request, ct);
         }
     }

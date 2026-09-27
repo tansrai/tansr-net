@@ -19,7 +19,7 @@ const required = name => {
 };
 const source = realpathSync(required('TANSR_SERVE_SOURCE'));
 const suite = process.env.TANSR_SERVE_TEST_SUITE ?? 'all';
-assert.ok(['all', 'controls', 'execution', 'new', 'memory', 'session-api', 'extensions', 'cache', 'files', 'repair'].includes(suite), 'Unknown named integration suite.');
+assert.ok(['all', 'controls', 'execution', 'new', 'memory', 'session-api', 'extensions', 'cache', 'files', 'repair', 'budget-resume'].includes(suite), 'Unknown named integration suite.');
 assert.ok(suite === 'all' || process.env.TANSR_SERVE_SOURCE_SNAPSHOT, 'Named candidate suites require the pinned source snapshot.');
 const sourceFile = path => resolve(source, path);
 const sha = path => createHash('sha256').update(readFileSync(path)).digest('hex');
@@ -260,6 +260,9 @@ async function run() {
       (ready.cacheUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeCacheContinuityTests' : '') +
       (ready.filesUrl ? '|FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeFileOperationsTests' : '');
     const filter = suite === 'all' ? allFilter : [
+      ...(suite === 'budget-resume' ? [
+        'FullyQualifiedName=Tansr.Sdk.IntegrationTests.ServeSessionApiTests.CheckpointsCompactRestoreExportImportForkAndDeletePreserveTheOriginalSessionAndImages',
+        'FullyQualifiedName=Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests.OriginalTrustedHooksDeviceSkillsAndChildrenRemainWithinTheirApprovedBoundaries'] : []),
       ...(suite === 'memory' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeMemoryPublicationTests'] : []),
       ...(suite === 'session-api' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeSessionApiTests'] : []),
       ...(suite === 'extensions' || suite === 'repair' ? ['FullyQualifiedName~Tansr.Sdk.IntegrationTests.ServeTrustedExtensionsTests'] : []),
