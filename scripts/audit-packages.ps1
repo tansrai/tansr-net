@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageDirectory,
     [Parameter(Mandatory = $true)][string]$OutputFile,
-    [string]$Version = '0.1.0-preview.1',
+    [string]$Version = '0.1.0.2',
     [string]$RestoredPackageDirectory,
     [switch]$RequireNotices
 )

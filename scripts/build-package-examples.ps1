@@ -2,7 +2,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$PackageDirectory,
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
-    [string]$Version = '0.1.0-preview.1'
+    [string]$Version = '0.1.0.2'
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw '原生示例候选在 Windows x64 构建；本入口不执行 UI 或业务验收。' }
