@@ -1,8 +1,8 @@
 # NETSDK 实施记录
 
-更新日期：2026-09-27。原 NET-01—05 已关闭，工程 **5/6（83.3%），剩1**；A01—23通过，验收 **23/24（95.8%），剩1**；P01—16为16/16。本次代码审计确认的取消、主体隔离、旧框架流与连接、存储、媒体、扩展和示例缺口已修复，产品候选为 `759f123`，Core946/946、原独立Windows池451/451及后续10项交付检查通过；首次失败与同候选复验分别保留，不称一次全绿。最终本地main及证据摘要见 `J:/tansr/archive/20260927-NET-code-audit/closure.json`。原主线工作流已实现；NET-06/A24仍待批准remote后的主线推送/实际GitHub CI、批准签名及NuGet正式渠道，未发布。详见末节代码审计回填。
+更新日期：2026-09-28。原 NET-01—05 已关闭，工程 **5/6（83.3%），剩1**；A01—23通过，验收 **23/24（95.8%），剩1**；P01—16为16/16，本轮新增完整关闭0。源码已推送公开MIT仓库 `tansrai/tansr-net`，主线 `13db8d5` 的GitHub CI通过，Core946/946、Windows451/451。用户指定的 `0.1.0.2` 双包来源为 `13bdf29`，后续只固定构建SDK并修正测试就绪标记的竞态，产品源码、锁文件与包元数据未变。NuGet账号 `Tansr` 已发布两个包；V3索引、公开下载、内容/仓库签名及三类独立消费均通过，具体事实以本页末节和 `J:/tansr/archive/20260928-NET-06-nuget-publication/` 回执为准。批准的作者签名仍待办，不用仓库签名替代原NET-06/A24条件。
 
-原六张工程卡、24项验收、P01—P16不变。本批开始前的已收编状态为工程0/6、验收4/24（A03/A05/A06/A07）；本批当前原卡结算在末节列示，正式跨仓单据由单写者同步，未将待UI或发行条件写成通过。以下各日期段是历史快照，其旧“未齐”、旧候选、旧计数及红例保留，不代表当前状态。尚未正式发行。
+原六张工程卡、24项验收、P01—P16不变。本批开始前的已收编状态为工程0/6、验收4/24（A03/A05/A06/A07）；本批当前原卡结算在末节列示，正式跨仓单据由单写者同步，未将待UI或发行条件写成通过。以下各日期段是历史快照，其旧“未齐”、旧候选、旧计数及红例保留，不代表当前状态；最新渠道事实单独记录。
 
 ## 责任、源码和边界
 
@@ -465,3 +465,32 @@ A24已有2958双包四类消费、旧API兼容、三NuGet示例和原Console/两
 最终两包均为未发布 `0.1.0-preview.1`，构建源759，目录 `completion-r1/packages`：Core **564153字节**，SHA256 `d80a3003ffb312ea52936a09c7da1339c6dbf3d6fa71ba18227a6da1f5ddad80`；Windows **333185字节**，SHA256 `2fba121c9fa95ccbd419f51b227a8870ad3cdb489f341844171d2ad8ba942e92`。`release-check-r2/manifest.json` 按这两个预期摘要和必需notice检查通过；真实NuGet verify仍为未签名NU3004，`readiness=unsigned`、`signaturesVerified=false`、`releaseReady=false`、`published=false`。此前ee945包及release-check-r1只是历史候选，不作为最终产物。
 
 本轮确认的代码缺口均已修复并通过受影响验收，不把这一结论外推为绝无缺陷或重新通过全部外部环境。原工程 **5/6完成，剩1，83.3%**；原对抗验收 **23/24通过，剩1，95.8%**；能力对照 **16/16**；本轮新增完整关闭 **0**。NET-06/A24只保留批准remote后的主线推送/实际GitHub CI、批准签名与正式NuGet渠道。代码、示例、测试和本文统一收编本地主干；正式三单由Serve任务单写同步，不留工作树独有产品提交。
+
+## 2026-09-28 NET-06：0.1.0.2 公开源码与 NuGet 发布
+
+用户明确指定双包版本 `0.1.0.2`、公开MIT仓库 `tansrai/tansr-net` 和NuGet账号 `Tansr`。原 `0.1.0-preview.1` 网页上传已在提交前取消，未发布旧版。开发分支只作本地隔离，全部发布相关提交按本地检查→快进main→只推main的顺序收编。
+
+### 本地与主线检查
+
+- `13bdf29` 完成版本、包README、源码地址和旧版本参数接线。本地Core946/946；Windows原443/451（含清理失败）、首次复验449/451保留。用户确认360中断后，同编译物、filter、断言、超时重测451/451、0跳过、22秒；原未执行10门在同源校验下续跑通过，不称本地一次连续全绿。
+- 两包严格NOTICE检查、net48/现代Windows/WPF自包含/Core AOT四类实际消费、原旧包升级/回滚、三个示例构建和四TFM旧公开API兼容通过。包源码为13bdf29；示例构建不冒充本轮完整GUI复验。
+- 最初远端workflow的job级 `runner.temp` 表达式非法，在13bdf29改为首个PowerShell步骤写GITHUB_ENV。随后run36391474072因SDK10.0.303与锁定ILLink10.0.9冲突而失败；83e1b8a将global.json的rollForward固定disable，保留SDK10.0.301与locked restore，本地恢复/Release编译0警告错误。
+- run36391932067的SDK、恢复和编译通过，Core946/946、Windows450/451。唯一失败是测试子进程创建writer-ready时尚未关闭写句柄，父进程凭File.Exists过早读取。13db8d5仅将该夹具改为同目录临时文件写完关闭后File.Move公布；原SQLite hook、phase、忙库/杀进程/恢复/ACK断言和全部超时不变。所属类2/2、关键场景连续3次、受影响格式检查通过。
+- 最终[主线CI 36392524187](https://github.com/tansrai/tansr-net/actions/runs/36392524187)在main@13db8d54601c17a6625114504a590e4cadf28ccd通过。最终远端Core946/946、Windows451/451、sandbox黄金1/1均0失败0跳过。外部原Node互通、完整GUI/五客户端/普通用户、作者签名等仍按原独立证据与范围记录，不扩大本轮结论。
+
+### 固定包与渠道
+
+已验本地包位于 `version-0.1.0.2-completion/packages`：
+
+| 包 | 字节 | SHA256 |
+|---|---:|---|
+| Tansr.Sdk.0.1.0.2.nupkg | 561800 | 5c5ed557e574c9691c4736d7b6aff4b75f25bb9df5d53a2f9bfaf218e10643ea |
+| Tansr.Sdk.Windows.0.1.0.2.nupkg | 330803 | 6199c4976b6c734e68568401bea410a9ba9b8b718f15d8d5141f4cf445c67eb7 |
+
+两包已正式发布：[Tansr.Sdk 0.1.0.2](https://www.nuget.org/packages/Tansr.Sdk/0.1.0.2)、[Tansr.Sdk.Windows 0.1.0.2](https://www.nuget.org/packages/Tansr.Sdk.Windows/0.1.0.2)。2026-09-28 07:48 UTC，两个官方V3索引均返回200且列出0.1.0.2。先前仅提交/待索引回执保留在 `nuget-0.1.0.2-submitted.json`，不改写历史。
+
+公开CDN下载的Core为574884字节，SHA256 `efda6a1df73c5012e83d2df0bfe49181e9db6e0449d7b520394557ddf69f61e9`；Windows为343886字节，SHA256 `4ca914b29ebb9d40f7be511498d743abb172383597984ab134b5c0c97a3e59a3`。ZIP逐条内容比对没有丢失/变更，仅新增 `.signature.p7s`；不是把签名后ZIP摘要误要求为原未签名ZIP摘要。`test-release.ps1 -RequireNotices -RequireSigned` 对官方公开下载包通过，签名类型为Repository、服务索引为api.nuget.org，签名者为NuGet.org Repository by Microsoft。未钉选作者指纹，不能把仓库签名写成Tansr作者签名。
+
+`nuget-public-consumers/manifest.json` 的net48真实CLR4、现代Windows控制台、WPF自包含三类实际消费退出0；均无外置Node，资源清理确认。这里使用从官方CDN取回并验证的包作为独立本地源，不冒称这一脚本直接向NuGet执行Tansr依赖恢复；公开V3可用性另有HTTP200回执。本轮未重复AOT/完整GUI/普通用户验收，引用前述已验本地候选及原独立证据。作者签名证书和指纹授权仍未具备，原NET-06/A24按该剩余条件保留。
+
+所有本轮回执统一位于 `J:/tansr/archive/20260928-NET-06-nuget-publication/`。`approved-release-0.1.0.2.json`记录包源码13bdf29与主线CI源码13db8d5的差量；只有global.json和测试夹具，产品源、锁及包元数据一致。历史失败、预览候选和旧SHA均保留。原工程5/6、剩1、83.3%；原对抗23/24、剩1、95.8%；本轮新增完整关闭0。

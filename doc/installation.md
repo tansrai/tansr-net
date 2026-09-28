@@ -1,6 +1,6 @@
 # 安装、候选消费与发行
 
-本页提供原 NET-05/P16 和 NET-06 的交付入口，不把脚本存在写成验收通过。以[开发记录](development.md)中的候选 SHA、命令退出码及安装物回执为准。当前产品尚无 NuGet 正式发布事实。
+本页提供原 NET-05/P16 和 NET-06 的交付入口，不把脚本存在写成验收通过。以[开发记录](development.md)中的候选 SHA、命令退出码及安装物回执为准。两个产品包已发布至NuGet.org，版本为 `0.1.0.2`；公开包下载、内容和NuGet仓库签名已验证，作者签名仍单独待办。
 
 ## 运行时和资产
 
@@ -117,7 +117,7 @@ if (!stopped.CleanupConfirmed || !stopped.IoSettled)
 
 ## 主线 CI 接线与本地入口
 
-`.github/workflows/ci.yml` 已接线，仅在 `main` 推送或针对 `main` 显式手动触发时运行；不为开发分支或PR运行远端CI。工作流在 `windows-2025` 使用 `global.json` 指定的.NET SDK（当前10.0.301、latestPatch）及Node22.22.1，权限为 `contents: read`，不克隆其它私库、不签名、不发布，也不保存检出凭据。当前仓库尚无remote，因此**已配置不等于真实远端CI已运行或通过**。
+`.github/workflows/ci.yml` 已接线，仅在 `main` 推送或针对 `main` 显式手动触发时运行；不为开发分支或PR运行远端CI。工作流在 `windows-2025` 使用 `global.json` 固定的.NET SDK（当前10.0.301、`rollForward: disable`）及Node22.22.1，权限为 `contents: read`，不克隆其它私库、不签名、不发布，也不保存检出凭据。源码已推送至公开MIT仓库 [tansrai/tansr-net](https://github.com/tansrai/tansr-net)；实际主线CI结果见[运行记录](https://github.com/tansrai/tansr-net/actions)及[开发记录](development.md)。SDK升级时须一起审查SDK隐式工具依赖和锁文件，不能让CI自行滚动补丁版本后跳过锁定恢复。
 
 共享入口要求Windows x64、64位PowerShell7、对应.NET SDK、Node及本地AOT所需C++工具链。输出目录必须是仓库外的新目录。先只列本批计划与缺失范围：
 
@@ -193,7 +193,7 @@ dotnet nuget verify `
 
 记录命令退出码、签名前后包SHA和校验回执；指纹匹配用于绑定批准签名者，不能证明NuGet账号的包所有权或上传授权。NuGet包签名也不等于应用EXE的Authenticode签名。[Microsoft校验文档](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify)
 
-随后对新签名目录运行上述 `test-release.ps1`，使用新包实际SHA并追加 `-RequireNotices -RequireSigned -CertificateFingerprint $certificateSha256`，保存新的回执。当前尚无已确认NuGet发布账号/组织权限，也尚无真实签名或远端主线CI成功回执；新增工作流与脚本只完成发行接线，NET-06/A24仍按实际剩余条件结算。
+随后对新签名目录运行上述 `test-release.ps1`，使用新包实际SHA并追加 `-RequireNotices -RequireSigned -CertificateFingerprint $certificateSha256`，保存新的回执。NuGet发布账号已确认为 `Tansr`，本轮两个包的发布已获授权。批准的作者签名证书仍未提供；NuGet仓库签名与作者签名分别记录，不能相互替代。实际CI及渠道结果见[开发记录](development.md)，NET-06/A24按原剩余条件结算。
 
 ## English
 
@@ -224,11 +224,11 @@ All three examples share `ExampleConnection`. Set `TANSR_LOCAL_SERVE_EXE`, `TANS
 
 For the existing Serve trusted-host entry, set `TANSR_LOCAL_SERVE_HOST_MODULE` to an approved absolute `.cjs` path and `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` to its digest. The original Serve assembles the core and deployment extensions; this requires no external client Node runtime. A verified module is developer-trusted code, not a sandbox for arbitrary JavaScript. The deployment must authenticate the end user independently of the local process Bearer and must not trust client-declared identity or platform. The examples explicitly transmit `TANSR_SERVE_USER_TOKEN` as `x-tansr-demo-user-token`. Direct consumers set `ReadinessHeaders` and the six-argument `CreateClient` overload's `additionalRequestHeaders` separately; readiness credentials are not implicitly copied to clients. SDK2 contract and trusted-scope selection remain explicit, with SDK1 the default.
 
-Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. This candidate has no automatic NuGet publication; missing ownership/signing/CI conditions remain visible.
+Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. Version `0.1.0.2` was published manually to NuGet.org after mainline CI passed. Public downloads, payloads and NuGet repository signatures were verified; approved author signing remains pending.
 
 ### Mainline CI and release inspection
 
-`.github/workflows/ci.yml` is wired for pushes to `main` and manual dispatch on `main` only, with read-only repository permissions. It uses `windows-2025`, the SDK from `global.json` and Node22.22.1. It neither clones other private repositories nor signs/publishes packages. There is currently no repository remote, so this wiring is not evidence of a successful GitHub run.
+`.github/workflows/ci.yml` is wired for pushes to `main` and manual dispatch on `main` only, with read-only repository permissions. It uses `windows-2025`, the exact SDK from `global.json` (currently10.0.301 with `rollForward: disable`) and Node22.22.1. It neither clones other private repositories nor signs/publishes packages. The public MIT source repository is [tansrai/tansr-net](https://github.com/tansrai/tansr-net). Consult the [actual mainline runs](https://github.com/tansrai/tansr-net/actions) and [development record](development.md) for results. SDK upgrades must review implicit tool dependencies and lock files together; a changed runner SDK must not bypass locked restore.
 
 From Windows x64 PowerShell7, with the .NET/Node/C++ AOT toolchains installed, use a new evidence directory outside the checkout:
 
@@ -250,4 +250,4 @@ For signing, use an approved production code-signing certificate with its privat
 
 Verify both signed packages with `dotnet nuget verify --all --certificate-fingerprint <approved-sha256>`, preserve original candidates and record new hashes and exit codes. Certificate and timestamp trust must succeed. A matched signer does not establish NuGet ownership or publication permission; NuGet signatures do not sign application executables. Self-signed test certificates are not production acceptance. See [Microsoft's verify command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify).
 
-Run `test-release.ps1` again against the signed outputs with their new expected hashes and `-RequireNotices -RequireSigned -CertificateFingerprint <approved-sha256>`. This task has no confirmed NuGet account/organization authority, usable signing certificate or successful remote mainline CI receipt. NET-06/A24 remain open until their actual remaining conditions are satisfied or explicitly deferred.
+Run `test-release.ps1` again against the signed outputs with their new expected hashes and `-RequireNotices -RequireSigned -CertificateFingerprint <approved-sha256>`. The authorized NuGet publishing account is `Tansr`. An approved author-signing certificate remains unavailable; NuGet repository signatures do not replace author signatures. See the [development record](development.md) for actual CI and channel evidence. NET-06/A24 remain open against their original remaining conditions.

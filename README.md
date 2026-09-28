@@ -2,7 +2,7 @@
 
 原生 C# 接入 Tansr Serve 的 SDK，供 Windows 桌面应用与 .NET 服务使用。
 
-原生示例功能与本地候选包消费已完成验收，远端主线 CI、签名及正式发行仍待完成，尚未发布到 NuGet.org。两个产品包为 `Tansr.Sdk` 与 `Tansr.Sdk.Windows`；实际来源、验收范围和发行剩余项见开发记录。
+两个产品包已在NuGet.org发布 `0.1.0.2`：[Tansr.Sdk](https://www.nuget.org/packages/Tansr.Sdk/0.1.0.2) 与 [Tansr.Sdk.Windows](https://www.nuget.org/packages/Tansr.Sdk.Windows/0.1.0.2)。发布相关源码已合入main并推送，主线CI通过；公开下载包的内容和NuGet仓库签名已验证。批准的作者签名仍单独待办；具体源码、验收范围和原卡剩余条件见[开发记录](doc/development.md)。
 
 开发方案、六张工程卡和24项验收的事实源位于 `J:/tansr/tansr-cli/doc/report/NETSDK-*2026-09-26.md`。本仓实施与验证记录见 [开发记录](doc/development.md)。Serve 新协议独立由 Serve 会话维护，不能将候选协议当成生产能力。
 
@@ -80,7 +80,7 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 
 `RecoveryCliRoot` 单独指定包含已锁定 ACK 恢复 receiver 的源码目录；新 Node 互通检查其 schema 和实现指纹，不借此放宽原 `CliRoot` 的 SDK2 合同锁。直接运行测试时也须显式设置 `TANSR_TEST_RECOVERY_CLI_ROOT`；缺少此环境的跳过不能算作跨实现恢复通过。Windows 正确性门不接受依赖缺失造成的跳过；同机 Electron 时序性能测试单独准备并记录，尚未运行时不能关闭对应性能验收。
 
-本地候选包的消费范围包括 net48 CLR4 WinForms、现代控制台、WPF self-contained 和核心 Native AOT；消费进程不依赖 PATH 中的 Node。安装／升级／回滚／卸载、普通用户权限及文件／密钥隔离各有独立验收，普通用户环境为现有 Windows 主机的新用户配置。每个候选的源码、包指纹、实际结果及剩余条件统一见[开发记录](doc/development.md)，不将旧候选的结果冒充新包实证；正式 NuGet 发布尚未完成。
+本地候选包的消费范围包括 net48 CLR4 WinForms、现代控制台、WPF self-contained 和核心 Native AOT；消费进程不依赖 PATH 中的 Node。安装／升级／回滚／卸载、普通用户权限及文件／密钥隔离各有独立验收，普通用户环境为现有 Windows 主机的新用户配置。每个候选的源码、包指纹、实际结果及剩余条件统一见[开发记录](doc/development.md)，不将旧候选的结果冒充新包实证；NuGet已发布版本为 `0.1.0.2`。
 
 ## English
 
@@ -90,6 +90,6 @@ The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `Wind
 
 Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 
-This is an unpublished development candidate. Native example behavior and local package consumption have been verified; remote mainline CI, signing and formal publication remain pending. It uses the existing REST/SSE and SDK2 contracts. Terminal streaming, memory management and dynamic control previews follow the agreed Serve schemas and fixtures. See the development record for the exact capability mapping, source identities, commands, evidence and remaining release conditions.
+Version `0.1.0.2` is available on NuGet.org as [Tansr.Sdk](https://www.nuget.org/packages/Tansr.Sdk/0.1.0.2) and [Tansr.Sdk.Windows](https://www.nuget.org/packages/Tansr.Sdk.Windows/0.1.0.2). Mainline CI passed; downloaded package contents and NuGet repository signatures were verified. Approved author signing remains separate and pending. The SDK uses the existing REST/SSE and SDK2 contracts. Terminal streaming, memory management and dynamic control previews follow the agreed Serve schemas and fixtures. See the development record for the exact capability mapping, source identities, commands, evidence and remaining release conditions.
 
-Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). Local package gates cover .NET Framework WinForms, a modern console, self-contained WPF and core Native AOT without Node on the consumer process PATH. Installation, upgrade, rollback, uninstall and standard-user file/key isolation have separate evidence. The standard-user environment is a fresh profile on the existing Windows host. Consult the [development record](doc/development.md) for each candidate's exact source, package hashes, results and remaining gates; an earlier package's result does not certify a later package. Formal NuGet publication is still pending.
+Start with the [English quickstart](doc/quickstart.en.md) and the [installation and distribution guide](doc/installation.md#english). Local package gates cover .NET Framework WinForms, a modern console, self-contained WPF and core Native AOT without Node on the consumer process PATH. Installation, upgrade, rollback, uninstall and standard-user file/key isolation have separate evidence. The standard-user environment is a fresh profile on the existing Windows host. Consult the [development record](doc/development.md) for each candidate's exact source, package hashes, results and remaining gates; an earlier package's result does not certify a later package. Pin the published NuGet version to `0.1.0.2`.
