@@ -5,6 +5,12 @@ The protocol schema and compatibility source snapshots originate from the Tansr
 TypeScript repositories. Their exact revisions and SHA256 hashes are recorded in
 contract/manifest.json and doc/compatibility/public-api-map.json.
 
+Tansr licenses the Tansr-owned reference snapshots distributed in this repository
+under this repository's MIT LICENSE, including Cache/Contract/cache-client.ts,
+cache-control-json.ts, cache-wire.ts and internal-cache-wire.ts. This grant covers
+these distributed copies; it does not change the licenses of other files in the
+upstream repositories or of third-party dependencies.
+
 Runtime dependencies retain their own licenses:
 System.Text.Json, Microsoft.Data.Sqlite, Microsoft.Bcl.Cryptography,
 System.Security.Cryptography.ProtectedData: Microsoft / .NET Foundation, MIT.

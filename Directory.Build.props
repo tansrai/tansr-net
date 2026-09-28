@@ -11,6 +11,8 @@
     <Copyright>Copyright (c) 2026 Tansr</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://www.tansr.com/</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/tansrai/tansr-net</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
     <DebugType>portable</DebugType>
     <AnalysisLevel>latest</AnalysisLevel>
   </PropertyGroup>
