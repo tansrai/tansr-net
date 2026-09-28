@@ -1,6 +1,6 @@
 # 安装、候选消费与发行
 
-本页提供原 NET-05/P16 和 NET-06 的交付入口，不把脚本存在写成验收通过。以[开发记录](development.md)中的候选 SHA、命令退出码及安装物回执为准。两个产品包已发布至NuGet.org，版本为 `0.1.0.2`；公开包下载、内容和NuGet仓库签名已验证，作者签名仍单独待办。
+本页提供原 NET-05/P16 和 NET-06 的交付入口，不把脚本存在写成验收通过。以[开发记录](development.md)中的候选 SHA、命令退出码及安装物回执为准。两个产品包已发布至NuGet.org，版本为 `0.1.0.2`；公开包下载、内容和NuGet仓库签名已验证，原NET-06/A24已关闭。额外作者签名属于可选增强，不是本版未完成条件。
 
 ## 运行时和资产
 
@@ -161,9 +161,9 @@ if (!stopped.CleanupConfirmed || !stopped.IoSettled)
 
 本地 pack、消费、合并、推送、主线 CI、代码签名、NuGet 包签名和上传是独立事实。没有仓库 remote、渠道所有权或签名材料时登记待办，不擅自创建仓库或上传包。源码完整验收后按项目纪律收编主线，再核对远端主线 CI。当前两个包不可因本地成功自动宣称已上架。
 
-### 本机证书签名与校验
+### 可选：本机作者证书签名与校验
 
-签名只使用发行负责人批准、已安装在本机 `CurrentUser/My` 且带可用私钥的正式代码签名证书，以及批准的时间戳服务。本轮该存储中尚无有效可用签名证书；以下是待满足前置后的操作入口，尚无真实签名通过事实。不导出或远端托管私钥，不把密码放入命令，不用自签证书代替正式发行。
+以下是以后选择增加作者签名时的操作入口，不是当前NuGet发行的缺失条件。作者签名只使用发行负责人批准、已安装在本机 `CurrentUser/My` 且带可用私钥的正式代码签名证书，以及批准的时间戳服务。本轮该存储中尚无有效可用签名证书，未执行作者签名；已发布包的仓库签名核验见开发记录。不导出或远端托管私钥，不把密码放入命令，不用自签证书代替正式发行。
 
 使用仓库要求的 .NET 10 SDK。`$certificateSha256` 是证书内容的64位十六进制SHA256指纹，不是Windows常见的SHA1 `Thumbprint`；.NET 10的签名命令要求SHA-2指纹。[Microsoft签名文档](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-sign)
 
@@ -193,7 +193,7 @@ dotnet nuget verify `
 
 记录命令退出码、签名前后包SHA和校验回执；指纹匹配用于绑定批准签名者，不能证明NuGet账号的包所有权或上传授权。NuGet包签名也不等于应用EXE的Authenticode签名。[Microsoft校验文档](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify)
 
-随后对新签名目录运行上述 `test-release.ps1`，使用新包实际SHA并追加 `-RequireNotices -RequireSigned -CertificateFingerprint $certificateSha256`，保存新的回执。NuGet发布账号已确认为 `Tansr`，本轮两个包的发布已获授权。批准的作者签名证书仍未提供；NuGet仓库签名与作者签名分别记录，不能相互替代。实际CI及渠道结果见[开发记录](development.md)，NET-06/A24按原剩余条件结算。
+如以后启用额外作者签名，对新签名目录运行上述 `test-release.ps1`，使用新包实际SHA并追加 `-RequireNotices -RequireSigned -CertificateFingerprint $certificateSha256`，保存新的回执。NuGet发布账号已确认为 `Tansr`，两个包已正式发布。当前公开包通过 `-RequireNotices -RequireSigned`，签名类型为NuGet仓库签名，不称为作者签名。原卡要求签名、发布和安装事实对应，未要求额外作者证书；NET-06/A24已按原条件关闭，实际CI、渠道证据及判定更正见[开发记录](development.md)。
 
 ## English
 
@@ -224,7 +224,7 @@ All three examples share `ExampleConnection`. Set `TANSR_LOCAL_SERVE_EXE`, `TANS
 
 For the existing Serve trusted-host entry, set `TANSR_LOCAL_SERVE_HOST_MODULE` to an approved absolute `.cjs` path and `TANSR_LOCAL_SERVE_HOST_MODULE_SHA256` to its digest. The original Serve assembles the core and deployment extensions; this requires no external client Node runtime. A verified module is developer-trusted code, not a sandbox for arbitrary JavaScript. The deployment must authenticate the end user independently of the local process Bearer and must not trust client-declared identity or platform. The examples explicitly transmit `TANSR_SERVE_USER_TOKEN` as `x-tansr-demo-user-token`. Direct consumers set `ReadinessHeaders` and the six-argument `CreateClient` overload's `additionalRequestHeaders` separately; readiness credentials are not implicitly copied to clients. SDK2 contract and trusted-scope selection remain explicit, with SDK1 the default.
 
-Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. Version `0.1.0.2` was published manually to NuGet.org after mainline CI passed. Public downloads, payloads and NuGet repository signatures were verified; approved author signing remains pending.
+Package creation, installation tests, mainline integration, CI, signing and publication are separate facts. Version `0.1.0.2` was published manually to NuGet.org after mainline CI passed. Public downloads, payloads and NuGet repository signatures were verified. NET-06/A24 are complete; additional author signing is optional, not an unmet requirement of this release.
 
 ### Mainline CI and release inspection
 
@@ -246,8 +246,8 @@ For read-only release inspection, use `scripts/test-release.ps1 -CorePackage <co
 
 Unsigned packages may be recorded successfully only when the real verifier reports the sole unsigned diagnostic `NU3004`; the manifest then says `readiness=unsigned`, `signaturesVerified=false`. Invalid signatures, other verification failures, timeouts or changed bytes fail. `RequireSigned` rejects unsigned inputs. `CertificateFingerprint` pins an approved SHA256 signer on both packages and also rejects unsigned inputs; without it `signerPinned=false`. `releaseReady` and `published` remain false in every mode: successful local inspection is not release completion or NuGet account authorization.
 
-For signing, use an approved production code-signing certificate with its private key already available in the local `CurrentUser/My` store. The commands above use .NET 10, a SHA256 certificate fingerprint, an approved RFC3161 service and a new output directory; never substitute the usual SHA1 Windows Thumbprint. Do not pass passwords in commands or export private keys for this workflow. This host currently has no suitable certificate, so signing remains unexecuted. See [Microsoft's sign command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-sign).
+For optional future author signing, use an approved production code-signing certificate with its private key already available in the local `CurrentUser/My` store. The commands above use .NET 10, a SHA256 certificate fingerprint, an approved RFC3161 service and a new output directory; never substitute the usual SHA1 Windows Thumbprint. Do not pass passwords in commands or export private keys for this workflow. This host currently has no suitable certificate, so author signing has not been performed; the published packages already have verified NuGet repository signatures. See [Microsoft's sign command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-sign).
 
 Verify both signed packages with `dotnet nuget verify --all --certificate-fingerprint <approved-sha256>`, preserve original candidates and record new hashes and exit codes. Certificate and timestamp trust must succeed. A matched signer does not establish NuGet ownership or publication permission; NuGet signatures do not sign application executables. Self-signed test certificates are not production acceptance. See [Microsoft's verify command](https://learn.microsoft.com/en-us/dotnet/core/tools/dotnet-nuget-verify).
 
-Run `test-release.ps1` again against the signed outputs with their new expected hashes and `-RequireNotices -RequireSigned -CertificateFingerprint <approved-sha256>`. The authorized NuGet publishing account is `Tansr`. An approved author-signing certificate remains unavailable; NuGet repository signatures do not replace author signatures. See the [development record](development.md) for actual CI and channel evidence. NET-06/A24 remain open against their original remaining conditions.
+If additional author signing is adopted later, run `test-release.ps1` against those signed outputs with their new expected hashes and `-RequireNotices -RequireSigned -CertificateFingerprint <approved-sha256>`. The authorized NuGet publishing account is `Tansr`. The published packages passed `-RequireNotices -RequireSigned` with NuGet repository signatures, not author signatures. The original requirements call for verified signing, publication and installation facts, without mandating an additional author certificate. NET-06/A24 are complete. See the [development record](development.md) for actual CI, channel evidence and the corrected assessment.
