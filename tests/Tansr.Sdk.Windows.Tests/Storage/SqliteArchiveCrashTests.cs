@@ -24,7 +24,10 @@ public sealed class SqliteArchiveCrashTests
             var connection = (SqliteConnection)typeof(SqliteArchiveStore).GetField("_connection", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(store)!;
             void Block()
             {
-                File.WriteAllText(Path.Combine(childDirectory, "writer-ready"), Environment.GetEnvironmentVariable(PhaseVariable));
+                string ready = Path.Combine(childDirectory, "writer-ready");
+                File.WriteAllText(ready + ".tmp", Environment.GetEnvironmentVariable(PhaseVariable));
+                // Publish only after closing the writer so the parent never observes a partial marker.
+                File.Move(ready + ".tmp", ready);
                 // 独立后备期限；即使父验收异常退出，也不能遗留永久持锁的子进程。
                 Thread.Sleep(TimeSpan.FromSeconds(70));
                 throw new TimeoutException("Controlled writer was not killed within its fixture deadline.");
