@@ -1,6 +1,6 @@
 # C# 快速接入
 
-本仓仍是未上架的开发候选。示例版本 `0.1.0-preview.1` 表示候选版本，不代表 NuGet.org 已存在对应包。正式进度见[开发记录](development.md)；包签名、渠道所有权与上传单独结算。
+本仓仍是未上架的开发候选。本次发行版本为 `0.1.0.2`；上架前请使用已核验的本地包。正式进度见[开发记录](development.md)；包签名、渠道所有权与上传单独结算。
 
 ## 选择与安装
 
@@ -9,7 +9,7 @@
 将本次批准的两个 `.nupkg` 放在本地候选目录，用独立 `NuGet.Config` 将 `Tansr.*` 映射到该目录，其余依赖映射到 NuGet.org。完整可复制的生成方式见 `scripts/test-packages.ps1`；不要将旧同版本预览包缓存当成本批产物。
 
 ```powershell
-dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.1.0-preview.1
+dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.1.0.2
 dotnet restore YourApp.csproj --configfile NuGet.Config --packages .packages
 ```
 

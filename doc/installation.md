@@ -41,10 +41,10 @@
 ./scripts/build-package-examples.ps1 `
   -PackageDirectory J:/tansr/archive/NET-release/packages `
   -OutputDirectory J:/tansr/archive/NET-release/package-examples `
-  -Version 0.1.0-preview.1
+  -Version 0.1.0.2
 ```
 
-`PackageDirectory`、`OutputDirectory` 为必填参数；`Version` 可省略，当前默认 `0.1.0-preview.1`，必须与两包的实际版本一致。脚本复制原 `ConsoleAssistant`、`WpfAssistant`、`WinFormsAssistant` 和 `Shared`，保留原始快照；只在消费副本中将 `ProjectReference` 换成精确版本的 `PackageReference`，并移除 WinForms 的源码 targets 导入，改由包内 `buildTransitive/net48` 目标接管。业务代码、原框架及程序集引用不变，不构建 SDK 源工程，也不改原示例或仓库锁文件。
+`PackageDirectory`、`OutputDirectory` 为必填参数；`Version` 可省略，当前默认 `0.1.0.2`，必须与两包的实际版本一致。脚本复制原 `ConsoleAssistant`、`WpfAssistant`、`WinFormsAssistant` 和 `Shared`，保留原始快照；只在消费副本中将 `ProjectReference` 换成精确版本的 `PackageReference`，并移除 WinForms 的源码 targets 导入，改由包内 `buildTransitive/net48` 目标接管。业务代码、原框架及程序集引用不变，不构建 SDK 源工程，也不改原示例或仓库锁文件。
 
 两个包按 SHA256 复制到私有 `candidate-feed`；独立 NuGet 源映射和缓存防止命中其它同版本预览包。恢复后核对实际包字节、保存依赖锁，并确认构建期间锁及源码副本未变。输出 `executables/ConsoleAssistant`（.NET 10 Windows framework-dependent）、`executables/WpfAssistant`（win-x64 self-contained）、`executables/WinFormsAssistant`（net48 x64）。`manifest.json` 记录原文件／副本映射、源码与包摘要、命令、依赖锁和全部产物。
 
@@ -146,9 +146,9 @@ if (!stopped.CleanupConfirmed || !stopped.IoSettled)
 
 ```powershell
 ./scripts/test-release.ps1 `
-  -CorePackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.0.1.0-preview.1.nupkg `
-  -WindowsPackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg `
-  -Version 0.1.0-preview.1 `
+  -CorePackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.0.1.0.2.nupkg `
+  -WindowsPackage J:/tansr/archive/NET-release/packages/Tansr.Sdk.Windows.0.1.0.2.nupkg `
+  -Version 0.1.0.2 `
   -OutputDirectory J:/tansr/archive/NET-release/release-check `
   -RequireNotices
 ```
@@ -174,8 +174,8 @@ $signed = 'J:/tansr/archive/NET-release/signed'
 $certificateSha256 = '<approved-certificate-sha256>'
 $timestampUrl = '<approved-rfc3161-timestamp-url>'
 dotnet nuget sign `
-  "$candidate/Tansr.Sdk.0.1.0-preview.1.nupkg" `
-  "$candidate/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg" `
+  "$candidate/Tansr.Sdk.0.1.0.2.nupkg" `
+  "$candidate/Tansr.Sdk.Windows.0.1.0.2.nupkg" `
   --certificate-store-location CurrentUser --certificate-store-name My `
   --certificate-fingerprint $certificateSha256 `
   --hash-algorithm SHA256 --timestamp-hash-algorithm SHA256 `
@@ -186,8 +186,8 @@ dotnet nuget sign `
 
 ```powershell
 dotnet nuget verify `
-  "$signed/Tansr.Sdk.0.1.0-preview.1.nupkg" `
-  "$signed/Tansr.Sdk.Windows.0.1.0-preview.1.nupkg" `
+  "$signed/Tansr.Sdk.0.1.0.2.nupkg" `
+  "$signed/Tansr.Sdk.Windows.0.1.0.2.nupkg" `
   --all --certificate-fingerprint $certificateSha256
 ```
 
@@ -207,10 +207,10 @@ To build the three original examples from the approved packages, run this from t
 ./scripts/build-package-examples.ps1 `
   -PackageDirectory J:/tansr/archive/NET-release/packages `
   -OutputDirectory J:/tansr/archive/NET-release/package-examples `
-  -Version 0.1.0-preview.1
+  -Version 0.1.0.2
 ```
 
-Use actual candidate paths and a new output directory. Both directory parameters are required; `Version` defaults to `0.1.0-preview.1` and must match both packages. The script snapshots the original Console, WPF, WinForms and Shared sources. In separate consumer copies, it replaces source project references with exact package references and lets the packaged `buildTransitive/net48` target replace the WinForms source import. It preserves application code, framework declarations and assembly references; original examples, SDK projects and repository lock files are untouched.
+Use actual candidate paths and a new output directory. Both directory parameters are required; `Version` defaults to `0.1.0.2` and must match both packages. The script snapshots the original Console, WPF, WinForms and Shared sources. In separate consumer copies, it replaces source project references with exact package references and lets the packaged `buildTransitive/net48` target replace the WinForms source import. It preserves application code, framework declarations and assembly references; original examples, SDK projects and repository lock files are untouched.
 
 An isolated candidate feed, source mapping and caches pin both packages by SHA256. Restored package bytes are verified, dependency locks are saved and checked for changes during the build. The `executables` directory contains framework-dependent Windows Console, win-x64 self-contained WPF and net48 x64 WinForms outputs. `manifest.json` records source/copy mappings, package hashes, commands, locks and output hashes. `example-paths.json` supplies `TANSR_NATIVE_CONSUMER_EXAMPLE` for the existing `scripts/native-serve-consumer.mjs`, and `TANSR_NATIVE_UI_WPF` / `TANSR_NATIVE_UI_WINFORMS` for `scripts/native-ui-integration.mjs`. Those runners still require their original approved Serve candidate, source snapshot and configuration. The build's `built-not-executed` result does not run an example or model and does not replace actual Console/UI and cleanup evidence.
 

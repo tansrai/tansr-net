@@ -24,8 +24,11 @@ jobs:
     env:
       DOTNET_CLI_TELEMETRY_OPTOUT: '1'
       DOTNET_NOLOGO: '1'
-      CI_OUTPUT: ${{ runner.temp }}/tansr-net-ci/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Select isolated evidence directory
+        run: |
+          $output = Join-Path $env:RUNNER_TEMP "tansr-net-ci/$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          "CI_OUTPUT=$output" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Checkout this main commit only
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0; official immutable commit
         with:

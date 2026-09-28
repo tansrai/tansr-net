@@ -146,8 +146,8 @@
       "consoleassistant": {
         "type": "Project",
         "dependencies": {
-          "Tansr.Sdk": "[0.1.0-preview.1, )",
-          "Tansr.Sdk.Windows": "[0.1.0-preview.1, )"
+          "Tansr.Sdk": "[0.1.0.2, )",
+          "Tansr.Sdk.Windows": "[0.1.0.2, )"
         }
       },
       "tansr.sdk": {
@@ -159,7 +159,7 @@
           "Microsoft.Data.Sqlite": "[10.0.12, )",
           "SQLitePCLRaw.bundle_e_sqlite3": "[2.1.13, )",
           "System.Security.Cryptography.ProtectedData": "[10.0.12, )",
-          "Tansr.Sdk": "[0.1.0-preview.1, )"
+          "Tansr.Sdk": "[0.1.0.2, )"
         }
       }
     }

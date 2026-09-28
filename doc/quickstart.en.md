@@ -1,6 +1,6 @@
 # C# quickstart
 
-This repository contains an unpublished development candidate. `0.1.0-preview.1` is a candidate version, not evidence that the packages are available on NuGet.org. The [development record](development.md) separates implementation, validation, mainline integration, signing and publication.
+This repository contains an unpublished development candidate. The release version is `0.1.0.2`; use the verified local packages until channel publication is confirmed. The [development record](development.md) separates implementation, validation, mainline integration, signing and publication.
 
 ## Install the appropriate package
 
@@ -9,7 +9,7 @@ Use `Tansr.Sdk` for a service that only connects to remote Serve. Use `Tansr.Sdk
 Put both approved `.nupkg` files in a candidate directory. Configure a private `NuGet.Config` that maps `Tansr.*` to that directory and other dependencies to NuGet.org. `scripts/test-packages.ps1` provides the complete reproducible configuration. Use a separate package cache for candidates that share a preview version but have different bytes.
 
 ```powershell
-dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.1.0-preview.1
+dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.1.0.2
 dotnet restore YourApp.csproj --configfile NuGet.Config --packages .packages
 ```
 
