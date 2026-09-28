@@ -9,7 +9,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="Tansr.Sdk.Windows" />
     <PackageReference Include="System.Text.Json" Version="10.0.12" />
-    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../doc/nuget-readme.md" Pack="true" PackagePath="/README.md" />
     <None Include="../../LICENSE" Pack="true" PackagePath="/" />
     <None Include="../../NOTICE" Pack="true" PackagePath="/" />
     <EmbeddedResource Include="../../contract/sdk2-ext-v1.schema.json" LogicalName="Tansr.Sdk.Protocol.sdk2-ext-v1.schema.json" />
