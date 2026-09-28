@@ -4,6 +4,7 @@ param(
     [string]$CliRoot,
     [string]$RecoveryCliRoot,
     [string]$PreviousPackageDirectory,
+    [ValidatePattern('^[0-9A-Za-z.+-]+$')][string]$PreviousVersion,
     [switch]$PlanOnly
 )
 $ErrorActionPreference = 'Stop'
@@ -21,8 +22,10 @@ $globalJson = Get-Content -LiteralPath (Join-Path $repository 'global.json') -Ra
 [xml]$properties = Get-Content -LiteralPath (Join-Path $repository 'Directory.Build.props') -Raw
 $version = [string]$properties.Project.PropertyGroup.Version
 if ($version -notmatch '^[0-9A-Za-z.+-]+$') { throw 'Missing explicit package version.' }
+if ($PreviousVersion -and -not $PreviousPackageDirectory) { throw 'PreviousVersion requires PreviousPackageDirectory.' }
 $scope = [ordered]@{
     cliRoot = $CliRoot; recoveryCliRoot = $RecoveryCliRoot; previousPackageDirectory = $PreviousPackageDirectory
+    previousVersion = if ($PreviousVersion) { $PreviousVersion } elseif ($PreviousPackageDirectory) { $version } else { $null }
     excludedWindowsMethods = @(); notRun = @(
         @{ name = 'ServeSourceIntegration / five clients / real UI / Electron performance'; reason = 'Run their existing explicit source, runtime and device entry points separately. This script does not provision those environments.' }
         @{ name = 'Standard-user OS, signing and NuGet publication'; reason = 'This script records its actual runner identity and neither creates users nor signs or publishes.' }
@@ -212,6 +215,7 @@ try {
         Invoke-CiStep 'package-notices' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'audit-packages.ps1'), '-PackageDirectory', $packages, '-OutputFile', (Join-Path $target 'package-notices.json'), '-Version', $version, '-RequireNotices')
         $arguments = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-packages.ps1'), '-PackageDirectory', $packages, '-OutputDirectory', (Join-Path $target 'consumers'), '-Version', $version, '-Aot')
         if ($PreviousPackageDirectory) { $arguments += @('-PreviousPackageDirectory', $PreviousPackageDirectory) }
+        if ($PreviousVersion) { $arguments += @('-PreviousVersion', $PreviousVersion) }
         Invoke-CiStep 'package-consumers' $pwsh $arguments
         Invoke-CiStep 'package-examples' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'build-package-examples.ps1'), '-PackageDirectory', $packages, '-OutputDirectory', (Join-Path $target 'examples'), '-Version', $version)
         if ($PreviousPackageDirectory) { Invoke-CiStep 'public-api' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-public-api.ps1'), '-BaselinePackageDirectory', $PreviousPackageDirectory, '-OutputDirectory', (Join-Path $target 'api')) }
