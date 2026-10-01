@@ -42,11 +42,30 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
 
 internal static class FrameworkSessionProbe
 {
+    // UAPI-01: the SDK now calls the unified /api surface and refuses responses without the tansr-* contract headers
+    // (ContractUnavailableException, no legacy fallback). Both owned fake servers stamp the four headers from the
+    // generated ApiRoutes constants so a manifest revision bump does not break this probe.
+    private static readonly string MetadataPath = ApiRoutes.SessionGet.Path("s");
+    private static readonly string EventsPath = ApiRoutes.SessionEventsObserve.Path("s");
+    private static readonly string UnifiedStamp =
+        UnifiedHeaders.Contract + ": " + ApiRoutes.Contract + "\r\n" +
+        UnifiedHeaders.ManifestRevision + ": " + ApiRoutes.ManifestRevision.ToString() + "\r\n" +
+        UnifiedHeaders.Domain + ": " + ApiRoutes.SessionGet.Domain + "\r\n" +
+        UnifiedHeaders.SchemaHash + ": " + ApiRoutes.DomainSchemaHash(ApiRoutes.SessionGet.Domain) + "\r\n";
+    private static HttpResponseMessage Stamped(HttpResponseMessage response)
+    {
+        response.Headers.TryAddWithoutValidation(UnifiedHeaders.Contract, ApiRoutes.Contract);
+        response.Headers.TryAddWithoutValidation(UnifiedHeaders.ManifestRevision, ApiRoutes.ManifestRevision.ToString());
+        response.Headers.TryAddWithoutValidation(UnifiedHeaders.Domain, ApiRoutes.SessionGet.Domain);
+        response.Headers.TryAddWithoutValidation(UnifiedHeaders.SchemaHash, ApiRoutes.DomainSchemaHash(ApiRoutes.SessionGet.Domain));
+        return response;
+    }
     private static async Task Within(Task task, int milliseconds, string name)
     { if (await Task.WhenAny(task, Task.Delay(milliseconds)) != task) throw new TimeoutException(name); await task; }
     private static void Require(bool condition, string message) { if (!condition) throw new Exception(message); }
@@ -156,17 +175,17 @@ internal static class FrameworkSessionProbe
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken token)
         {
             Require(request.Method == HttpMethod.Get, "Unexpected injected request method.");
-            if (request.RequestUri.AbsolutePath == "/v2/sessions/s/events")
+            if (request.RequestUri.AbsolutePath == EventsPath)
             {
                 Interlocked.Increment(ref Events);
                 var content = new StreamContent(Stream);
                 content.Headers.ContentType = new MediaTypeHeaderValue("text/event-stream");
-                return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = content });
+                return Task.FromResult(Stamped(new HttpResponseMessage(HttpStatusCode.OK) { Content = content }));
             }
-            Require(request.RequestUri.AbsolutePath == "/v2/sessions/s", "Unexpected injected request route.");
+            Require(request.RequestUri.AbsolutePath == MetadataPath, "Unexpected injected request route: " + request.RequestUri.AbsolutePath);
             Interlocked.Increment(ref Metadata);
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) {
-                Content = new StringContent("{\"sessionId\":\"s\",\"lastSeq\":-1}", Encoding.UTF8, "application/json") });
+            return Task.FromResult(Stamped(new HttpResponseMessage(HttpStatusCode.OK) {
+                Content = new StringContent("{\"sessionId\":\"s\",\"lastSeq\":-1}", Encoding.UTF8, "application/json") }));
         }
         protected override void Dispose(bool disposing) { Disposed = true; base.Dispose(disposing); }
     }
@@ -231,17 +250,17 @@ internal static class FrameworkSessionProbe
                 { if (await stream.ReadAsync(one, 0, 1, stop.Token) == 0) return; bytes.Add(one[0]); int n = bytes.Count; if (n >= 4 && bytes[n-4] == 13 && bytes[n-3] == 10 && bytes[n-2] == 13 && bytes[n-1] == 10) break; }
                 string first = Encoding.ASCII.GetString(bytes.ToArray()).Split(new[] { "\r\n" }, StringSplitOptions.None)[0];
                 Console.WriteLine("SERVER " + first);
-                if (first == "GET /v2/sessions/s/events HTTP/1.1")
+                if (first == "GET " + EventsPath + " HTTP/1.1")
                 {
-                    await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n: connected\n\n");
+                    await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" + UnifiedStamp + "Connection: close\r\n\r\n: connected\n\n");
                     if (Interlocked.Increment(ref Events) == 3) AllEvents.TrySetResult(true);
                     await release.Task;
                     return;
                 }
-                Require(first == "GET /v2/sessions/s HTTP/1.1", "Unexpected route.");
+                Require(first == "GET " + MetadataPath + " HTTP/1.1", "Unexpected route: " + first);
                 Interlocked.Increment(ref Metadata);
                 const string json = "{\"sessionId\":\"s\",\"lastSeq\":-1}";
-                await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + Encoding.UTF8.GetByteCount(json) + "\r\nConnection: close\r\n\r\n" + json);
+                await Write(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" + UnifiedStamp + "Content-Length: " + Encoding.UTF8.GetByteCount(json) + "\r\nConnection: close\r\n\r\n" + json);
             }
             catch { if (!stop.IsCancellationRequested) throw; }
             finally { Interlocked.Decrement(ref Active); }
