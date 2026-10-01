@@ -535,3 +535,13 @@ A24已有2958双包四类消费、旧API兼容、三NuGet示例和原Console/两
 ### 待主线处理
 
 偏离钉定 HEAD 到 r6 的认可；tansr-cli `families[unified-v1].clients[csharp].lock` 改为族 SHA；r4 时期 Serve 曾发 6 键事件包络（无 `eventId`），须在 r6 Serve 上复验 `NegotiateEventEnvelope`；archive-sync 族错误体仍走原解码器；tansr-cli main 收编到 revision ≥ 6 后再核一次 `check-contract.ps1 -SourceRoot`。
+
+### 2026-10-01 复验修正（V-NET）
+
+对上述四个提交逐文件复验后落三处修正，详见 `doc/report/UAPI-01-统一API接入复验-2026-10-01.md`：
+
+- `ApiRoutes.DomainSchemaHash("discovery")` 原为 `unified-v1` 族文件 SHA，与门面 `schemaHashOf`、手册 §16.4 不符——discovery 域响应头携带 manifest 聚合 `schemaHash`（r6 = `19cafed0…`），其余域为主族源 SHA。生成器与 `UnifiedGoldenTests` 一并修正。
+- `examples/Shared/ExampleSessionControls.IsDefiniteRejection` 的 configuration 分支仍对照外层 `Code/StatusCode/RetryAction` 匹配原族码，在统一信封下永不命中；改为 `DomainCode/DomainStatus/DomainRetryAction`。
+- `NativeMcpBridgeTests` 假 Serve 迁到 `/api` 后未加盖四个必带响应头，SDK 按 D10 抛 `contract_unavailable`。上文"5 例因缺 `TANSR_TEST_MCP_EXE` 失败"的归因不成立：按 CI 方式发布 ConsoleAssistant 后，3 例失败原因是缺头；补 `UnifiedStamp` 后 Windows 测试（`test-ci.ps1` 同款排除过滤）451/451。
+
+复验门禁：`dotnet build` Release 0 警告 0 错误；核心测试 1330/1330；Windows 451/451；`IntegrationTests` 仅 `sandbox-golden` 1/1（其余须真实 UAPI-01 Serve）；`dotnet format --verify-no-changes` 通过；生成器 `--check`、`check-contract.ps1` 通过。
