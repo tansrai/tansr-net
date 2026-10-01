@@ -313,7 +313,8 @@ public static partial class ApiRoutes
         _ => null,
     };
 
-    /// <summary>Expected <c>tansr-schema-hash</c> value for a domain, or null when the domain is unknown.</summary>
+    /// <summary>Expected <c>tansr-schema-hash</c> value for a domain, or null when the domain is unknown. <c>discovery</c> is the
+    /// manifest aggregate <see cref="ManifestSchemaHash"/>; other domains carry their primary family source SHA (手册 §16.4).</summary>
     public static string? DomainSchemaHash(string domain) => domain switch
     {
         "session" => "sha256:6e1876edc476322e2fc3613958f5b44700bb80ea23550fa794f5729220674f3e",
@@ -324,7 +325,7 @@ public static partial class ApiRoutes
         "terminal" => "sha256:8cd8c7c55a84c5700373aed75d5653a0737d718bfe0546641be367bda1a11896",
         "terminal-observation" => "sha256:b6668463458e78b2cfe23baa72d9d9ac6263a248467dd8aeb60387fc2f67c28a",
         "terminal-profile" => "sha256:560ad136f0619a2a0592151d56e10871c3799ca438163c4e2872381bf5f5159a",
-        "discovery" => "sha256:a2449bc121b5183e50b0c2432d29042446659ec8b32b355af7f204c6cb684a8e",
+        "discovery" => "sha256:" + ManifestSchemaHash,
         _ => null,
     };
 }

@@ -224,7 +224,22 @@ public sealed class UnifiedGoldenTests
     {
         var schema = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json"));
         Assert.Equal(Golden.RootElement.GetProperty("schemaSha256").GetString(), Tansr.Sdk.Protocol.WireJson.Sha256(schema));
-        Assert.Equal("sha256:" + Tansr.Sdk.Protocol.WireJson.Sha256(schema), ApiRoutes.DomainSchemaHash("discovery"));
         Assert.Equal(ApiRoutes.Families.UnifiedV1, Tansr.Sdk.Protocol.WireJson.Sha256(schema));
+    }
+
+    [Fact]
+    public void SchemaHashIsComparedPerDomainWithDiscoveryCarryingTheManifestAggregate()
+    {
+        // 手册 §16.4 / facade.ts schemaHashOf: discovery = manifest aggregate schemaHash (golden response-headers-discovery
+        // carries the revision-4 aggregate d97e35a9…), every other domain = its primary family source SHA.
+        Assert.Equal("sha256:" + ApiRoutes.ManifestSchemaHash, ApiRoutes.DomainSchemaHash("discovery"));
+        Assert.NotEqual("sha256:" + ApiRoutes.Families.UnifiedV1, ApiRoutes.DomainSchemaHash("discovery"));
+        Assert.Equal("sha256:" + ApiRoutes.Families.AgentSessionV1, ApiRoutes.DomainSchemaHash("session"));
+        Assert.Equal("sha256:" + ApiRoutes.Families.Sdk2ExtV1, ApiRoutes.DomainSchemaHash("archive"));
+        Assert.Equal("sha256:" + ApiRoutes.Families.Sdk2CacheV1, ApiRoutes.DomainSchemaHash("cache"));
+        var discovery = Value(Vector("response-headers-discovery"))!.AsObject();
+        Assert.Equal("discovery", discovery["tansr-domain"]!.GetValue<string>());
+        Assert.NotEqual("sha256:" + Golden.RootElement.GetProperty("schemaSha256").GetString(), discovery["tansr-schema-hash"]!.GetValue<string>());
+        foreach (var domain in ApiRoutes.Domains) Assert.Matches(UnifiedHeaders.SchemaHashValue, ApiRoutes.DomainSchemaHash(domain)!);
     }
 }

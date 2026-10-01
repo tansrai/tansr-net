@@ -130,10 +130,14 @@ for (const [domain, family] of domainFamily) lines.push(`        ${literal(domai
 lines.push('        _ => null,');
 lines.push('    };');
 lines.push('');
-lines.push('    /// <summary>Expected <c>tansr-schema-hash</c> value for a domain, or null when the domain is unknown.</summary>');
+// tansr-schema-hash is compared per domain (手册 §16.4; facade.ts schemaHashOf): discovery responses carry the manifest
+// aggregate schemaHash, every other domain carries its primary family's source SHA. The unified-v1 family file SHA is
+// still published through Families.UnifiedV1 but is never what the facade puts in the header.
+lines.push('    /// <summary>Expected <c>tansr-schema-hash</c> value for a domain, or null when the domain is unknown. <c>discovery</c> is the');
+lines.push('    /// manifest aggregate <see cref="ManifestSchemaHash"/>; other domains carry their primary family source SHA (手册 §16.4).</summary>');
 lines.push('    public static string? DomainSchemaHash(string domain) => domain switch');
 lines.push('    {');
-for (const [domain, family] of domainFamily) lines.push(`        ${literal(domain)} => ${literal('sha256:' + family.sha256)},`);
+for (const [domain, family] of domainFamily) lines.push(`        ${literal(domain)} => ${domain === 'discovery' ? '"sha256:" + ManifestSchemaHash' : literal('sha256:' + family.sha256)},`);
 lines.push('        _ => null,');
 lines.push('    };');
 lines.push('}');
