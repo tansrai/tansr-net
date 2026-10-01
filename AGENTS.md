@@ -10,4 +10,6 @@ SDK 是 Serve 的协议消费者、终端执行器、存储与 UI 投影。模�
 
 本地门由解决方案与脚本记录：锁定依赖 restore、Release build（warnings as errors）、dotnet test、dotnet format --verify-no-changes、pack 与独立消费。实现阶段仅跑受影响验证，合流后集中验收。未通过的完整卡不勾选，内部缺口不称为发行延期。
 
+统一 API 合同（UAPI-01）：`/api` 路径只从 `src/Tansr.Sdk/Api/ApiRoutes.generated.cs` 取，禁止手写 `/v2`、`/v3/sdk2`、`/v3/terminal*` 字面或回退；该文件由 `node scripts/generate-api-routes.mjs` 从 `contract/api-manifest.json` 生成，改 manifest 先更新 `contract/manifest.json` 锁（`apiManifest` 块与 `files[]` 条目）再重生成，提交前跑 `node scripts/generate-api-routes.mjs --check` 与 `pwsh scripts/check-contract.ps1`。统一头、错误信封、事件包络的解码在 `src/Tansr.Sdk/Api/`，金样与跨实现向量回放在 `tests/Tansr.Sdk.Tests/Api/` 与 `Protocol/CanonicalCrossVectorTests.cs`；解码器与金样的分歧只能登记、不能静默。UAPI 任务提交格式 `type(scope): 具体变化 (UAPI-01)`。
+
 全局工程配置、公共跨目录接口和协议生成器单一写者。临时日志放 `J:/tansr/archive/` 的本任务目录。不得提交票据、密钥、用户数据，不触碰其它会话的工作树和未提交文件。默认 HTTP 仅允许显式本机开发，生产用 HTTPS；未知副作用只对账，不自动重做。
