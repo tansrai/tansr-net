@@ -190,10 +190,12 @@ internal sealed class ExampleSessionControls
         if (http.DomainStatus == 409 && ((http.DomainCode == "revision_conflict" && http.DomainRetryAction == "refresh") ||
             (http.DomainCode == "busy" && http.DomainRetryAction == "backoff"))) return true;
         if (kind != "configuration") return false;
-        return (http.StatusCode == 409 && ((http.Code == "context_transition_required" && http.RetryAction == "refresh") ||
-            (http.Code == "unsupported_capability" && http.RetryAction == "discover"))) ||
-            (http.StatusCode == 400 && http.Code == "invalid_request" && http.RetryAction == "none") ||
-            (http.StatusCode == 429 && http.Code == "request_limit" && http.RetryAction == "backoff");
+        // UAPI-01: the unified envelope carries the session family's own code/status/retryAction in detail.domain*;
+        // the outer code/status are the facade mapping and must not be matched against family codes.
+        return (http.DomainStatus == 409 && ((http.DomainCode == "context_transition_required" && http.DomainRetryAction == "refresh") ||
+            (http.DomainCode == "unsupported_capability" && http.DomainRetryAction == "discover"))) ||
+            (http.DomainStatus == 400 && http.DomainCode == "invalid_request" && http.DomainRetryAction == "none") ||
+            (http.DomainStatus == 429 && http.DomainCode == "request_limit" && http.DomainRetryAction == "backoff");
     }
 
     private JsonElement? Read(string kind)
