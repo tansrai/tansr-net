@@ -18,6 +18,9 @@
       "nodeError": null,
       "requests": [
         "POST /v2/sessions"
+      ],
+      "apiRequests": [
+        "POST /api/sessions"
       ]
     },
     {
@@ -35,6 +38,9 @@
       "nodeError": null,
       "requests": [
         "POST /v2/sessions"
+      ],
+      "apiRequests": [
+        "POST /api/sessions"
       ]
     },
     {
@@ -53,6 +59,10 @@
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1",
         "POST /v3/sdk2/sessions"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1",
+        "POST /api/sessions"
       ]
     },
     {
@@ -70,6 +80,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -87,6 +100,9 @@
       "nodeError": "unsupported_capability",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -104,6 +120,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -121,6 +140,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -138,6 +160,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -155,6 +180,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -172,6 +200,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -189,6 +220,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -206,6 +240,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -222,6 +259,9 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     },
     {
@@ -240,6 +280,10 @@
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1",
         "POST /v3/sdk2/sessions"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1",
+        "POST /api/sessions"
       ]
     },
     {
@@ -257,7 +301,11 @@
       "nodeError": "capability_unconfirmed",
       "requests": [
         "GET /v3/sdk2/session-capabilities?protocol=sdk2-ext-v1"
+      ],
+      "apiRequests": [
+        "GET /api/capabilities/sessions?protocol=sdk2-ext-v1"
       ]
     }
-  ]
+  ],
+  "apiRequestsNote": "UAPI-01: apiRequests = the same transport behaviour on the unified /api entry (C# SDK); requests = legacy Node sdk2 client paths used by scripts/check-session-compatibility.mjs."
 }

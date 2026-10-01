@@ -6,6 +6,7 @@ using Tansr.Examples;
 using Tansr.Sdk.Cache;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Windows.Tests.Examples;
 
@@ -55,7 +56,7 @@ public sealed class NativeCacheContinuityHostTests
         private string ScopePath => Path.Combine(Directory, "scope.json");
         internal Fixture()
         {
-            System.IO.Directory.CreateDirectory(Directory); WriteScope("user"); Http = new HttpClient(Handler);
+            System.IO.Directory.CreateDirectory(Directory); WriteScope("user"); Http = new HttpClient(UnifiedStamp.Stamp(Handler));
             Client = new TansrClient(new TansrClientOptions
             {
                 BaseUri = new Uri("https://serve.test/"),
@@ -84,7 +85,7 @@ public sealed class NativeCacheContinuityHostTests
         {
             Calls++; string path = message.RequestUri!.AbsolutePath;
             using var limits = JsonDocument.Parse(Limits);
-            if (path.EndsWith("/capabilities", StringComparison.Ordinal)) return Json(JsonSerializer.SerializeToElement(new
+            if (path == "/api/capabilities/cache") return Json(JsonSerializer.SerializeToElement(new
             {
                 protocol = "sdk2-cache-v1",
                 audience = "serve-cache",
@@ -100,7 +101,7 @@ public sealed class NativeCacheContinuityHostTests
                 Posts++; request = WireJson.Parse(await message.Content!.ReadAsByteArrayAsync(ct)).GetProperty("request").Clone();
                 throw new HttpRequestException("synthetic committed receipt lost");
             }
-            Assert.Equal("/v3/sdk2/cache/operations", path); Queries++; Assert.Contains(Uri.EscapeDataString(request.GetProperty("requestId").GetString()!), message.RequestUri.Query);
+            Assert.Equal("/api/cache/operations", path); Queries++; Assert.Contains(Uri.EscapeDataString(request.GetProperty("requestId").GetString()!), message.RequestUri.Query);
             return Json(JsonSerializer.SerializeToElement(new
             {
                 protocol = "sdk2-cache-v1",

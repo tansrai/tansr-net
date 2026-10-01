@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Transport;
@@ -54,10 +55,9 @@ public sealed partial class TansrClient : IDisposable
         return source;
     }
 
-    private string Route(string path) => contract == SessionContract.Sdk2OffloadV1 && path.StartsWith("/v2/", StringComparison.Ordinal)
-        ? "/v3/sdk2/" + path.Substring(4) : path;
-
-    internal string SessionPath(string id) => "/v2/sessions/" + SessionJson.Segment(id);
+    // UAPI-01 D10: one `/api` entry for both session families; the family travels in `tansr-session-family`
+    // (SessionTransport), so the former `/v2 → /v3/sdk2` Route() rewrite no longer exists.
+    internal string SessionPath(string id) { SessionJson.Text(id, 512, "sessionId"); return ApiRoutes.SessionGet.Path(id: id); }
 
     public async Task<JsonElement> GetSessionCapabilitiesAsync(CancellationToken cancellationToken = default)
     {
@@ -79,7 +79,7 @@ public sealed partial class TansrClient : IDisposable
 
     private async Task<JsonElement> DiscoverAsync(SessionAccess access, CancellationToken cancellationToken)
     {
-        using var response = await transport.SendAsync(HttpMethod.Get, "/v3/sdk2/session-capabilities?protocol=sdk2-ext-v1", access,
+        using var response = await transport.SendAsync(HttpMethod.Get, ApiRoutes.SessionCapabilities.Path() + ApiRoutes.SessionCapabilities.Query(("protocol", WireContract.Protocol)), access,
             null, "application/json", null, null, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
@@ -136,7 +136,7 @@ public sealed partial class TansrClient : IDisposable
         using var cancellation = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(method, Route(path), access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        using var response = await transport.SendAsync(method, path, access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token, inputErrorMode: inputErrorMode).ConfigureAwait(false);
         if (expectedStatus.HasValue && (int)response.StatusCode != expectedStatus.Value) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
@@ -168,7 +168,7 @@ public sealed partial class TansrClient : IDisposable
         if (expectedScope != WireJson.CanonicalString(ReadExecutionScope())) throw new TansrProtocolException("context_changed");
         await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
         if (expectedScope != WireJson.CanonicalString(ReadExecutionScope())) throw new TansrProtocolException("context_changed");
-        using var response = await transport.SendAsync(method, Route(relativePath), access, request, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        using var response = await transport.SendAsync(method, relativePath, access, request, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, WireJson.MaximumControlBytes, cancellation.Token, true).ConfigureAwait(false);
         if (expectedStatus.HasValue && (int)response.StatusCode != expectedStatus.Value) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
@@ -185,7 +185,7 @@ public sealed partial class TansrClient : IDisposable
         using var cancellation = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(method, Route(path), access, body,
+        using var response = await transport.SendAsync(method, path, access, body,
             body is null ? "application/octet-stream" : "application/json", "application/octet-stream", null, cancellation.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);
         SessionTransport.ExpectContent(response, body is null ? "application/octet-stream" : "application/json");
@@ -199,7 +199,7 @@ public sealed partial class TansrClient : IDisposable
         if (options is null) throw new ArgumentNullException(nameof(options));
         var resume = options.ResumeSessionId;
         var body = SessionRequestWriter.Create(options, contract);
-        var value = await SendSessionAsync(HttpMethod.Post, "/v2/sessions", body, cancellationToken).ConfigureAwait(false);
+        var value = await SendSessionAsync(HttpMethod.Post, ApiRoutes.SessionCreate.Path(), body, cancellationToken).ConfigureAwait(false);
         VerifyFamily(value);
         var id = SessionJson.String(value, "sessionId");
         SessionJson.Text(id, 512, "sessionId");
@@ -220,7 +220,7 @@ public sealed partial class TansrClient : IDisposable
     public Task<JsonElement> ListSessionsAsync(int limit = 50, int offset = 0, CancellationToken cancellationToken = default)
     {
         if (limit < 1 || limit > 200 || offset < 0) throw new ArgumentOutOfRangeException(nameof(limit));
-        return SendSessionAsync(HttpMethod.Get, "/v2/sessions?limit=" + limit.ToString(CultureInfo.InvariantCulture) + "&offset=" + offset.ToString(CultureInfo.InvariantCulture), null, cancellationToken);
+        return SendSessionAsync(HttpMethod.Get, ApiRoutes.SessionList.Path() + ApiRoutes.SessionList.Query(("limit", limit.ToString(CultureInfo.InvariantCulture)), ("offset", offset.ToString(CultureInfo.InvariantCulture))), null, cancellationToken);
     }
 
     public void Dispose()

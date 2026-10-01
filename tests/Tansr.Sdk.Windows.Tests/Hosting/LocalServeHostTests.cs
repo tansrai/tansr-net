@@ -1,8 +1,10 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
@@ -151,6 +153,8 @@ public sealed class LocalServeHostTests : IClassFixture<LocalServeFixture>, IDis
         var options = new LocalServeHostOptions(program.Executable, program.Digest, workspace)
         { Port = Port(), CommandPrefix = [mode], StartupTimeout = TimeSpan.FromSeconds(10) };
         options.Environment["TANSR_FIXTURE_PID"] = Path.Combine(root, "pid.txt");
+        options.Environment["TANSR_FIXTURE_MANIFEST_REVISION"] = ApiRoutes.ManifestRevision.ToString(CultureInfo.InvariantCulture);
+        options.Environment["TANSR_FIXTURE_SCHEMA_HASH"] = ApiRoutes.DomainSchemaHash("session")!;
         return options;
     }
     private static int Port()
@@ -217,7 +221,9 @@ public sealed class LocalServeFixture : IDisposable
               if(records!=null)File.AppendAllText(records,(principal??"<missing>")+"|"+(validToken?"valid-token":"invalid-token")+"\n");
               bool allowed=args[0]=="anonymous" || validToken && (!args[0].StartsWith("ticket") || principal==Environment.GetEnvironmentVariable("TANSR_FIXTURE_USER_TOKEN"));
               var body=allowed?"{\"sessions\":[],\"total\":0}":"{\"error\":{\"code\":\"unauthorized\"}}";
-              var response="HTTP/1.1 "+(allowed?"200 OK":"401 Unauthorized")+"\r\nContent-Type: application/json\r\nContent-Length: "+Encoding.UTF8.GetByteCount(body)+"\r\nConnection: close\r\n\r\n"+body;
+              // UAPI-01: the unified facade stamps every /api response with these four headers.
+              var unified="tansr-contract: unified-v1\r\ntansr-manifest-revision: "+Environment.GetEnvironmentVariable("TANSR_FIXTURE_MANIFEST_REVISION")+"\r\ntansr-domain: session\r\ntansr-schema-hash: "+Environment.GetEnvironmentVariable("TANSR_FIXTURE_SCHEMA_HASH")+"\r\n";
+              var response="HTTP/1.1 "+(allowed?"200 OK":"401 Unauthorized")+"\r\nContent-Type: application/json\r\n"+unified+"Content-Length: "+Encoding.UTF8.GetByteCount(body)+"\r\nConnection: close\r\n\r\n"+body;
               var bytes=Encoding.UTF8.GetBytes(response);stream.Write(bytes,0,bytes.Length);stream.Flush();
             }
           }

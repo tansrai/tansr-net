@@ -56,7 +56,7 @@ internal sealed class TurnInputEditor
                 Save(record.With("accepted", result.GetRawText()));
                 return Describe();
             }
-            catch (TansrHttpException error) when (error.Code == "input_not_found")
+            catch (TansrHttpException error) when (error.DomainCode == "input_not_found")
             {
                 // current-and-last-turn 保留窗外的 404 不能证明旧输入从未接纳。
                 Save(record.With("not_found", null));

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Execution;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
 
@@ -14,7 +15,7 @@ public sealed class NativeOperationConsentTests
     {
         var directory = Path.Combine(Path.GetTempPath(), "tansr-consent-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory);
         var path = Path.Combine(directory, "config.json"); var endpoint = new Uri("https://local.example.test");
-        using var http = new HttpClient(new ListHandler());
+        using var http = UnifiedStamp.Client(new ListHandler());
         using var client = new TansrClient(new TansrClientOptions
         {
             BaseUri = endpoint,

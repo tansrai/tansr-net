@@ -72,7 +72,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
         async Task Denied(string role, string id, string suffix)
         {
             using var http = new HttpClient(); http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "demo1.unified." + role);
-            using var response = await http.GetAsync(Required("TANSR_SHARED_URL") + "/v2/sessions/" + Uri.EscapeDataString(id) + suffix, ct);
+            using var response = await http.GetAsync(Required("TANSR_SHARED_URL") + "/api/sessions/" + Uri.EscapeDataString(id) + suffix, ct);
             Assert.Contains((int)response.StatusCode, new[] { 401, 403, 404 });
         }
         try
@@ -120,7 +120,7 @@ public sealed class ServeSharedClientsTests(ITestOutputHelper output)
             {
                 slowHttp.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", "demo1.unified.csharp");
                 // Deliberately do not consume the body. The real server queue must apply backpressure.
-                using var slow = await slowHttp.GetAsync(Required("TANSR_SHARED_URL") + "/v2/sessions/" + own.Session.Id + "/events", HttpCompletionOption.ResponseHeadersRead, ct);
+                using var slow = await slowHttp.GetAsync(Required("TANSR_SHARED_URL") + "/api/sessions/" + own.Session.Id + "/events", HttpCompletionOption.ResponseHeadersRead, ct);
                 slow.EnsureSuccessStatusCode();
                 using var flood = own.Session.StartRun("NET_SHARED:" + Json(new { id = "csharp-slow-stream", stream = true }).GetRawText(),
                     new SessionRunOptions { Timeout = TimeSpan.FromSeconds(45), MaximumTextCharacters = 4096 }, cancellationToken: ct);

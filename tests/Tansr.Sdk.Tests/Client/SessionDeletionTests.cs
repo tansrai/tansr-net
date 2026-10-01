@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -24,7 +25,7 @@ public sealed class SessionDeletionTests
     public async Task CheckpointDeletionAcceptsOnlyTheOriginalEmpty204WithoutInventingAReceipt()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : new(HttpStatusCode.NoContent));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         Assert.Equal(JsonValueKind.Null, (await session.DeleteCheckpointAsync("checkpoint")).ValueKind);
         Assert.Equal(1, handler.Mutations);
@@ -37,7 +38,7 @@ public sealed class SessionDeletionTests
     public async Task OtherSuccessfulStatusesOrBodiesCannotBecomeADeletionSuccess(int status, string body)
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : new((HttpStatusCode)status) { Content = new StringContent(body) });
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         Assert.Equal("invalid_response", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.DeleteCheckpointAsync("checkpoint"))).Code);
         Assert.Equal(1, handler.Mutations);
     }
@@ -46,7 +47,7 @@ public sealed class SessionDeletionTests
     public async Task CheckpointDeletionPreservesStructuredFailureAndNeverRetriesAnUnknownOutcome()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : throw new HttpRequestException("lost after delete"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         Assert.Equal("network_error", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.DeleteCheckpointAsync("checkpoint"))).Code);
         Assert.Equal(1, handler.Mutations);
     }
@@ -56,7 +57,7 @@ public sealed class SessionDeletionTests
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : new(HttpStatusCode.NotFound)
         { Content = new StringContent("{\"error\":{\"code\":\"checkpoint_not_found\",\"message\":\"private\"}}", Encoding.UTF8, "application/json") });
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => session.DeleteCheckpointAsync("checkpoint"));
         Assert.Equal(404, error.StatusCode); Assert.Equal("checkpoint_not_found", error.Code); Assert.DoesNotContain("private", error.ToString()); Assert.Equal(1, handler.Mutations);
     }

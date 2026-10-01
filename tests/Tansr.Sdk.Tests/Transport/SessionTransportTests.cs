@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Tests.Transport;
@@ -18,7 +19,7 @@ public sealed class SessionTransportTests
     {
         using var stream = new DisposalCompletedStream(Encoding.UTF8.GetBytes(Created), completion);
         using var handler = new Handler(stream);
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(new TansrClientOptions
         {
             BaseUri = new Uri("https://serve.test/"),
@@ -32,7 +33,7 @@ public sealed class SessionTransportTests
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => create.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.True(stream.Disposed);
-        Assert.Equal(new[] { "POST /v2/sessions" }, handler.Requests);
+        Assert.Equal(new[] { "POST /api/sessions" }, handler.Requests);
     }
 
     [Fact]

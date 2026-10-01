@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 
 namespace Tansr.Sdk.Cache;
@@ -15,7 +16,6 @@ namespace Tansr.Sdk.Cache;
 /// </summary>
 internal sealed class CacheClient
 {
-    private const string Root = "/v3/sdk2/cache";
     private readonly TansrClient client;
     private readonly string owner;
     private readonly Func<DateTimeOffset> now;
@@ -33,7 +33,7 @@ internal sealed class CacheClient
     internal async Task<CacheCapabilities> DiscoverAsync(CancellationToken cancellationToken = default)
     {
         CheckOwner();
-        var raw = await client.SendCacheAsync(HttpMethod.Get, Root + "/capabilities", null, owner, cancellationToken).ConfigureAwait(false);
+        var raw = await client.SendCacheAsync(HttpMethod.Get, ApiRoutes.CacheCapabilities.Path(), null, owner, cancellationToken).ConfigureAwait(false);
         CacheJson.Validate("CapabilitiesResponse", raw);
         if (CacheJson.String(raw, "audience") != "serve-cache") throw new TansrProtocolException("invalid_response");
         return new CacheCapabilities(raw, owner);
@@ -178,10 +178,10 @@ internal sealed class CacheClient
             operation.Attempted = true;
             string path;
             if (query)
-                path = Root + "/operations?protocol=" + CacheJson.Protocol + "&operation=" + operation.Operation +
-                    "&operationEpoch=" + Uri.EscapeDataString(operation.OperationEpoch) + "&requestId=" + Uri.EscapeDataString(operation.RequestId) +
-                    (operation.BindingId is null ? "" : "&bindingId=" + Uri.EscapeDataString(operation.BindingId));
-            else path = Root + "/bindings" + (operation.BindingId is null ? "" : "/" + Uri.EscapeDataString(operation.BindingId) + "/" + operation.Operation);
+                path = ApiRoutes.CacheOperationQuery.Path() + (operation.BindingId is null
+                    ? ApiRoutes.CacheOperationQuery.Query(("protocol", CacheJson.Protocol), ("operation", operation.Operation), ("operationEpoch", operation.OperationEpoch), ("requestId", operation.RequestId))
+                    : ApiRoutes.CacheOperationQuery.Query(("protocol", CacheJson.Protocol), ("operation", operation.Operation), ("operationEpoch", operation.OperationEpoch), ("requestId", operation.RequestId), ("bindingId", operation.BindingId)));
+            else path = operation.BindingId is null ? ApiRoutes.CacheBindingOpen.Path() : MutationRoute(operation.Operation).Path(id: operation.BindingId);
             var result = await client.SendCacheAsync(query ? HttpMethod.Get : HttpMethod.Post, path,
                 query ? null : operation.ExportOriginalRequest(), owner, cancellationToken).ConfigureAwait(false);
             ValidateReceipt(operation, result);
@@ -192,6 +192,15 @@ internal sealed class CacheClient
         }
         finally { operation.Gate.Release(); }
     }
+
+    private static ApiOperation MutationRoute(string operation) => operation switch
+    {
+        "renew" => ApiRoutes.CacheBindingRenew,
+        "rebind" => ApiRoutes.CacheBindingRebind,
+        "rotate" => ApiRoutes.CacheBindingRotate,
+        "close" => ApiRoutes.CacheBindingClose,
+        _ => throw new TansrProtocolException("invalid_request"),
+    };
 
     private static void ValidateReceipt(CacheOperation operation, JsonElement result)
     {
@@ -219,7 +228,7 @@ internal sealed class CacheClient
     internal async Task<CacheBinding> ReadBindingAsync(string bindingId, CancellationToken cancellationToken = default)
     {
         CacheJson.Text("Id", bindingId); CheckOwner();
-        var raw = await client.SendCacheAsync(HttpMethod.Get, Root + "/bindings/" + Uri.EscapeDataString(bindingId) + "?protocol=" + CacheJson.Protocol,
+        var raw = await client.SendCacheAsync(HttpMethod.Get, ApiRoutes.CacheBindingGet.Path(id: bindingId) + ApiRoutes.CacheBindingGet.Query(("protocol", CacheJson.Protocol)),
             null, owner, cancellationToken).ConfigureAwait(false);
         var result = new CacheBinding(raw, owner);
         if (result.Id != bindingId) throw new TansrProtocolException("invalid_response");
@@ -231,8 +240,9 @@ internal sealed class CacheClient
         CacheJson.Text("Id", bindingId); if (after is not null) CacheJson.Text("Id", after);
         if (limit < 1 || limit > 100) throw new ArgumentOutOfRangeException(nameof(limit));
         CheckOwner();
-        var raw = await client.SendCacheAsync(HttpMethod.Get, Root + "/bindings/" + Uri.EscapeDataString(bindingId) + "/diagnostics?protocol=" + CacheJson.Protocol +
-            "&limit=" + limit.ToString(CultureInfo.InvariantCulture) + (after is null ? "" : "&after=" + Uri.EscapeDataString(after)), null, owner, cancellationToken).ConfigureAwait(false);
+        var raw = await client.SendCacheAsync(HttpMethod.Get, ApiRoutes.CacheDiagnostics.Path(id: bindingId) + (after is null
+            ? ApiRoutes.CacheDiagnostics.Query(("protocol", CacheJson.Protocol), ("limit", limit.ToString(CultureInfo.InvariantCulture)))
+            : ApiRoutes.CacheDiagnostics.Query(("protocol", CacheJson.Protocol), ("limit", limit.ToString(CultureInfo.InvariantCulture)), ("after", after))), null, owner, cancellationToken).ConfigureAwait(false);
         CacheJson.Validate("DiagnosticPage", raw);
         // 原 GatewayCacheClient 的此入口目前严格 emptyDiagnostic；真实用量在独立 cache-core-v1。
         if (raw.GetProperty("rows").GetArrayLength() != 0 || raw.GetProperty("next").ValueKind != JsonValueKind.Null)

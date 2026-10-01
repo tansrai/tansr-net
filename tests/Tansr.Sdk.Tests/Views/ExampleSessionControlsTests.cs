@@ -5,6 +5,7 @@ using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 using Tansr.Sdk.Tests.Terminal;
 
@@ -181,11 +182,11 @@ public sealed class ExampleSessionControlsTests
         internal Fixture()
         {
             Directory.CreateDirectory(DirectoryPath); Post = Success;
-            http = new HttpClient(new Handler(async (request, ct) =>
+            http = UnifiedStamp.Client(new Handler(async (request, ct) =>
             {
                 Assert.Equal("synthetic-only-token", request.Headers.Authorization!.Parameter);
                 var path = request.RequestUri!.AbsolutePath;
-                if (path == "/v3/terminal/capabilities")
+                if (path == "/api/capabilities/terminal")
                 {
                     var caps = new TerminalTestAdapter().Capabilities;
                     var installed = ++discoveries != RejectDiscoveryNumber;

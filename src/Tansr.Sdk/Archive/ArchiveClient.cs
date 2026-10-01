@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using J = Tansr.Sdk.Archive.ArchiveJson;
@@ -29,7 +30,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
             return Intersect(_local, _discovered, _bindings.TryGetValue(bindingId, out var value) ? value : (JsonElement?)null);
         }
     }
-    public async Task<JsonElement> GetCapabilitiesAsync(CancellationToken cancellationToken = default) => await Send(HttpMethod.Get, "/capabilities", null, null, "CapabilitiesResponse", cancellationToken).ConfigureAwait(false);
+    public async Task<JsonElement> GetCapabilitiesAsync(CancellationToken cancellationToken = default) => await Send(HttpMethod.Get, ApiRoutes.ArchiveCapabilities.Path(), null, null, "CapabilitiesResponse", cancellationToken).ConfigureAwait(false);
     /// <summary>消费一次原绑定事件连接。回调必须先耐久处理 frame.cursor；只有回调成功才推进返回游标，不自动重连或制造恢复票。</summary>
     public Task<string?> ConsumeEventsAsync(string bindingId, JsonElement generations, Func<JsonElement, CancellationToken, Task> onFrame,
         string? lastEventId = null, CancellationToken cancellationToken = default)
@@ -64,27 +65,27 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
     }
     public Task<JsonElement> GetBindingTargetAsync(JsonElement request, CancellationToken cancellationToken = default)
     {
-        var input = J.Copy(request, "BindingTargetRequest"); return Send(HttpMethod.Get, "/sessions/" + J.Segment(J.Text(input, "sessionId")) + "/binding-target?protocol=sdk2-ext-v1", input, "BindingTargetRequest", "BindingTargetView", cancellationToken);
+        var input = J.Copy(request, "BindingTargetRequest"); return Send(HttpMethod.Get, ApiRoutes.ArchiveBindingTarget.Path(id: J.Text(input, "sessionId")) + ApiRoutes.ArchiveBindingTarget.Query(("protocol", J.Protocol)), input, "BindingTargetRequest", "BindingTargetView", cancellationToken);
     }
-    public Task<JsonElement> CreateBindingAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, "/bindings", request, "BindingCreateRequest", "BindingView", cancellationToken, 201);
-    public Task<JsonElement> GetBindingAsync(string bindingId, CancellationToken cancellationToken = default) => ReadBindingPath(bindingId, "", "BindingView", cancellationToken);
-    public Task<JsonElement> GetArchiveStatusAsync(string bindingId, CancellationToken cancellationToken = default) => ReadBindingPath(bindingId, "/archive/status", "ArchiveStatus", cancellationToken);
-    private Task<JsonElement> ReadBindingPath(string bindingId, string suffix, string schema, CancellationToken ct)
+    public Task<JsonElement> CreateBindingAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, ApiRoutes.ArchiveBindingCreate.Path(), request, "BindingCreateRequest", "BindingView", cancellationToken, 201);
+    public Task<JsonElement> GetBindingAsync(string bindingId, CancellationToken cancellationToken = default) => ReadBindingPath(bindingId, ApiRoutes.ArchiveBindingGet, "BindingView", cancellationToken);
+    public Task<JsonElement> GetArchiveStatusAsync(string bindingId, CancellationToken cancellationToken = default) => ReadBindingPath(bindingId, ApiRoutes.ArchiveStatus, "ArchiveStatus", cancellationToken);
+    private Task<JsonElement> ReadBindingPath(string bindingId, ApiOperation operation, string schema, CancellationToken ct)
     {
-        var input = J.Build(w => w.WriteString("bindingId", bindingId)); WireJson.ValidateNamed("Id", input.GetProperty("bindingId")); return Send(HttpMethod.Get, Binding(input) + suffix + "?protocol=sdk2-ext-v1", input, null, schema, ct);
+        var input = J.Build(w => w.WriteString("bindingId", bindingId)); WireJson.ValidateNamed("Id", input.GetProperty("bindingId")); return Send(HttpMethod.Get, operation.Path(id: bindingId) + operation.Query(("protocol", J.Protocol)), input, null, schema, ct);
     }
     public Task<JsonElement> ReadRecordsAsync(JsonElement request, CancellationToken cancellationToken = default)
     {
         var input = J.Copy(request, "ArchiveReadRequest"); var query = Generations(input); if (input.GetProperty("afterSequence").ValueKind != JsonValueKind.Null) query.Add(("afterSequence", J.Text(input, "afterSequence")));
         query.Add(("limit", input.GetProperty("limit").GetInt32())); query.Add(("maxBytes", input.GetProperty("maxBytes").GetInt32()));
-        return Send(HttpMethod.Get, Binding(input) + "/archive/records" + J.Query(query.ToArray()), input, "ArchiveReadRequest", "ArchivePage", cancellationToken, responseMaximum: input.GetProperty("maxBytes").GetInt32());
+        return Send(HttpMethod.Get, ApiRoutes.ArchiveRecordsRead.Path(id: J.Text(input, "bindingId")) + J.Query(ApiRoutes.ArchiveRecordsRead, query.ToArray()), input, "ArchiveReadRequest", "ArchivePage", cancellationToken, responseMaximum: input.GetProperty("maxBytes").GetInt32());
     }
     public Task<JsonElement> ReadArtifactAsync(JsonElement request, CancellationToken cancellationToken = default)
     {
         var input = J.Copy(request, "ArtifactReadRequest"); var query = Generations(input); query.Add(("offset", input.GetProperty("offset").GetInt32())); query.Add(("maxBytes", input.GetProperty("maxBytes").GetInt32()));
-        return Send(HttpMethod.Get, Binding(input) + "/archive/artifacts/" + J.Segment(J.Text(input, "artifactId")) + J.Query(query.ToArray()), input, "ArtifactReadRequest", "ArtifactChunk", cancellationToken, responseMaximum: 357720);
+        return Send(HttpMethod.Get, ApiRoutes.ArchiveArtifactRead.Path(id: J.Text(input, "bindingId"), targetId: J.Text(input, "artifactId")) + J.Query(ApiRoutes.ArchiveArtifactRead, query.ToArray()), input, "ArtifactReadRequest", "ArtifactChunk", cancellationToken, responseMaximum: 357720);
     }
-    public Task<JsonElement> AcknowledgeAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Binding(request) + "/archive/acks", request, "ArchiveAckRequest", "MutationReceipt", cancellationToken);
+    public Task<JsonElement> AcknowledgeAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, ApiRoutes.ArchiveAckCommit.Path(id: J.Text(request, "bindingId")), request, "ArchiveAckRequest", "MutationReceipt", cancellationToken);
     /// <summary>独立恢复合同；输入必须来自接收器 PrepareAckRebaseAsync 的耐久结果，不自动生成恢复键。</summary>
     public async Task<JsonElement> RebaseAckAsync(JsonElement request, CancellationToken cancellationToken = default)
     {
@@ -93,15 +94,15 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
         var response = await _client.SendArchiveRecoveryAsync(input, controlBytes + ArchiveRecoveryContract.RequestEnvelopeBytes, 2 * controlBytes + ArchiveRecoveryContract.ResponseEnvelopeBytes, cancellationToken).ConfigureAwait(false);
         J.Need(J.Equal(scope, ReadScope()), "context_changed"); return ArchiveRecoveryContract.Receipt(response, input, scope, controlBytes);
     }
-    public Task<JsonElement> UploadMaterialChunkAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, MaterialPath(request) + "/uploads/" + J.Segment(J.Text(request, "artifactId")) + "/chunks", request, "MaterialUploadChunkRequest", "MaterialUploadStatus", cancellationToken);
-    public Task<JsonElement> GetMaterialUploadStatusAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Get, MaterialPath(request) + "/uploads/" + J.Segment(J.Text(request, "artifactId")) + "?protocol=sdk2-ext-v1", request, "MaterialUploadStatusRequest", "MaterialUploadStatus", cancellationToken);
-    public Task<JsonElement> RespondMaterialsAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Binding(request) + "/material-responses", request, "MaterialResponseRequest", "MaterialReceipt", cancellationToken, 202);
-    public Task<JsonElement> GetMaterialStatusAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Get, MaterialPath(request) + "?protocol=sdk2-ext-v1", request, "MaterialStatusRequest", "MaterialReceipt", cancellationToken);
-    public Task<JsonElement> CloseBindingAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Binding(request) + "/close", request, "BindingCloseRequest", "MutationReceipt", cancellationToken);
+    public Task<JsonElement> UploadMaterialChunkAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, Material(ApiRoutes.MaterialUploadChunk, request, J.Text(request, "artifactId")), request, "MaterialUploadChunkRequest", "MaterialUploadStatus", cancellationToken);
+    public Task<JsonElement> GetMaterialUploadStatusAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Get, Material(ApiRoutes.MaterialUploadStatus, request, J.Text(request, "artifactId")) + ApiRoutes.MaterialUploadStatus.Query(("protocol", J.Protocol)), request, "MaterialUploadStatusRequest", "MaterialUploadStatus", cancellationToken);
+    public Task<JsonElement> RespondMaterialsAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, ApiRoutes.MaterialResponseSubmit.Path(id: J.Text(request, "bindingId")), request, "MaterialResponseRequest", "MaterialReceipt", cancellationToken, 202);
+    public Task<JsonElement> GetMaterialStatusAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Get, Material(ApiRoutes.MaterialStatus, request) + ApiRoutes.MaterialStatus.Query(("protocol", J.Protocol)), request, "MaterialStatusRequest", "MaterialReceipt", cancellationToken);
+    public Task<JsonElement> CloseBindingAsync(JsonElement request, CancellationToken cancellationToken = default) => Send(HttpMethod.Post, ApiRoutes.ArchiveBindingClose.Path(id: J.Text(request, "bindingId")), request, "BindingCloseRequest", "MutationReceipt", cancellationToken);
     public Task<JsonElement> GetOperationAsync(JsonElement request, CancellationToken cancellationToken = default)
     {
         var input = J.Copy(request, "OperationStatusRequest"); string operation = J.Text(input, "operation"), subject = operation == "binding-create" ? "sessionId" : "bindingId"; var id = input.GetProperty("request");
-        return Send(HttpMethod.Get, "/operations" + J.Query(("protocol", J.Protocol), ("operation", operation), (subject, J.Text(input, subject)), ("operationEpoch", J.Text(id, "operationEpoch")), ("requestId", J.Text(id, "requestId"))), input, "OperationStatusRequest", "MutationReceipt", cancellationToken);
+        return Send(HttpMethod.Get, ApiRoutes.ArchiveOperationQuery.Path() + J.Query(ApiRoutes.ArchiveOperationQuery, ("protocol", J.Protocol), ("operation", operation), (subject, J.Text(input, subject)), ("operationEpoch", J.Text(id, "operationEpoch")), ("requestId", J.Text(id, "requestId"))), input, "OperationStatusRequest", "MutationReceipt", cancellationToken);
     }
     private async Task<JsonElement> Send(HttpMethod method, string path, JsonElement? supplied, string? requestSchema, string responseSchema, CancellationToken ct, int expectedStatus = 200, int responseMaximum = 262144)
     {
@@ -110,7 +111,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
         ValidateRequest(input, requestSchema, limits); J.Need(WireJson.EncodeControl(input).Length <= limits.GetProperty("controlBytes").GetInt32(), "payload_too_large");
         J.Need(path.Length <= 8192, "invalid_input");
         int maximum = responseSchema == "CapabilitiesResponse" || responseSchema == "BindingView" ? _local.GetProperty("controlBytes").GetInt32() : responseSchema == "ArchivePage" ? Math.Min(responseMaximum, limits.GetProperty("pageBytes").GetInt32()) : responseSchema == "ArtifactChunk" ? responseMaximum : Math.Min(responseMaximum, limits.GetProperty("controlBytes").GetInt32());
-        var value = await _client.SendControlAsync(method, "/v3/sdk2" + path, method == HttpMethod.Post ? input : (JsonElement?)null, ct, maximum, expectedStatus).ConfigureAwait(false);
+        var value = await _client.SendControlAsync(method, path, method == HttpMethod.Post ? input : (JsonElement?)null, ct, maximum, expectedStatus).ConfigureAwait(false);
         WireJson.ValidateNamed(responseSchema, value); J.Need(J.Equal(scope, ReadScope()), "context_changed");
         ValidateResponse(value, input, responseSchema, scope, limits);
         lock (_gate)
@@ -208,8 +209,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
     private static void ValidateLimits(JsonElement value) { WireJson.ValidateNamed("Limits", value); J.Need(value.GetProperty("inflightReserveBytes").GetInt64() <= value.GetProperty("pendingBytes").GetInt64()); }
     private static void Epoch(JsonElement value, long? maximum) { if (value.ValueKind == JsonValueKind.Null) return; double duration = (DateTimeOffset.Parse(J.Text(value, "expiresAt"), CultureInfo.InvariantCulture) - DateTimeOffset.Parse(J.Text(value, "issuedAt"), CultureInfo.InvariantCulture)).TotalMilliseconds; J.Need(duration > 0 && (!maximum.HasValue || duration <= maximum.Value)); }
     private static JsonElement Intersect(JsonElement local, JsonElement? discovered, JsonElement? binding) => J.Build(w => { foreach (var item in local.EnumerateObject()) { long value = item.Value.GetInt64(); if (discovered.HasValue) value = Math.Min(value, discovered.Value.GetProperty(item.Name).GetInt64()); if (binding.HasValue) value = Math.Min(value, binding.Value.GetProperty(item.Name).GetInt64()); w.WriteNumber(item.Name, value); } });
-    private static string Binding(JsonElement value) => "/bindings/" + J.Segment(J.Text(value, "bindingId"));
-    private static string MaterialPath(JsonElement value) => Binding(value) + "/materials/" + J.Segment(J.Text(value, "materialRequestId"));
+    private static string Material(ApiOperation operation, JsonElement value, string? uploadId = null) => operation.Path(id: J.Text(value, "bindingId"), targetId: J.Text(value, "materialRequestId"), uploadId: uploadId);
     private static List<(string Name, object Value)> Generations(JsonElement value)
     { var generation = value.GetProperty("generations"); return new List<(string, object)> { ("protocol", J.Protocol), ("historyEpoch", J.Text(generation, "historyEpoch")), ("deletionGeneration", J.Text(generation, "deletionGeneration")), ("projectionRevision", J.Text(generation, "projectionRevision")) }; }
     internal static JsonElement MaximumLimits() => J.Build(w => { w.WriteNumber("controlBytes", 262144); w.WriteNumber("recordBytes", 262144); w.WriteNumber("pageRecords", 128); w.WriteNumber("pageBytes", 1048576); w.WriteNumber("attachmentBytes", 33554432); w.WriteNumber("chunkBytes", 262144); w.WriteNumber("materialConcurrent", 2); w.WriteNumber("materialQueue", 16); w.WriteNumber("materialCandidates", 32); w.WriteNumber("materialBytes", 1048576); w.WriteNumber("materialDeadlineMs", 30000); w.WriteNumber("pendingRecords", 4096); w.WriteNumber("pendingBytes", 67108864); w.WriteNumber("inflightReserveBytes", 16777216); w.WriteNumber("offlineMs", 86400000); w.WriteNumber("eventRetentionMs", 600000); w.WriteNumber("eventRetentionFrames", 4096); w.WriteNumber("eventRetentionBytes", 8388608); w.WriteNumber("terminalReceiptRetentionMs", 604800000); w.WriteNumber("epochLifetimeMs", 86400000); w.WriteNumber("materialChunkBytes", 65536); });

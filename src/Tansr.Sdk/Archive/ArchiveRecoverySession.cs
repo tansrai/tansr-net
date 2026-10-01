@@ -58,7 +58,7 @@ public sealed class ArchiveRecoverySession
         J.Need(J.Equal(intent.GetProperty("previous"), previous) && J.Equal(intent.GetProperty("request"), request)); Match(intent.GetProperty("previous"));
         JsonElement result;
         try { result = await _client.RebaseAckAsync(intent, ct).ConfigureAwait(false); check(); }
-        catch (TansrHttpException error) when (error.StatusCode == 409 && (error.Code == "binding_conflict" || error.Code == "request_id_conflict"))
+        catch (TansrHttpException error) when (error.DomainStatus == 409 && (error.DomainCode == "binding_conflict" || error.DomainCode == "request_id_conflict"))
         {
             check(); original = await ReadOriginal(previous, scope, check, ct).ConfigureAwait(false);
             if (original.HasValue) return await ConfirmOriginal(previous, original.Value, check, ct).ConfigureAwait(false);
@@ -77,7 +77,7 @@ public sealed class ArchiveRecoverySession
             check(); J.VerifyOperation(previous, receipt, scope, "archive-ack"); return receipt.Clone();
         }
         // 此错误只意味着原回执不可得。是否真正未受理仍由恢复端点在同一 idle lease 内判定。
-        catch (TansrHttpException error) when (error.StatusCode == 410 && error.Code == "receipt_expired") { check(); return null; }
+        catch (TansrHttpException error) when (error.DomainStatus == 410 && error.DomainCode == "receipt_expired") { check(); return null; }
     }
 
     private async Task<ArchiveAcknowledgementRecoveryResult> ConfirmOriginal(JsonElement previous, JsonElement receipt, Action check, CancellationToken ct)

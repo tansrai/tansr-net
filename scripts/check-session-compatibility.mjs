@@ -33,6 +33,8 @@ for (const vector of fixture.vectors) {
   try { await client.create(vector.contract === 'sdk1' ? {} : { requestId: 'create-original' }); }
   catch (failure) { error = failure.code; assert.ok(!String(failure).includes('synthetic-private-detail')); }
   assert.equal(error, vector.nodeError, vector.id);
+  // `requests` = the pinned Node sdk2 client (legacy entries at fixture.sourceRevision); the C# SDK asserts the same
+  // transport behaviour on the unified /api entry via `apiRequests` (UAPI-01, SessionCompatibilityTests).
   assert.deepEqual(requests, vector.requests, vector.id);
   results.push({ id: vector.id, requests, error });
 }

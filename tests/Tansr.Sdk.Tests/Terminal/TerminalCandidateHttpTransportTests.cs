@@ -5,6 +5,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -32,7 +33,7 @@ public sealed class TerminalCandidateHttpTransportTests
     public async Task RealCandidateRouteGrammarReauthenticatesEachControlWithoutFallback()
     {
         var adapter = new TerminalTestAdapter(); var paths = new List<string>(); var tokens = 0;
-        using var http = new HttpClient(new Handler(async request =>
+        using var http = UnifiedStamp.Client(new Handler(async request =>
         {
             paths.Add(request.RequestUri!.PathAndQuery);
             Assert.Equal("token-" + paths.Count, request.Headers.Authorization!.Parameter);
@@ -56,9 +57,9 @@ public sealed class TerminalCandidateHttpTransportTests
         });
         await client.BindAsync(request);
         await transport.GetOutputStatusAsync(Session, Reference, default);
-        Assert.Equal("/v3/terminal/capabilities?contract=terminal-services-v1", paths[0]);
-        Assert.Equal("/v3/terminal/bindings", paths[1]);
-        Assert.Equal("/v3/terminal/sessions/session-1/tool-output-status?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&operationId=operation-1&requestDigest=" + new string('a', 64), paths[2]);
+        Assert.Equal("/api/capabilities/terminal?contract=terminal-services-v1", paths[0]);
+        Assert.Equal("/api/terminal/bindings", paths[1]);
+        Assert.Equal("/api/terminal/sessions/session-1/tool-output-status?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&operationId=operation-1&requestDigest=" + new string('a', 64), paths[2]);
         Assert.Equal(3, tokens);
     }
     private static string OutputFrame(JsonElement value, string? id = null) => "event: " + TerminalJson.Text(value, "type") + "\n" +
@@ -110,7 +111,7 @@ public sealed class TerminalCandidateHttpTransportTests
         var bytes = returnsBytes ? Encoding.UTF8.GetBytes(OutputFrame(value, executor ? "1" : null)) : Array.Empty<byte>();
         using var stream = new DisposeReleasedStream(bytes);
         var requests = 0; var observed = 0;
-        using var http = new HttpClient(new Handler(_ =>
+        using var http = UnifiedStamp.Client(new Handler(_ =>
         {
             requests++;
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
@@ -131,7 +132,7 @@ public sealed class TerminalCandidateHttpTransportTests
     public async Task OutputUsesFull64BitAfterSequenceAndEofNeverBecomesCompletion()
     {
         var value = StatusEvent(); var observed = 0;
-        using var http = new HttpClient(new Handler(request =>
+        using var http = UnifiedStamp.Client(new Handler(request =>
         {
             Assert.EndsWith("&afterSeq=9223372036854775807", request.RequestUri!.Query);
             Assert.False(request.Headers.Contains("Last-Event-ID")); return Task.FromResult(Sse(OutputFrame(value)));
@@ -149,7 +150,7 @@ public sealed class TerminalCandidateHttpTransportTests
         var value = executor ? JsonSerializer.SerializeToElement(new
         { contract = "terminal-services-v1", eventId = "9007199254740993", type = "operations-available", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null }) : StatusEvent();
         var observed = 0;
-        using var http = new HttpClient(new Handler(request =>
+        using var http = UnifiedStamp.Client(new Handler(request =>
         {
             if (executor) Assert.Equal("9007199254740992", request.Headers.GetValues("Last-Event-ID").Single());
             return Task.FromResult(Sse("retry: 1000\ndata:\n\n" + OutputFrame(value, executor ? "9007199254740993" : null)));
@@ -169,7 +170,7 @@ public sealed class TerminalCandidateHttpTransportTests
     public async Task NamedIdentifiedOrNonemptyMalformedFramesAreNeverSwallowed(string data)
     {
         var observed = 0;
-        using var http = new HttpClient(new Handler(_ => Task.FromResult(Sse(data))));
+        using var http = UnifiedStamp.Client(new Handler(_ => Task.FromResult(Sse(data))));
         using var transport = new TerminalCandidateHttpTransport(Options(), http);
         await Assert.ThrowsAsync<WireProtocolException>(() => transport.ObserveExecutorAsync("sdk2-offload-v1", "executor-1", "connection-1", null,
             (_, _) => { observed++; return Task.CompletedTask; }, default));
@@ -179,7 +180,7 @@ public sealed class TerminalCandidateHttpTransportTests
     public async Task OutputRejectsNotificationCursorAndBindingErrorsNeverRetry()
     {
         var requests = 0;
-        using var http = new HttpClient(new Handler(_ => { requests++; return Task.FromResult(Sse(OutputFrame(StatusEvent(), "0"))); }));
+        using var http = UnifiedStamp.Client(new Handler(_ => { requests++; return Task.FromResult(Sse(OutputFrame(StatusEvent(), "0"))); }));
         using var transport = new TerminalCandidateHttpTransport(Options(), http);
         Assert.Equal("invalid_event_id", (await Assert.ThrowsAsync<WireProtocolException>(() => transport.ObserveOutputAsync(Session, Reference, null,
             (_, _) => throw new InvalidOperationException("Invalid frame must not reach consumer"), default))).Code);
@@ -190,7 +191,7 @@ public sealed class TerminalCandidateHttpTransportTests
     {
         var requests = 0;
         var error = TerminalJson.Object(w => { w.WriteString("contract", "terminal-services-v1"); w.WriteString("requestId", "error-1"); w.WriteString("code", "commit_unknown"); w.WriteNumber("status", 409); w.WriteString("retryAction", "reconcile"); });
-        using var http = new HttpClient(new Handler(_ => { requests++; return Task.FromResult(Json(error, HttpStatusCode.Conflict)); }));
+        using var http = UnifiedStamp.Client(new Handler(_ => { requests++; return Task.FromResult(Json(error, HttpStatusCode.Conflict)); }));
         using var transport = new TerminalCandidateHttpTransport(Options(), http);
         var actual = await Assert.ThrowsAsync<TansrHttpException>(() => transport.GetOutputStatusAsync(Session, Reference, default));
         Assert.Equal("commit_unknown", actual.Code); Assert.Equal("reconcile", actual.RetryAction); Assert.Equal(1, requests);
@@ -202,10 +203,10 @@ public sealed class TerminalCandidateHttpTransportTests
         var operation = ExecutionFixture.Operation();
         var reference = JsonSerializer.SerializeToElement(new { operationId = operation.GetProperty("operationId").GetString(), requestDigest = operation.GetProperty("digest").GetString() });
         var state = JsonSerializer.SerializeToElement(new { contract = "terminal-services-v1", session = Session, execution = ExecutionFixture.Status(operation, ExecutionFixture.Receipt(operation)) });
-        using var http = new HttpClient(new Handler(request =>
+        using var http = UnifiedStamp.Client(new Handler(request =>
         {
             Assert.Equal(HttpMethod.Get, request.Method);
-            Assert.Equal("/v3/terminal/executors/executor-1/operations/operation-1?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&sessionId=session-1&requestDigest=" + operation.GetProperty("digest").GetString() + "&connectionId=connection-1", request.RequestUri!.PathAndQuery);
+            Assert.Equal("/api/terminal/executors/executor-1/operations/operation-1?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&sessionId=session-1&requestDigest=" + operation.GetProperty("digest").GetString() + "&connectionId=connection-1", request.RequestUri!.PathAndQuery);
             Assert.False(request.Headers.Contains("Last-Event-ID")); return Task.FromResult(Json(state));
         }));
         using var transport = new TerminalCandidateHttpTransport(Options(), http);

@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 
@@ -43,8 +44,19 @@ internal sealed class TerminalControlClient
         return Uri.EscapeDataString(value);
     }
 
-    private static string Path(JsonElement session) => "/v3/terminal/sessions/" + Segment(TerminalJson.Text(session, "sessionId"));
-    private static string Query(JsonElement session) => "?contract=terminal-services-v1&sessionContract=" + Uri.EscapeDataString(TerminalJson.Text(session, "sessionContract"));
+    private static string Path(ApiOperation operation, JsonElement session, string? targetId = null)
+    {
+        var sessionId = TerminalJson.Text(session, "sessionId"); Segment(sessionId);
+        if (targetId is not null) Segment(targetId);
+        return operation.Path(id: sessionId, targetId: targetId);
+    }
+    private static string Query(ApiOperation operation, JsonElement session, params (string Name, string Value)[] extra)
+    {
+        var parameters = new (string, string)[extra.Length + 2];
+        parameters[0] = ("contract", TerminalCandidateContract.Protocol); parameters[1] = ("sessionContract", TerminalJson.Text(session, "sessionContract"));
+        Array.Copy(extra, 0, parameters, 2, extra.Length);
+        return operation.Query(parameters);
+    }
     private static void SameSession(JsonElement response, JsonElement session)
     {
         if (!TerminalJson.Equal(response.GetProperty("session"), session)) throw new TansrProtocolException("invalid_response");
@@ -53,7 +65,7 @@ internal sealed class TerminalControlClient
     internal async Task<JsonElement> ReadConfigurationAsync(JsonElement session, CancellationToken cancellationToken = default)
     {
         var selected = Session(session); var scope = Scope();
-        var value = await client.SendTerminalControlAsync(HttpMethod.Get, Path(selected) + "/configuration" + Query(selected), null,
+        var value = await client.SendTerminalControlAsync(HttpMethod.Get, Path(ApiRoutes.TerminalConfigurationRead, selected) + Query(ApiRoutes.TerminalConfigurationRead, selected), null,
             "ConfigurationResponse", scope, cancellationToken).ConfigureAwait(false);
         SameSession(value, selected); return value;
     }
@@ -98,7 +110,7 @@ internal sealed class TerminalControlClient
         if (operation is null) throw new ArgumentNullException(nameof(operation));
         CheckOwner(operation.Scope, Scope()); var request = operation.Request; var session = Session(request.GetProperty("session"));
         ValidateConfigurationRequest(request); cancellationToken.ThrowIfCancellationRequested(); operation.Begin(replay);
-        var value = await client.SendTerminalControlAsync(HttpMethod.Post, Path(session) + "/configuration", request,
+        var value = await client.SendTerminalControlAsync(HttpMethod.Post, Path(ApiRoutes.TerminalConfigurationCommit, session), request,
             "ConfigurationCommitResponse", operation.Scope, cancellationToken).ConfigureAwait(false);
         SameSession(value, session);
         var configuration = value.GetProperty("configuration"); var changes = request.GetProperty("changes");
@@ -113,7 +125,7 @@ internal sealed class TerminalControlClient
     internal async Task<JsonElement> ReadMemoryAsync(JsonElement session, CancellationToken cancellationToken = default)
     {
         var selected = Session(session); var scope = Scope();
-        var value = await client.SendTerminalControlAsync(HttpMethod.Get, Path(selected) + "/memory" + Query(selected), null,
+        var value = await client.SendTerminalControlAsync(HttpMethod.Get, Path(ApiRoutes.TerminalMemoryRead, selected) + Query(ApiRoutes.TerminalMemoryRead, selected), null,
             "MemoryStateResponse", scope, cancellationToken).ConfigureAwait(false);
         SameSession(value, selected); return value;
     }
@@ -163,7 +175,7 @@ internal sealed class TerminalControlClient
         if (operation is null) throw new ArgumentNullException(nameof(operation));
         CheckOwner(operation.Scope, Scope()); var request = operation.Request; var session = Session(request.GetProperty("session"));
         ValidateMemoryRequest(request); cancellationToken.ThrowIfCancellationRequested(); operation.Begin(replay);
-        var value = await client.SendTerminalControlAsync(HttpMethod.Post, Path(session) + "/memory/commands", request,
+        var value = await client.SendTerminalControlAsync(HttpMethod.Post, Path(ApiRoutes.TerminalMemoryCommand, session), request,
             "MemoryReceiptResponse", operation.Scope, cancellationToken).ConfigureAwait(false);
         ValidateMemoryResponse(value, request, false); return value;
     }
@@ -174,8 +186,8 @@ internal sealed class TerminalControlClient
     {
         if (operation is null) throw new ArgumentNullException(nameof(operation));
         CheckOwner(operation.Scope, Scope()); var request = operation.Request; var session = Session(request.GetProperty("session"));
-        var path = Path(session) + "/memory/commands/" + Segment(TerminalJson.Text(request, "operationId")) + Query(session) +
-            "&requestId=" + Uri.EscapeDataString(TerminalJson.Text(request, "requestId"));
+        var path = Path(ApiRoutes.TerminalMemoryReceipt, session, TerminalJson.Text(request, "operationId")) +
+            Query(ApiRoutes.TerminalMemoryReceipt, session, ("requestId", TerminalJson.Text(request, "requestId")));
         var value = await client.SendTerminalControlAsync(HttpMethod.Get, path, null, "MemoryReceiptResponse", operation.Scope, cancellationToken).ConfigureAwait(false);
         ValidateMemoryResponse(value, request, true); return value;
     }

@@ -4,6 +4,7 @@ using System.Text;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Storage;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -106,7 +107,7 @@ public sealed class SessionSnapshotPersistenceTests
         internal TaskCompletionSource<bool> ExportEntered = new(TaskCreationOptions.RunContinuationsAsynchronously), ExportRelease = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal static async Task<Fixture> CreateAsync()
         {
-            var f = new Fixture(); f._http = new(f, false);
+            var f = new Fixture(); f._http = UnifiedStamp.Client(f, false);
             f._client = new(new TansrClientOptions { BaseUri = new("https://serve.test"), TokenProvider = _ => Task.FromResult("synthetic") }, f._http);
             f.Session = await f._client.CreateSessionAsync(new()); f.Store = new(f.Current); return f;
         }
@@ -115,9 +116,9 @@ public sealed class SessionSnapshotPersistenceTests
         {
             var path = request.RequestUri!.AbsolutePath;
             HttpResponseMessage Json(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
-            if (path == "/v2/sessions") { SessionCreates++; return Json("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}"); }
-            if (path == "/v2/sessions/s") return Json("{\"sessionId\":\"s\",\"lastSeq\":0" + (SourceRequired ? ",\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"" : "") + "}");
-            if (request.Method == HttpMethod.Delete && path == "/v2/sessions/s/checkpoints/checkpoint")
+            if (path == "/api/sessions") { SessionCreates++; return Json("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}"); }
+            if (path == "/api/sessions/s") return Json("{\"sessionId\":\"s\",\"lastSeq\":0" + (SourceRequired ? ",\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"" : "") + "}");
+            if (request.Method == HttpMethod.Delete && path == "/api/sessions/s/checkpoints/checkpoint")
             {
                 CheckpointDeletes++; if (FailCheckpointDelete) throw new HttpRequestException("synthetic lost cleanup response");
                 return new(HttpStatusCode.NoContent);

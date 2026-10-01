@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Tests.Client;
@@ -11,7 +12,7 @@ public sealed class AdditionalRequestHeadersTests
     public async Task TrustedAdditionalCredentialIsCopiedAndDoesNotReplaceBearerOrPrincipal()
     {
         var headers = new Dictionary<string, string> { ["x-tansr-demo-user-token"] = "original-user-ticket" };
-        using var handler = new Handler(); using var http = new HttpClient(handler);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         var options = Options(); options.PrincipalProvider = () => "opaque-app/user"; options.AdditionalRequestHeaders = headers;
         using var client = new TansrClient(options, http);
         headers["x-tansr-demo-user-token"] = "another-user-ticket";
@@ -26,7 +27,7 @@ public sealed class AdditionalRequestHeadersTests
     [Fact]
     public async Task DefaultDoesNotIntroduceASecondAuthenticationProtocol()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         await client.CreateSessionAsync(new());
         Assert.DoesNotContain(handler.Headers.Keys, name => name.StartsWith("x-", StringComparison.OrdinalIgnoreCase));
     }
@@ -43,7 +44,7 @@ public sealed class AdditionalRequestHeadersTests
     [InlineData("x-user", "")]
     public void UnsafeHeadersFailBeforeAnyNetworkAndDoNotExposeCredential(string name, string value)
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         var options = Options(); options.AdditionalRequestHeaders = new Dictionary<string, string> { [name] = value };
         var error = Assert.Throws<ArgumentException>(() => new TansrClient(options, http));
         Assert.Equal("Invalid additional request headers. (Parameter 'AdditionalRequestHeaders')", error.Message);

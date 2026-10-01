@@ -4,8 +4,11 @@ using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 
@@ -29,6 +32,9 @@ internal sealed class SessionTransport : IDisposable
     private readonly Func<CancellationToken, Task<string>> tokens;
     private readonly Func<string>? principalProvider;
     private readonly IReadOnlyDictionary<string, string> additionalHeaders;
+    private readonly string sessionFamily;
+    private readonly bool negotiateEventEnvelope;
+    private static readonly ConditionalWeakTable<HttpResponseMessage, UnifiedResponseMeta> metadata = new ConditionalWeakTable<HttpResponseMessage, UnifiedResponseMeta>();
     private readonly object principalGate = new object();
     private string? principal;
     private bool principalBound;
@@ -49,6 +55,11 @@ internal sealed class SessionTransport : IDisposable
         tokens = options.TokenProvider ?? throw new ArgumentException("TokenProvider is required.", nameof(options));
         principalProvider = options.PrincipalProvider;
         additionalHeaders = RequestHeaderSnapshot.Copy(options.AdditionalRequestHeaders);
+        foreach (var header in additionalHeaders)
+            if (header.Key.StartsWith("tansr-", StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Unified tansr-* request headers are owned by the SDK; configure SessionContract / NegotiateEventEnvelope instead.", nameof(options));
+        sessionFamily = UnifiedHeaders.FamilyValue(options.SessionContract);
+        negotiateEventEnvelope = options.NegotiateEventEnvelope;
         if ((options.SessionContract == SessionContract.Sdk2OffloadV1 || options.ExecutionScopeProvider is not null) && principalProvider is null)
             throw new ArgumentException("SDK2 requires a trusted PrincipalProvider.", nameof(options));
         ownsClient = injected is null || ownsInjected;
@@ -111,27 +122,50 @@ internal sealed class SessionTransport : IDisposable
                 throw new TansrProtocolException("context_changed");
     }
 
+    /// <summary>Unified header facts of a response produced by <see cref="SendAsync"/>.</summary>
+    internal static UnifiedResponseMeta Meta(HttpResponseMessage response)
+    {
+        if (metadata.TryGetValue(response, out var meta)) return meta;
+        meta = UnifiedResponseMeta.Read(response);
+        metadata.Add(response, meta);
+        return meta;
+    }
+
+    /// <summary>Sends one request under the unified <c>/api</c> contract (UAPI-01). Paths outside <c>/api</c> are
+    /// rejected (D10: no legacy prefix). Every response must carry <c>tansr-contract: unified-v1</c> plus the other
+    /// three mandatory headers; otherwise <see cref="ContractUnavailableException"/> is raised and nothing is read.
+    /// <paramref name="closureId"/> sends <c>tansr-closure-id</c> for session-scoped guarded writes.</summary>
     internal async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, SessionAccess access,
-        byte[]? body, string accept, string? contentType, string? lastEventId, CancellationToken cancellationToken)
+        byte[]? body, string accept, string? contentType, string? lastEventId, CancellationToken cancellationToken, string? closureId = null)
     {
         AssertCurrent(access);
-        if (!path.StartsWith("/", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal) || path.IndexOf('\\') >= 0)
+        if (!path.StartsWith("/", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal) || path.IndexOf('\\') >= 0 || !ApiRoutes.IsApiPath(path))
             throw new TansrProtocolException("invalid_request");
         var target = new Uri(origin, path);
         if (!SameOrigin(target)) throw new TansrProtocolException("invalid_request");
+        bool streaming = string.Equals(accept, "text/event-stream", StringComparison.OrdinalIgnoreCase);
         using var request = new HttpRequestMessage(method, target);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access.Token);
         foreach (var header in additionalHeaders) request.Headers.Add(header.Key, header.Value);
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue(accept));
         request.Headers.CacheControl = new CacheControlHeaderValue { NoStore = true };
         if (lastEventId is not null) request.Headers.Add("Last-Event-ID", lastEventId);
+        // Session family is declared on every request; the facade validates it only on session/execution domains
+        // and ignores it elsewhere (手册 §16.4), so one value per client is the whole policy.
+        request.Headers.Add(UnifiedHeaders.SessionFamily, sessionFamily);
+        if (closureId is not null)
+        {
+            if (!UnifiedHeaders.Digest.IsMatch(closureId)) throw new TansrProtocolException("invalid_request");
+            request.Headers.Add(UnifiedHeaders.ClosureId, closureId);
+        }
+        if (streaming && negotiateEventEnvelope) request.Headers.Add(UnifiedHeaders.EventEnvelope, UnifiedHeaders.EventEnvelopeContract);
         if (body is not null)
         {
             request.Content = new ByteArrayContent(body);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue(contentType ?? "application/json");
         }
         HttpResponseMessage response;
-        var sender = string.Equals(accept, "text/event-stream", StringComparison.OrdinalIgnoreCase) ? streamingClient : client;
+        var sender = streaming ? streamingClient : client;
         try { response = await sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException) { throw new TansrProtocolException("network_error"); }
         try
@@ -144,9 +178,26 @@ internal sealed class SessionTransport : IDisposable
             if ((int)response.StatusCode >= 300 && (int)response.StatusCode < 400) throw new TansrProtocolException("redirect_rejected");
             foreach (var encoding in response.Content.Headers.ContentEncoding)
                 if (!encoding.Equals("identity", StringComparison.OrdinalIgnoreCase)) throw new TansrProtocolException("invalid_content_encoding");
+            // 纪律二:四个 tansr-* 头恒在(含错误响应与 SSE 首帧);缺失/异族 → contract_unavailable,绝不回退。
+            var meta = Meta(response);
+            if (streaming && negotiateEventEnvelope && response.IsSuccessStatusCode && !meta.EventEnvelopeNegotiated)
+                throw new EnvelopeNotNegotiatedException();
             return response;
         }
         catch { response.Dispose(); throw; }
+    }
+
+    /// <summary>True when SSE frames of this client are wrapped in the unified event envelope (negotiated per request and
+    /// echoed by the server; checked in <see cref="SendAsync"/>).</summary>
+    internal bool EventEnvelopeNegotiated(HttpResponseMessage response) => negotiateEventEnvelope && Meta(response).EventEnvelopeNegotiated;
+
+    /// <summary>Returns the family-native <c>data:</c> text of one SSE frame: when the unified envelope was negotiated the
+    /// frame is parsed strictly (D18 seven keys) and <c>raw</c> is returned verbatim; otherwise the text is unchanged.
+    /// Empty data (retry-only control frames) is never wrapped by the server and passes through.</summary>
+    internal string FrameData(HttpResponseMessage response, string data, int maximumBytes)
+    {
+        if (data.Length == 0 || !EventEnvelopeNegotiated(response)) return data;
+        return UnifiedEventEnvelope.Parse(System.Text.Encoding.UTF8.GetBytes(data), maximumBytes).RawText;
     }
 
     private bool SameOrigin(Uri other) => other.Scheme == origin.Scheme && other.Host == origin.Host && other.Port == origin.Port;
@@ -189,6 +240,9 @@ internal sealed class SessionTransport : IDisposable
     {
         ExpectContent(response, "application/json");
         var bytes = await ReadBodyAsync(response, maximum, cancellationToken).ConfigureAwait(false);
+        // 统一信封分支(UAPI-01):门面以普通 JSON.stringify 出线、不保证 canonical,先宽松解析识别 contract 键;
+        // 是信封 → UnifiedApiException / 畸形 → contract_unavailable;不是信封(archive-sync-v1 直通)才走族解码。
+        ThrowUnified(response, bytes);
         var json = strictControl ? SessionJson.Control(bytes, maximum) : SessionJson.Parse(bytes);
         if (strictControl && json.TryGetProperty("protocol", out _))
         {
@@ -217,6 +271,22 @@ internal sealed class SessionTransport : IDisposable
             { scope = SessionJson.Code(detail, "scope"); reason = SessionJson.Code(detail, "reason"); }
         }
         throw new TansrHttpException((int)response.StatusCode, code, scope, reason);
+    }
+
+    /// <summary>Shared by every family error decoder: throws when <paramref name="bytes"/> is a unified error envelope,
+    /// returns when the body carries no <c>contract</c> key. Non-JSON bodies on error responses are
+    /// <c>contract_unavailable</c>/<c>invalid_json</c> rather than a family decode failure.</summary>
+    /// <summary>Throws <see cref="UnifiedApiException"/> when the error body is a <c>unified-v1</c> envelope. Bodies that are
+    /// not JSON objects or carry another <c>contract</c> are left to the family decoder (passthrough), which applies its own
+    /// strict shape checks. The facade writes envelopes with plain <c>JSON.stringify</c>, so the parse here is lenient.</summary>
+    internal static void ThrowUnified(HttpResponseMessage response, byte[] bytes)
+    {
+        var meta = Meta(response);
+        JsonElement json;
+        try { json = WireJson.Parse(bytes, Math.Max(bytes.Length, 1), 64); }
+        catch (WireProtocolException) { return; }
+        if (json.ValueKind != JsonValueKind.Object) return;
+        UnifiedErrorEnvelope.TryThrow(response, json, meta);
     }
 
     public void Dispose()

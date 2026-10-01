@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Transport;
@@ -10,7 +11,7 @@ public sealed partial class TansrClient
 {
     internal async Task<JsonElement> ReadTerminalProfileAsync(string path, string definition, JsonElement originalScope, CancellationToken cancellationToken)
     {
-        if (!path.StartsWith("/v3/terminal-profile/sessions/", StringComparison.Ordinal) || path.IndexOf('#') >= 0 ||
+        if (!path.StartsWith(ApiRoutes.TerminalProfileCatalog.Root, StringComparison.Ordinal) || path.IndexOf('#') >= 0 ||
             path.IndexOf('\\') >= 0 || System.Text.Encoding.UTF8.GetByteCount(path) > 8192 || definition != "CatalogResponse" && definition != "UsageResponse")
             throw new TansrProtocolException("invalid_request");
         using var cancellation = RequestCancellation(cancellationToken);
@@ -26,6 +27,7 @@ public sealed partial class TansrClient
         var bytes = await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellation.Token).ConfigureAwait(false); Check();
         if (!response.IsSuccessStatusCode)
         {
+            SessionTransport.ThrowUnified(response, bytes);
             var error = TerminalProfileContract.Decode("ErrorResponse", bytes);
             if (error.GetProperty("status").GetInt32() != (int)response.StatusCode) throw new TansrProtocolException("invalid_response");
             throw new TansrHttpException((int)response.StatusCode, error.GetProperty("code").GetString()!, retryAction: error.GetProperty("retryAction").GetString());

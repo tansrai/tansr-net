@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -71,10 +72,10 @@ public sealed class TerminalControlClientTests
             foreach (var feature in caps["features"]!.AsArray())
             { feature!["supported"] = true; feature["installed"] = true; }
             Capabilities = TerminalTestAdapter.Element(caps);
-            http = new HttpClient(new Handler(async (request, ct) =>
+            http = UnifiedStamp.Client(new Handler(async (request, ct) =>
             {
                 Assert.Equal("synthetic-only-token", request.Headers.Authorization!.Parameter);
-                if (request.RequestUri!.AbsolutePath == "/v3/terminal/capabilities")
+                if (request.RequestUri!.AbsolutePath == "/api/capabilities/terminal")
                 { Discoveries++; return Response(Capabilities); }
                 JsonElement? body = request.Content is null ? null : WireJson.DecodeControl(await request.Content.ReadAsByteArrayAsync(ct));
                 Requests.Add((request.Method.Method, request.RequestUri!.PathAndQuery, body));
@@ -110,7 +111,7 @@ public sealed class TerminalControlClientTests
         Assert.Equal("9007199254740995", memory.GetProperty("memory").GetProperty("revision").GetString());
         Assert.False((await f.Control.SubmitMemoryAsync(op)).GetProperty("receipt").GetProperty("consumed").GetBoolean());
         await f.Control.QueryMemoryAsync(op);
-        var path = "/v3/terminal/sessions/" + Uri.EscapeDataString("旧会话/ ?#");
+        var path = "/api/terminal/sessions/" + Uri.EscapeDataString("旧会话/ ?#");
         Assert.Equal(new[]
         {
             "GET " + path + "/configuration?contract=terminal-services-v1&sessionContract=sdk1",

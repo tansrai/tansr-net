@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Transport;
@@ -47,44 +48,46 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
     }
     private void Guard(SessionAccess access, JsonElement expected)
     { transport.AssertCurrent(access); TerminalJson.Check(TerminalJson.Equal(expected, Scope()), "context_changed"); }
-    private static string Escape(string value) => Uri.EscapeDataString(value);
     private static string Decimal(long value)
     { if (value < 0) throw new ArgumentOutOfRangeException(nameof(value)); return value.ToString(CultureInfo.InvariantCulture); }
-    private static string SessionPath(JsonElement session, string action)
+    private static (string Name, string Value)[] Family(JsonElement session, params (string Name, string Value)[] extra)
+    {
+        var parameters = new (string, string)[extra.Length + 2];
+        parameters[0] = ("contract", TerminalCandidateContract.Protocol); parameters[1] = ("sessionContract", TerminalJson.Text(session, "sessionContract"));
+        Array.Copy(extra, 0, parameters, 2, extra.Length);
+        return parameters;
+    }
+    private static string OutputPath(JsonElement session, JsonElement operation, ApiOperation route, params (string Name, string Value)[] extra)
     {
         TerminalCandidateContract.Validate("SessionReference", session);
-        return "/v3/terminal/sessions/" + Escape(TerminalJson.Text(session, "sessionId")) + "/" + action +
-            "?contract=terminal-services-v1&sessionContract=" + Escape(TerminalJson.Text(session, "sessionContract"));
-    }
-    private static string OutputPath(JsonElement session, JsonElement operation, string action)
-    {
         TerminalCandidateContract.Validate("OperationReference", operation);
-        return SessionPath(session, action) + "&operationId=" + Escape(TerminalJson.Text(operation, "operationId")) +
-            "&requestDigest=" + Escape(TerminalJson.Text(operation, "requestDigest"));
+        var query = new (string, string)[extra.Length + 2];
+        query[0] = ("operationId", TerminalJson.Text(operation, "operationId")); query[1] = ("requestDigest", TerminalJson.Text(operation, "requestDigest"));
+        Array.Copy(extra, 0, query, 2, extra.Length);
+        return route.Path(id: TerminalJson.Text(session, "sessionId")) + route.Query(Family(session, query));
     }
     public Task<JsonElement> GetCapabilitiesAsync(CancellationToken cancellationToken) => ControlAsync(HttpMethod.Get,
-        "/v3/terminal/capabilities?contract=terminal-services-v1", null, "CapabilitiesResponse", cancellationToken);
+        ApiRoutes.TerminalCapabilities.Path() + ApiRoutes.TerminalCapabilities.Query(("contract", TerminalCandidateContract.Protocol)), null, "CapabilitiesResponse", cancellationToken);
     public Task<JsonElement> BindAsync(JsonElement request, CancellationToken cancellationToken)
     {
         TerminalCandidateContract.Validate("BindingRequest", request);
-        return ControlAsync(HttpMethod.Post, "/v3/terminal/bindings", request, "BindingResponse", cancellationToken);
+        return ControlAsync(HttpMethod.Post, ApiRoutes.TerminalBindingCreate.Path(), request, "BindingResponse", cancellationToken);
     }
     public Task<JsonElement> SendBatchAsync(JsonElement request, CancellationToken cancellationToken)
     {
         TerminalCandidateContract.Validate("OutputBatchRequest", request);
-        return ControlAsync(HttpMethod.Post, "/v3/terminal/executors/" + Escape(TerminalJson.Text(request, "executorId")) +
-            "/output-batches", request, "OutputStatus", cancellationToken);
+        return ControlAsync(HttpMethod.Post, ApiRoutes.TerminalOutputBatch.Path(id: TerminalJson.Text(request, "executorId")), request, "OutputStatus", cancellationToken);
     }
     public Task<JsonElement> GetOutputStatusAsync(JsonElement session, JsonElement operation, CancellationToken cancellationToken) =>
-        ControlAsync(HttpMethod.Get, OutputPath(session, operation, "tool-output-status"), null, "OutputStatus", cancellationToken);
+        ControlAsync(HttpMethod.Get, OutputPath(session, operation, ApiRoutes.TerminalOutputStatus), null, "OutputStatus", cancellationToken);
     public Task<JsonElement> GetExecutionStateAsync(JsonElement session, JsonElement operation, string executorId, string connectionId, CancellationToken cancellationToken)
     {
         TerminalCandidateContract.Validate("SessionReference", session); TerminalCandidateContract.Validate("OperationReference", operation);
         var ids = TerminalJson.Object(w => { w.WriteString("executorId", executorId); w.WriteString("connectionId", connectionId); });
         TerminalCandidateContract.Validate("Id", ids.GetProperty("executorId")); TerminalCandidateContract.Validate("Id", ids.GetProperty("connectionId"));
-        var path = "/v3/terminal/executors/" + Escape(executorId) + "/operations/" + Escape(TerminalJson.Text(operation, "operationId")) +
-            "?contract=terminal-services-v1&sessionContract=" + Escape(TerminalJson.Text(session, "sessionContract")) +
-            "&sessionId=" + Escape(TerminalJson.Text(session, "sessionId")) + "&requestDigest=" + Escape(TerminalJson.Text(operation, "requestDigest")) + "&connectionId=" + Escape(connectionId);
+        var path = ApiRoutes.TerminalExecutionState.Path(id: executorId, targetId: TerminalJson.Text(operation, "operationId")) +
+            ApiRoutes.TerminalExecutionState.Query(Family(session, ("sessionId", TerminalJson.Text(session, "sessionId")),
+                ("requestDigest", TerminalJson.Text(operation, "requestDigest")), ("connectionId", connectionId)));
         return ControlAsync(HttpMethod.Get, path, null, "ExecutionState", cancellationToken);
     }
 
@@ -104,6 +107,7 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
     }
     private static void ThrowHttp(HttpResponseMessage response, byte[] body)
     {
+        SessionTransport.ThrowUnified(response, body);
         var error = TerminalCandidateContract.Decode("ErrorResponse", body);
         TerminalJson.Check(error.GetProperty("status").GetInt32() == (int)response.StatusCode, "invalid_response");
         throw new TansrHttpException((int)response.StatusCode, TerminalJson.Text(error, "code"), retryAction: TerminalJson.Text(error, "retryAction"));
@@ -115,7 +119,9 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
         Func<JsonElement, CancellationToken, Task> observer, CancellationToken cancellationToken)
     {
         operation = operation.Clone();
-        var path = OutputPath(session, operation, "tool-output") + (afterSequence.HasValue ? "&afterSeq=" + Decimal(afterSequence.Value) : "");
+        var path = afterSequence.HasValue
+            ? OutputPath(session, operation, ApiRoutes.TerminalOutputObserve, ("afterSeq", Decimal(afterSequence.Value)))
+            : OutputPath(session, operation, ApiRoutes.TerminalOutputObserve);
         return ObserveAsync(path, null, "OutputEvent", value =>
         {
             var actual = TerminalJson.Text(value, "type") == "output.block" ? value.GetProperty("operation") : value.GetProperty("status").GetProperty("operation");
@@ -130,7 +136,8 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
         TerminalCandidateContract.Validate("SessionContract", identity.GetProperty("family"));
         TerminalCandidateContract.Validate("Id", identity.GetProperty("executorId"));
         TerminalCandidateContract.Validate("Id", identity.GetProperty("connectionId"));
-        var path = "/v3/terminal/executors/" + Escape(executorId) + "/events?contract=terminal-services-v1&sessionContract=" + Escape(sessionContract) + "&connectionId=" + Escape(connectionId);
+        var path = ApiRoutes.TerminalExecutorEventsObserve.Path(id: executorId) + ApiRoutes.TerminalExecutorEventsObserve.Query(
+            ("contract", TerminalCandidateContract.Protocol), ("sessionContract", sessionContract), ("connectionId", connectionId));
         return ObserveAsync(path, lastEventId.HasValue ? Decimal(lastEventId.Value) : null, "ExecutorEvent", value =>
             TerminalJson.Check(TerminalJson.Text(value, "executorId") == executorId && TerminalJson.Text(value, "connectionId") == connectionId, "binding_conflict"), observer, cancellationToken);
     }
@@ -173,7 +180,7 @@ internal sealed class TerminalCandidateHttpTransport : ITerminalCandidateTranspo
                 // Serve starts the stream with a retry-only, empty-data control frame. It has
                 // no event identity; a named or identified empty frame remains invalid JSON.
                 if (frame.Name == null && frame.Id == null && frame.Data.Length == 0) continue;
-                var value = TerminalCandidateContract.Decode(definition, Encoding.UTF8.GetBytes(frame.Data));
+                var value = TerminalCandidateContract.Decode(definition, Encoding.UTF8.GetBytes(transport.FrameData(response, frame.Data, Maximum)));
                 TerminalJson.Check(frame.Name == TerminalJson.Text(value, "type"), "invalid_response");
                 TerminalJson.Check(definition == "OutputEvent" ? frame.Id == null : frame.Id == TerminalJson.Text(value, "eventId"), "invalid_event_id");
                 validateIdentity(value); Guard(access, scope); connection.Token.ThrowIfCancellationRequested();

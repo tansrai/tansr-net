@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 
 namespace Tansr.Sdk.Cache;
@@ -67,6 +68,8 @@ public sealed class CacheContinuityClient
     {
         try { return await operation().ConfigureAwait(false); }
         catch (CacheHttpException error) { throw new CacheContinuityException(error.StatusCode, error.Code, error.RetryAction, error.Fallback); }
+        // UAPI-01 统一信封:原族码/状态/retryAction 与 fallback 自 detail 读取;统一层本身不含 fallback。
+        catch (UnifiedApiException error) { throw new CacheContinuityException(error.DomainStatus, error.DomainCode, error.DomainRetryAction ?? error.RetryAction ?? "none", error.Fallback ?? "none"); }
     }
 }
 

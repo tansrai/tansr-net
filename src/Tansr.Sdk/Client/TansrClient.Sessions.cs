@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Terminal;
@@ -15,7 +16,7 @@ public sealed partial class TansrClient
 {
     internal async Task<JsonElement> ReadTerminalObservationAsync(string path, string definition, JsonElement originalScope, CancellationToken cancellationToken)
     {
-        if (!path.StartsWith("/v3/terminal-observation/sessions/", StringComparison.Ordinal) || path.IndexOf('#') >= 0 ||
+        if (!path.StartsWith(ApiRoutes.TerminalObservationResources.Root, StringComparison.Ordinal) || path.IndexOf('#') >= 0 ||
             path.IndexOf('\\') >= 0 || System.Text.Encoding.UTF8.GetByteCount(path) > 8192 || definition != "ResourcesResponse" && definition != "CorrelationsResponse")
             throw new TansrProtocolException("invalid_request");
         using var cancellation = RequestCancellation(cancellationToken);
@@ -31,6 +32,7 @@ public sealed partial class TansrClient
         var bytes = await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellation.Token).ConfigureAwait(false); Check();
         if (!response.IsSuccessStatusCode)
         {
+            SessionTransport.ThrowUnified(response, bytes);
             var error = TerminalObservationContract.Decode("ErrorResponse", bytes);
             if (error.GetProperty("status").GetInt32() != (int)response.StatusCode) throw new TansrProtocolException("invalid_response");
             throw new TansrHttpException((int)response.StatusCode, error.GetProperty("code").GetString()!, retryAction: error.GetProperty("retryAction").GetString());
@@ -46,7 +48,7 @@ public sealed partial class TansrClient
         using var cancellation = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(HttpMethod.Delete, Route(path), access, null,
+        using var response = await transport.SendAsync(HttpMethod.Delete, path, access, null,
             "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
             await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);

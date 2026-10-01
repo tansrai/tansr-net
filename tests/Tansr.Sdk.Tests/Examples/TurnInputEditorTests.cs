@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Examples;
 
@@ -20,7 +21,7 @@ public sealed class TurnInputEditorTests
             var body = request.Content == null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
             var path = request.RequestUri!.PathAndQuery;
             Requests.Add((request.Method.Method, path, body));
-            if (path == "/v2/sessions") return Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}");
+            if (path == "/api/sessions") return Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}");
             if (path.EndsWith("/input-capabilities", StringComparison.Ordinal)) return Json(Capabilities);
             if (request.Method == HttpMethod.Get)
             {
@@ -47,7 +48,7 @@ public sealed class TurnInputEditorTests
     [Fact]
     public async Task UnknownRetainsFullOriginalBeforePostAndCannotBecomeANewTurn()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new CreateSessionOptions());
         TurnInputRecord? saved = null; var text = string.Concat(Enumerable.Repeat("完整长文🙂\n", 9000));
         handler.Input = body => { Assert.NotNull(saved); Assert.Equal(text, saved.Text); throw new HttpRequestException("synthetic drop"); };
@@ -69,7 +70,7 @@ public sealed class TurnInputEditorTests
     [Fact]
     public async Task PersistenceFailurePreventsAnyInputPost()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var editor = new TurnInputEditor(await client.CreateSessionAsync(new CreateSessionOptions()), null, _ => throw new IOException("disk full"));
         await Assert.ThrowsAsync<IOException>(() => editor.InsertAsync("完整正文"));
         Assert.DoesNotContain(handler.Requests, x => x.Path.EndsWith("/inputs", StringComparison.Ordinal));
@@ -78,13 +79,13 @@ public sealed class TurnInputEditorTests
     [Fact]
     public async Task MissingOriginalReceiptKeepsUnknownAndOriginalTarget()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         handler.Status = Json("{\"outcome\":\"rejected\",\"code\":\"input_not_found\"}", HttpStatusCode.NotFound);
         var saved = new TurnInputRecord("s", "original", "old-epoch", "old-turn", "original body", "unconfirmed", null);
         var editor = new TurnInputEditor(await client.CreateSessionAsync(new CreateSessionOptions()), saved, record => saved = record);
         var status = await editor.QueryAsync();
         Assert.Contains("不能推断未执行", status); Assert.Equal("not_found", saved.Outcome);
-        Assert.Contains(handler.Requests, x => x.Path == "/v2/sessions/s/inputs/original?historyEpoch=old-epoch&turnId=old-turn");
+        Assert.Contains(handler.Requests, x => x.Path == "/api/sessions/s/inputs/original?historyEpoch=old-epoch&turnId=old-turn");
         Assert.DoesNotContain(handler.Requests, x => x.Path.Contains("capabilities", StringComparison.Ordinal));
         await Assert.ThrowsAsync<InvalidOperationException>(() => editor.InsertAsync("new"));
     }
@@ -93,7 +94,7 @@ public sealed class TurnInputEditorTests
     public async Task InactiveTurnIsAnExplicitFailureWithoutSendingOrRebuilding()
     {
         using var handler = new Handler { Capabilities = "{\"text\":true,\"memoryAck\":true,\"target\":null}" };
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var editor = new TurnInputEditor(await client.CreateSessionAsync(new CreateSessionOptions()), null, _ => throw new InvalidOperationException("should not persist"));
         var error = await Assert.ThrowsAsync<InvalidOperationException>(() => editor.InsertAsync("same turn"));
         Assert.Equal("no_active_turn_for_insertion", error.Message);
@@ -107,7 +108,7 @@ public sealed class TurnInputEditorTests
     public async Task RestoredUnknownClosedRetryDoesNotEraseOriginalUncertainty(string previousOutcome)
     {
         using var handler = new Handler { Input = _ => Json("{\"outcome\":\"closed\",\"code\":\"epoch_mismatch\"}", HttpStatusCode.Conflict) };
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var saved = new TurnInputRecord("s", "original", "old-epoch", "old-turn", "original full body", previousOutcome, null);
         var editor = new TurnInputEditor(await client.CreateSessionAsync(new CreateSessionOptions()), saved, record => saved = record);
         await Assert.ThrowsAsync<TansrHttpException>(() => editor.RetryOriginalAsync());
@@ -121,12 +122,12 @@ public sealed class TurnInputEditorTests
     [Fact]
     public async Task QueryOnlyAcceptsReceiptForTheSavedIdentityAndOriginalTarget()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var saved = new TurnInputRecord("s", "original", "old-epoch", "old-turn", "original body", "unconfirmed", null);
         var editor = new TurnInputEditor(await client.CreateSessionAsync(new CreateSessionOptions()), saved, record => saved = record);
         await editor.QueryAsync();
         Assert.Equal("accepted", saved.Outcome); Assert.Contains("consumed", saved.ReceiptJson);
-        Assert.Single(handler.Requests, x => x.Path == "/v2/sessions/s/inputs/original?historyEpoch=old-epoch&turnId=old-turn");
+        Assert.Single(handler.Requests, x => x.Path == "/api/sessions/s/inputs/original?historyEpoch=old-epoch&turnId=old-turn");
         Assert.DoesNotContain(handler.Requests, x => x.Path.Contains("capabilities", StringComparison.Ordinal));
     }
 }

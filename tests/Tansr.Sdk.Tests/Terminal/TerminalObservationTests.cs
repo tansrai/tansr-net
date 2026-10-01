@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -42,9 +43,9 @@ public sealed class TerminalObservationTests
     [Fact]
     public async Task BorrowedClientRetainsItsOriginalTransportAndRemainsUsableAfterFacadeDisposal()
     {
-        using var handler = new Handler((request, _, _) => Task.FromResult(Json(request.RequestUri!.AbsolutePath.StartsWith("/v2/", StringComparison.Ordinal)
+        using var handler = new Handler((request, _, _) => Task.FromResult(Json(request.RequestUri!.AbsolutePath == "/api/sessions"
             ? JsonSerializer.SerializeToElement(new { sessions = Array.Empty<object>(), total = 0 }) : Resource("active"))));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         using (var observation = new TerminalObservationClient(client, true)) Assert.Equal(TerminalResourceState.Active, (await observation.ReadResourcesAsync("session-1")).State);
         Assert.Equal(0, (await client.ListSessionsAsync()).GetProperty("total").GetInt32()); Assert.Equal(2, handler.Calls);
     }
@@ -55,10 +56,10 @@ public sealed class TerminalObservationTests
         using var handler = new Handler((request, count, _) =>
         {
             Assert.Equal(HttpMethod.Get, request.Method); Assert.Null(request.Content); Assert.Equal("controller-only", request.Headers.Authorization!.Parameter);
-            Assert.Equal("/v3/terminal-observation/sessions/session-1/resources?contract=terminal-observation-v1&sessionContract=sdk1", request.RequestUri!.PathAndQuery);
+            Assert.Equal("/api/terminal/observation/sessions/session-1/resources?contract=terminal-observation-v1&sessionContract=sdk1", request.RequestUri!.PathAndQuery);
             return Task.FromResult(Json(Resource(count == 1 ? "accepted" : count == 2 ? "draining" : "completed")));
         });
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         var result = await client.WaitForResourcesAsync("session-1", TimeSpan.FromSeconds(2), pollInterval: TimeSpan.FromMilliseconds(10));
         Assert.True(result.Completed); Assert.Equal(9007199254740993L, result.EpochStartSequence); Assert.Equal(3, handler.Calls);
     }
@@ -68,7 +69,7 @@ public sealed class TerminalObservationTests
     public async Task FailedAndUnavailableResourceEvidenceCannotBeReportedAsSuccessfulDrain(string state, string error)
     {
         using var handler = new Handler((_, _, _) => Task.FromResult(Json(Resource(state, error: error))));
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         var failure = await Assert.ThrowsAsync<TerminalResourceSettlementException>(() => client.WaitForResourcesAsync("session-1", TimeSpan.FromSeconds(1)));
         Assert.False(failure.Observation.Completed); Assert.Equal(error, failure.Observation.ErrorCode); Assert.Equal(1, handler.Calls);
     }
@@ -76,7 +77,7 @@ public sealed class TerminalObservationTests
     public async Task BoundedWaitTimesOutWithoutSendingCloseOrCancellingRemoteResources()
     {
         using var handler = new Handler((request, _, _) => { Assert.Equal(HttpMethod.Get, request.Method); return Task.FromResult(Json(Resource("draining"))); });
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         await Assert.ThrowsAsync<TimeoutException>(() => client.WaitForResourcesAsync("session-1", TimeSpan.FromMilliseconds(60), pollInterval: TimeSpan.FromMilliseconds(10)));
         Assert.True(handler.Calls >= 1);
         Assert.Equal(TerminalResourceState.Draining, (await client.ReadResourcesAsync("session-1")).State);
@@ -86,7 +87,7 @@ public sealed class TerminalObservationTests
     {
         using var entered = new CancellationTokenSource();
         using var handler = new Handler(async (_, _, ct) => { entered.Cancel(); await Task.Delay(Timeout.Infinite, ct); throw new InvalidOperationException(); });
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.WaitForResourcesAsync("session-1", TimeSpan.FromSeconds(2), cancellationToken: entered.Token));
         Assert.Equal(1, handler.Calls);
     }
@@ -94,7 +95,7 @@ public sealed class TerminalObservationTests
     public async Task ANewRuntimeEpochCannotFulfillTheOriginalWait()
     {
         using var handler = new Handler((_, count, _) => Task.FromResult(Json(Resource(count == 1 ? "draining" : "completed", epoch: count.ToString()))));
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         Assert.Equal("stale_generation", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.WaitForResourcesAsync("session-1", TimeSpan.FromSeconds(2), pollInterval: TimeSpan.FromMilliseconds(10)))).Code);
         Assert.Equal(2, handler.Calls);
     }
@@ -102,7 +103,7 @@ public sealed class TerminalObservationTests
     public async Task AuthorityChangesDuringTheReadRejectEvenAnOtherwiseValidCompletedResponse()
     {
         var scope = ExecutionFixture.Scope(); using var handler = new Handler((_, _, _) => { scope = ExecutionFixture.Scope(revision: "2"); return Task.FromResult(Json(Resource("completed"))); });
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(() => scope), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(() => scope), true, http);
         Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.ReadResourcesAsync("session-1"))).Code); Assert.Equal(1, handler.Calls);
     }
     [Theory]
@@ -127,14 +128,14 @@ public sealed class TerminalObservationTests
             correlations = attack == "duplicate-operation" ? new[] { item, item } : new[] { item },
             truncated = false
         }))));
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         Assert.Equal("integrity_mismatch", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.ReadOutputCorrelationsAsync("session-1", toolCallId: "call-1"))).Code);
     }
     [Fact]
     public async Task StructuredAuthorityErrorsArePreservedWithoutRetryOrLegacyFallback()
     {
         using var handler = new Handler((_, _, _) => Task.FromResult(Json(JsonSerializer.SerializeToElement(new { contract = "terminal-observation-v1", requestId = "req-1", code = "forbidden", status = 403, retryAction = "none" }), HttpStatusCode.Forbidden)));
-        using var http = new HttpClient(handler); using var client = new TerminalObservationClient(Options(), true, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TerminalObservationClient(Options(), true, http);
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => client.ReadResourcesAsync("session-1")); Assert.Equal(403, error.StatusCode); Assert.Equal("forbidden", error.Code); Assert.Equal("none", error.RetryAction); Assert.Equal(1, handler.Calls);
     }
     private static JsonElement Resource(string state, string epoch = "9007199254740993", string? error = null) => JsonSerializer.SerializeToElement(new

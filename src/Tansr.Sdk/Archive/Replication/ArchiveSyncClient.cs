@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
@@ -131,13 +132,18 @@ public sealed class ArchiveSyncClient : IReplicaArchiveStore, IDisposable
         try
         {
             var access = await _transport.AccessAsync(cancel.Token).ConfigureAwait(false); Check(authority, poison, cancel.Token);
-            using var response = await _transport.SendAsync(HttpMethod.Post, "/v3/sdk2/archive-sync/" + Uri.EscapeDataString(A.String(_identity, "bindingId")), access, WireJson.EncodeControl(body, maximum + 65536), "application/json", null, null, cancel.Token).ConfigureAwait(false); Check(authority, poison, cancel.Token);
-            SessionTransport.ExpectContent(response, "application/json"); var decoded = WireJson.DecodeControl(await SessionTransport.ReadBodyAsync(response, 1638400, cancel.Token).ConfigureAwait(false), 1638400); Check(authority, poison, cancel.Token);
+            using var response = await _transport.SendAsync(HttpMethod.Post, ApiRoutes.ArchiveSync.Path(id: A.String(_identity, "bindingId")), access, WireJson.EncodeControl(body, maximum + 65536), "application/json", null, null, cancel.Token).ConfigureAwait(false); Check(authority, poison, cancel.Token);
+            SessionTransport.ExpectContent(response, "application/json"); var raw = await SessionTransport.ReadBodyAsync(response, 1638400, cancel.Token).ConfigureAwait(false);
+            // archive-sync-v1 族错误经门面直通(RFC-UAPI-1 §2.4 不包装);门面自有错误(401/404/412/503)仍是统一信封。
+            if (!response.IsSuccessStatusCode) SessionTransport.ThrowUnified(response, raw);
+            var decoded = WireJson.DecodeControl(raw, 1638400); Check(authority, poison, cancel.Token);
             S.Fields(decoded, "format", "identity", "method", response.IsSuccessStatusCode ? "value" : "error"); A.Need(A.String(decoded, "format") == "archive-sync-v1" && A.String(decoded, "method") == method && S.Equal(decoded.GetProperty("identity"), _identity), "identity_mismatch");
             if (!response.IsSuccessStatusCode) { var error = decoded.GetProperty("error"); S.Fields(error, "code"); string code = A.String(error, "code"); var codes = new[] { "invalid_input", "identity_mismatch", "integrity_mismatch", "capacity_exceeded", "pending_ack", "receipt_mismatch", "context_changed", "reentrant", "closed", "storage_error", "reconciliation_required" }; throw new StorageException(codes.Contains(code) ? code : "storage_error"); }
             return decoded.GetProperty("value").Clone();
         }
         catch (StorageException) { throw; }
+        catch (UnifiedApiException) { throw; }
+        catch (ContractUnavailableException) { throw; }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { if (Interlocked.Read(ref _poison) != poison) throw new StorageException("reentrant"); throw new StorageException("reconciliation_required"); }
     }

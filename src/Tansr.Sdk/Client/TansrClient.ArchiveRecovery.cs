@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Archive;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Transport;
@@ -18,7 +19,7 @@ public sealed partial class TansrClient
         using var cancellation = RequestCancellation(cancellationToken); var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
         void Check() { cancellation.Token.ThrowIfCancellationRequested(); transport.AssertCurrent(access); if (expectedScope != WireJson.CanonicalString(ReadExecutionScope())) throw new TansrProtocolException("context_changed"); }
         Check(); await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false); Check();
-        using var response = await transport.SendAsync(HttpMethod.Post, "/v3/sdk2/bindings/" + Uri.EscapeDataString(bindingId) + "/archive/ack-rebases", access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        using var response = await transport.SendAsync(HttpMethod.Post, ApiRoutes.ArchiveAckRebase.Path(id: bindingId), access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         Check();
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, WireJson.MaximumControlBytes, cancellation.Token, true).ConfigureAwait(false);
         if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");

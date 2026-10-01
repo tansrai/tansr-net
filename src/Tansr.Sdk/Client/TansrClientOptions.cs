@@ -22,6 +22,9 @@ public sealed class TansrClientOptions
     public Func<JsonElement>? ExecutionScopeProvider { get; set; }
     public bool AllowInsecureLoopback { get; set; }
     public SessionContract SessionContract { get; set; }
+    /// <summary>UAPI-01:在 SSE 请求上携带 <c>tansr-event-envelope: unified-v1</c> 协商统一事件包络;服务端须以同名响应头回响,
+    /// 否则抛 <c>EnvelopeNotNegotiatedException</c>。缺省关闭(各族原帧字节不变)。</summary>
+    public bool NegotiateEventEnvelope { get; set; }
     public TimeSpan RequestTimeout { get; set; } = TimeSpan.FromSeconds(60);
     public TimeSpan StreamIdleTimeout { get; set; } = TimeSpan.FromSeconds(90);
     public int MaxResponseBytes { get; set; } = 2 * 1024 * 1024;

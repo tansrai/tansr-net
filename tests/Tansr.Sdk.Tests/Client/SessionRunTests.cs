@@ -4,6 +4,7 @@ using System.Text;
 using System.Threading.Channels;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -53,8 +54,8 @@ public sealed class SessionRunTests
         {
             var path = request.RequestUri!.PathAndQuery;
             lock (Paths) Paths.Add(request.Method + " " + path);
-            if (request.Method == HttpMethod.Post && path == "/v2/sessions") return Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}");
-            if (path == "/v2/sessions/s/events")
+            if (request.Method == HttpMethod.Post && path == "/api/sessions") return Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}");
+            if (path == "/api/sessions/s/events")
             {
                 Connections++;
                 Cursors.Add(request.Headers.TryGetValues("Last-Event-ID", out var ids) ? ids.Single() : null);
@@ -64,13 +65,13 @@ public sealed class SessionRunTests
                     { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } }
                 };
             }
-            if (request.Method == HttpMethod.Get && path == "/v2/sessions/s")
+            if (request.Method == HttpMethod.Get && path == "/api/sessions/s")
             {
                 Reads++;
                 return Json("{\"sessionId\":\"s\",\"endUserId\":\"user\",\"status\":\"" + Status + "\",\"live\":true,\"lastSeq\":" +
                     (ChangeAfterListen && Reads > 1 ? "0" : "-1") + ",\"createdAt\":\"2026-09-26T00:00:00Z\",\"lastActivityAt\":\"2026-09-26T00:00:00Z\"}");
             }
-            if (request.Method == HttpMethod.Post && path == "/v2/sessions/s/messages")
+            if (request.Method == HttpMethod.Post && path == "/api/sessions/s/messages")
             {
                 Assert.True(Connections > 0); Sends++; Sent.TrySetResult(true);
                 return OnSend is null ? Accepted() : await OnSend(ct);
@@ -97,7 +98,7 @@ public sealed class SessionRunTests
         using var handler = new Handler(); var releaseAck = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var terminalSeen = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         handler.OnSend = async ct => { handler.Events.Push(Frame(0, "turn.started") + Completed()); await releaseAck.Task.WaitAsync(ct); return Accepted(); };
-        using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
         using var run = session.StartRun("once", observer: (item, _) => { if (item.Name == "turn.completed") terminalSeen.TrySetResult(true); return Task.CompletedTask; });
         await terminalSeen.Task.WaitAsync(Deadline);
         Assert.False(run.Acceptance.IsCompleted); Assert.False(run.Completion.IsCompleted); Assert.Equal(SessionMessageAcceptance.Unconfirmed, run.AcceptanceState);
@@ -105,13 +106,13 @@ public sealed class SessionRunTests
         var result = await run.Completion.WaitAsync(Deadline);
         Assert.Equal("turn-1", result.TurnId); Assert.False(result.WasAborted); Assert.Equal("completed", result.Reason);
         Assert.Equal(SessionMessageAcceptance.Accepted, run.AcceptanceState); Assert.Equal(1, handler.Sends);
-        Assert.Equal(new[] { "POST /v2/sessions", "GET /v2/sessions/s", "GET /v2/sessions/s/events", "GET /v2/sessions/s", "POST /v2/sessions/s/messages" }, handler.Paths);
+        Assert.Equal(new[] { "POST /api/sessions", "GET /api/sessions/s", "GET /api/sessions/s/events", "GET /api/sessions/s", "POST /api/sessions/s/messages" }, handler.Paths);
     }
 
     [Fact]
     public async Task AcceptanceAloneIsNotTurnCompletionAndExplicitAbortKeepsItsReason()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = CreateClient(http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
         var session = await client.CreateSessionAsync(new()); using var run = session.StartRun("work");
         await run.Acceptance.WaitAsync(Deadline); Assert.False(run.Completion.IsCompleted);
         handler.Events.Push(Frame(0, "turn.started") + Frame(1, "turn.aborted", extra: ",\"reason\":\"budget_exceeded\""));
@@ -122,7 +123,7 @@ public sealed class SessionRunTests
     [Fact]
     public async Task CancellationAfterAcceptanceNeverPostsInterruptOrRepeatsInput()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = CreateClient(http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
         var session = await client.CreateSessionAsync(new()); using var run = session.StartRun("work");
         await run.Acceptance.WaitAsync(Deadline); run.CancelObservation();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => run.Completion.WaitAsync(Deadline));
@@ -134,7 +135,7 @@ public sealed class SessionRunTests
     public async Task LostPostResponseIsUnconfirmedAndNeverAutomaticallyRetried()
     {
         using var handler = new Handler { OnSend = _ => throw new HttpRequestException("lost fixture response") };
-        using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
         using var run = session.StartRun("side effect");
         Assert.Equal("network_error", (await Assert.ThrowsAsync<TansrProtocolException>(() => run.Completion.WaitAsync(Deadline))).Code);
         Assert.Equal(SessionMessageAcceptance.Unconfirmed, run.AcceptanceState); Assert.Equal(1, handler.Sends);
@@ -146,7 +147,7 @@ public sealed class SessionRunTests
     public async Task ExistingOrInterveningWorkPreventsSending(string status, bool changed, string code)
     {
         using var handler = new Handler { Status = status, ChangeAfterListen = changed };
-        using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
         using var run = session.StartRun("must not send");
         Assert.Equal(code, (await Assert.ThrowsAsync<TansrProtocolException>(() => run.Completion.WaitAsync(Deadline))).Code);
         Assert.Equal(SessionMessageAcceptance.NotSent, run.AcceptanceState); Assert.Equal(0, handler.Sends);
@@ -155,7 +156,7 @@ public sealed class SessionRunTests
     [Fact]
     public async Task SameClientAliasesCannotStartCompetingRunsOrOrdinaryMessages()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = CreateClient(http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
         var session = await client.CreateSessionAsync(new()); var alias = await client.GetSessionAsync("s"); using var run = session.StartRun("first");
         await run.Acceptance.WaitAsync(Deadline);
         Assert.Equal("run_already_active", Assert.Throws<TansrProtocolException>(() => alias.StartRun("second")).Code);
@@ -170,7 +171,7 @@ public sealed class SessionRunTests
     [InlineData("gap")]
     public async Task AmbiguousOrMissingTerminalEvidenceNeverReportsCompletion(string scenario)
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
         using var run = session.StartRun("work"); await run.Acceptance.WaitAsync(Deadline);
         handler.Events.Push(scenario switch
         {
@@ -186,7 +187,7 @@ public sealed class SessionRunTests
     public async Task ReconnectContinuesTheOriginalTurnWithoutResendingAndSkipsDuplicateEvents()
     {
         using var handler = new Handler { ReconnectedEvents = new Feed() };
-        using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new()); var events = new List<string>();
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new()); var events = new List<string>();
         using var run = session.StartRun("work", observer: (item, _) => { events.Add(item.Name); return Task.CompletedTask; });
         await run.Acceptance.WaitAsync(Deadline); handler.Events.Push(Frame(0, "turn.started")); handler.Events.End();
         handler.ReconnectedEvents.Push(Frame(0, "turn.started") + Completed());
@@ -197,7 +198,7 @@ public sealed class SessionRunTests
     [Fact]
     public async Task CompletionReusesProjectionRetractionInsteadOfReturningWithdrawnText()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); var session = await client.CreateSessionAsync(new());
         using var run = session.StartRun("work"); await run.Acceptance.WaitAsync(Deadline);
         handler.Events.Push(Frame(0, "turn.started") + Frame(1, "msg.block.start", extra: ",\"index\":0,\"blockType\":\"text\"") +
             Frame(2, "msg.text.delta", extra: ",\"index\":0,\"text\":\"withdrawn\"") + Frame(3, "msg.retracted", extra: ",\"index\":0") + Completed(4));

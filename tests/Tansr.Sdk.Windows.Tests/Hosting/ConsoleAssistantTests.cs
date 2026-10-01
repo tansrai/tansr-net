@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Views;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
@@ -181,7 +182,7 @@ public sealed class ConsoleAssistantTests
         private readonly TansrClient client;
         internal Fixture()
         {
-            http = new HttpClient(Handler);
+            http = new HttpClient(UnifiedStamp.Stamp(Handler));
             client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://serve.test/"), TokenProvider = _ => Task.FromResult("synthetic-token"), MaxReconnectAttempts = 0 }, http);
         }
         internal Task<AgentSession> ResumeAsync() => client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "resumed" });
@@ -199,12 +200,12 @@ public sealed class ConsoleAssistantTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             string path = request.RequestUri!.AbsolutePath;
-            if (request.Method == HttpMethod.Post && path == "/v2/sessions")
+            if (request.Method == HttpMethod.Post && path == "/api/sessions")
             {
                 using var data = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)); Assert.Equal("resumed", data.RootElement.GetProperty("resume").GetProperty("sessionId").GetString());
                 return Json(new { sessionId = "resumed", resumed = true, lastSeq = 41 });
             }
-            if (request.Method == HttpMethod.Get && path == "/v2/sessions/resumed")
+            if (request.Method == HttpMethod.Get && path == "/api/sessions/resumed")
             {
                 Interlocked.Increment(ref MetadataReads);
                 return Json(new { sessionId = "resumed", endUserId = "user", status = "idle", live = true, lastSeq = 41, createdAt = "2026-09-27T00:00:00Z", lastActivityAt = "2026-09-27T00:00:00Z" });

@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Execution;
 
@@ -151,13 +152,13 @@ public sealed class ExecutionClientTests
         var operation = Operation(); var receipt = Receipt(operation);
         using var handler = new Handler(request => request.Path switch
         {
-            "/v2/sessions/session/execution-boundary?protocol=sdk2-ext-v1" => Boundary(),
-            "/v2/executors/connections" or "/v2/executors/executor/heartbeats" => Connection(),
-            "/v2/executors/executor/operations?protocol=sdk2-ext-v1&connectionId=connection" => Batch(operation),
-            "/v2/executors/executor/receipts" or "/v2/sessions/session/executions/operation?protocol=sdk2-ext-v1" => Status(operation, receipt, "completed"),
+            "/api/sessions/session/execution-boundary?protocol=sdk2-ext-v1" => Boundary(),
+            "/api/executors/connections" or "/api/executors/executor/heartbeats" => Connection(),
+            "/api/executors/executor/operations?protocol=sdk2-ext-v1&connectionId=connection" => Batch(operation),
+            "/api/executors/executor/receipts" or "/api/sessions/session/executions/operation?protocol=sdk2-ext-v1" => Status(operation, receipt, "completed"),
             _ => Capabilities()
         });
-        using var http = new HttpClient(handler); using var client = Client(http); var execution = new ExecutionClient(client);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var execution = new ExecutionClient(client);
         await execution.InitializeAsync(Element(Initialization()));
         await execution.GetExecutionCapabilitiesAsync("session");
         await execution.GetExecutionBoundaryAsync("session");
@@ -169,10 +170,10 @@ public sealed class ExecutionClientTests
         await execution.GetStatusAsync("session", "operation");
         Assert.Equal(9, handler.Requests.Count);
         Assert.All(handler.Requests, request => Assert.Equal("Bearer test-token", request.Authorization));
-        Assert.Equal("/v2/sessions/session/initialize", handler.Requests[0].Path);
-        Assert.Equal("/v2/sessions/session/execution-capabilities?protocol=sdk2-ext-v1", handler.Requests[1].Path);
+        Assert.Equal("/api/sessions/session/initialize", handler.Requests[0].Path);
+        Assert.Equal("/api/sessions/session/execution-capabilities?protocol=sdk2-ext-v1", handler.Requests[1].Path);
         Assert.Equal("POST", handler.Requests[3].Method);
-        Assert.Equal("/v2/sessions/session/execution-bindings", handler.Requests[3].Path);
+        Assert.Equal("/api/sessions/session/execution-bindings", handler.Requests[3].Path);
         Assert.Equal("windows", handler.Requests[0].Body!.Value.GetProperty("platform").GetProperty("platform").GetString());
     }
 
@@ -186,7 +187,7 @@ public sealed class ExecutionClientTests
         if (corruption == "platform") response["platform"]!["platform"] = "linux";
         else if (corruption == "session") response["sessionId"] = "foreign";
         else response["effectiveTools"]!.AsArray().Add(Tool());
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).InitializeAsync(Element(Initialization())));
         Assert.Single(handler.Requests);
     }
@@ -201,7 +202,7 @@ public sealed class ExecutionClientTests
         var target = response["binding"]!["target"]!;
         if (corruption == "interpreter") target[corruption] = Node("""{"id":"powershell","revision":"1","hostShell":"powershell"}""");
         else target[corruption] = "2";
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).BindExecutionAsync(Element(BindRequest()), Element(Target())));
     }
 
@@ -209,7 +210,7 @@ public sealed class ExecutionClientTests
     public async Task BoundaryCannotAttachAnExecutorToAnotherConnection()
     {
         var response = Boundary(); response["executor"]!["connectionRevision"] = "2";
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).GetExecutionBoundaryAsync("session"));
     }
 
@@ -229,7 +230,7 @@ public sealed class ExecutionClientTests
             request["tools"] = new JsonArray(tool);
             if (corruption == "duplicate-tool") request["tools"]!.AsArray().Add(tool.DeepClone());
         }
-        using var handler = new Handler(_ => Connection()); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => Connection()); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).RegisterAsync(Element(request)));
         Assert.Empty(handler.Requests);
     }
@@ -238,7 +239,7 @@ public sealed class ExecutionClientTests
     public async Task HistoricalReceiptsPermitOldAuthorizationRevisionForTheSameAppAndUser()
     {
         var operation = Operation("1"); var receipt = Receipt(operation); var response = Status(operation, receipt, "completed");
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http); var execution = new ExecutionClient(client);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var execution = new ExecutionClient(client);
         var read = await execution.GetStatusAsync("session", "operation");
         var submitted = await execution.SubmitAsync(Element(receipt));
         Assert.Equal("1", read.GetProperty("operation").GetProperty("scope").GetProperty("authorizationRevision").GetString());
@@ -252,7 +253,7 @@ public sealed class ExecutionClientTests
     {
         var operation = Operation("1", corruption == "user" ? "foreign" : "user", corruption == "application" ? "foreign" : "app");
         var receipt = Receipt(operation);
-        using var handler = new Handler(_ => Status(operation, receipt, "completed")); using var http = new HttpClient(handler); using var client = Client(http); var execution = new ExecutionClient(client);
+        using var handler = new Handler(_ => Status(operation, receipt, "completed")); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var execution = new ExecutionClient(client);
         await Assert.ThrowsAsync<InvalidDataException>(() => execution.GetStatusAsync("session", "operation"));
         await Assert.ThrowsAsync<InvalidDataException>(() => execution.SubmitAsync(Element(receipt)));
     }
@@ -274,7 +275,7 @@ public sealed class ExecutionClientTests
         }
         if (corruption == "digest") operation["request"]!["args"]!["path"] = "different.txt";
         var response = corruption == "duplicate" ? Batch(operation, operation) : Batch(operation);
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).PollAsync(Element(Connection())));
     }
 
@@ -288,7 +289,7 @@ public sealed class ExecutionClientTests
         if (corruption == "receipt") response["receipt"]!["result"]!["args"]!["bytesBase64"] = "Yg==";
         else if (corruption == "status") response["status"] = "pending";
         else response["operation"]!["request"]!["args"]!["path"] = "tampered.txt";
-        using var handler = new Handler(_ => response); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => response); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).SubmitAsync(Element(receipt)));
     }
 
@@ -308,7 +309,7 @@ public sealed class ExecutionClientTests
             ["args"] = new JsonObject { ["resultJson"] = "{\"status\":\"ok\",\"content\":[]}" }
         };
         else receipt["result"] = Node("""{"operation":"process.exec","args":{"stdout":"","stderr":"","exitCode":"2147483648","signalName":null,"durationMs":0,"timedOut":false,"aborted":false}}""");
-        using var handler = new Handler(_ => Status(Operation())); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => Status(Operation())); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).SubmitAsync(Element(receipt)));
         Assert.Empty(handler.Requests);
     }
@@ -318,7 +319,7 @@ public sealed class ExecutionClientTests
     [InlineData("failed")]
     public async Task AFinishedStatusRequiresItsReceipt(string status)
     {
-        using var handler = new Handler(_ => Status(Operation(), status: status)); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(_ => Status(Operation(), status: status)); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         await Assert.ThrowsAsync<InvalidDataException>(() => new ExecutionClient(client).GetStatusAsync("session", "operation"));
     }
 
@@ -331,7 +332,7 @@ public sealed class ExecutionClientTests
             scope = Element(Scope("3"));
             return Status(Operation());
         });
-        using var http = new HttpClient(handler); using var client = Client(http, () => scope);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http, () => scope);
         var error = await Assert.ThrowsAsync<TansrProtocolException>(() => new ExecutionClient(client).GetStatusAsync("session", "operation"));
         Assert.Equal("context_changed", error.Code);
         Assert.Single(handler.Requests);

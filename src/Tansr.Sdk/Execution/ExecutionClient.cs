@@ -1,5 +1,6 @@
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 
@@ -11,12 +12,6 @@ public sealed class ExecutionClient : IDeviceExecutionClient
     private readonly TansrClient _client;
     public ExecutionClient(TansrClient client) => _client = client ?? throw new ArgumentNullException(nameof(client));
     public JsonElement ReadScope() => _client.ReadExecutionScope();
-
-    private static string Segment(string value)
-    {
-        if (string.IsNullOrEmpty(value) || value.Length > 512 || value.Any(char.IsControl)) throw new ArgumentException("无效的执行标识。");
-        return Uri.EscapeDataString(value);
-    }
 
     private async Task<JsonElement> SendAsync(HttpMethod method, string path, JsonElement? input, string? requestSchema, string responseSchema, CancellationToken ct)
     {
@@ -32,7 +27,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
         var input = Snapshot("SessionInitializeRequest", initialization);
         if (input.TryGetProperty("requestedTools", out var requested)) Unique(requested);
         var sessionId = ExecutionJson.Text(input, "sessionId");
-        var response = await SendAsync(HttpMethod.Post, "/v2/sessions/" + Segment(sessionId) + "/initialize", input,
+        var response = await SendAsync(HttpMethod.Post, ApiRoutes.ExecutionInitialize.Path(id: sessionId), input,
             "SessionInitializeRequest", "SessionExecutionCapabilities", cancellationToken).ConfigureAwait(false);
         VerifyCapabilities(response, sessionId);
         ExecutionJson.Check(ExecutionJson.Equal(response.GetProperty("platform"), input.GetProperty("platform")));
@@ -41,7 +36,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
 
     public async Task<JsonElement> GetExecutionCapabilitiesAsync(string sessionId, CancellationToken cancellationToken = default)
     {
-        var response = await SendAsync(HttpMethod.Get, "/v2/sessions/" + Segment(sessionId) + "/execution-capabilities?protocol=sdk2-ext-v1", null,
+        var response = await SendAsync(HttpMethod.Get, ApiRoutes.ExecutionCapabilities.Path(id: sessionId) + ApiRoutes.ExecutionCapabilities.Query(("protocol", WireContract.Protocol)), null,
             null, "SessionExecutionCapabilities", cancellationToken).ConfigureAwait(false);
         VerifyCapabilities(response, sessionId);
         return response;
@@ -50,7 +45,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
     /// <summary>读取应用策略、终端能力和当前绑定的分层事实，不授予执行权。</summary>
     public async Task<JsonElement> GetExecutionBoundaryAsync(string sessionId, CancellationToken cancellationToken = default)
     {
-        var response = await SendAsync(HttpMethod.Get, "/v2/sessions/" + Segment(sessionId) + "/execution-boundary?protocol=sdk2-ext-v1", null,
+        var response = await SendAsync(HttpMethod.Get, ApiRoutes.ExecutionBoundary.Path(id: sessionId) + ApiRoutes.ExecutionBoundary.Query(("protocol", WireContract.Protocol)), null,
             null, "ExecutionBoundary", cancellationToken).ConfigureAwait(false);
         ExecutionJson.Check(ExecutionJson.Text(response, "sessionId") == sessionId);
         var application = response.GetProperty("application");
@@ -82,7 +77,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
             ExecutionJson.Text(input, "connectionId") == ExecutionJson.Text(target, "connectionId") &&
             ExecutionJson.Text(input, "workspaceId") == ExecutionJson.Text(target, "workspaceId"));
         var sessionId = ExecutionJson.Text(input, "sessionId");
-        var response = await SendAsync(HttpMethod.Post, "/v2/sessions/" + Segment(sessionId) + "/execution-bindings", input,
+        var response = await SendAsync(HttpMethod.Post, ApiRoutes.ExecutionBindingCreate.Path(id: sessionId), input,
             "ExecutionBindingRequest", "SessionExecutionCapabilities", cancellationToken).ConfigureAwait(false);
         VerifyCapabilities(response, sessionId);
         var binding = response.GetProperty("binding");
@@ -99,7 +94,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
         var hasTools = input.TryGetProperty("tools", out var tools) && tools.GetArrayLength() > 0;
         if (input.TryGetProperty("tools", out tools)) Unique(tools, "name");
         ExecutionJson.Check(hasInvoke == hasTools);
-        var response = await SendAsync(HttpMethod.Post, "/v2/executors/connections", input, "ExecutorRegistrationRequest", "ExecutorConnection", cancellationToken).ConfigureAwait(false);
+        var response = await SendAsync(HttpMethod.Post, ApiRoutes.ExecutorRegister.Path(), input, "ExecutorRegistrationRequest", "ExecutorConnection", cancellationToken).ConfigureAwait(false);
         ExecutionJson.Check(ExecutionJson.Text(response, "executorId") == ExecutionJson.Text(input, "executorId"));
         return response;
     }
@@ -113,7 +108,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
             writer.WriteString("executorId", ExecutionJson.Text(connection, "executorId"));
             writer.WriteString("connectionId", ExecutionJson.Text(connection, "connectionId"));
         });
-        var result = await SendAsync(HttpMethod.Post, "/v2/executors/" + Segment(ExecutionJson.Text(connection, "executorId")) + "/heartbeats", request, "ExecutorHeartbeatRequest", "ExecutorConnection", cancellationToken).ConfigureAwait(false);
+        var result = await SendAsync(HttpMethod.Post, ApiRoutes.ExecutorHeartbeat.Path(id: ExecutionJson.Text(connection, "executorId")), request, "ExecutorHeartbeatRequest", "ExecutorConnection", cancellationToken).ConfigureAwait(false);
         ExecutionJson.Check(ExecutionJson.Text(result, "executorId") == ExecutionJson.Text(connection, "executorId") && ExecutionJson.Text(result, "connectionId") == ExecutionJson.Text(connection, "connectionId"));
         return result;
     }
@@ -122,7 +117,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
     {
         connection = Snapshot("ExecutorConnection", connection);
         var scope = ReadScope();
-        var result = await SendAsync(HttpMethod.Get, "/v2/executors/" + Segment(ExecutionJson.Text(connection, "executorId")) + "/operations?protocol=sdk2-ext-v1&connectionId=" + Segment(ExecutionJson.Text(connection, "connectionId")), null, null, "ExecutionBatch", cancellationToken).ConfigureAwait(false);
+        var result = await SendAsync(HttpMethod.Get, ApiRoutes.ExecutorOperationsPoll.Path(id: ExecutionJson.Text(connection, "executorId")) + ApiRoutes.ExecutorOperationsPoll.Query(("protocol", WireContract.Protocol), ("connectionId", ExecutionJson.Text(connection, "connectionId"))), null, null, "ExecutionBatch", cancellationToken).ConfigureAwait(false);
         ExecutionJson.Check(ExecutionJson.Equal(scope, ReadScope()));
         ExecutionJson.Check(ExecutionJson.Text(result, "executorId") == ExecutionJson.Text(connection, "executorId") && ExecutionJson.Text(result, "connectionId") == ExecutionJson.Text(connection, "connectionId"));
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -144,7 +139,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
         receipt = Snapshot("ExecutionReceiptRequest", receipt);
         ExecutionJson.ValidateReceiptRequest(receipt);
         var scope = ReadScope();
-        var result = await SendAsync(HttpMethod.Post, "/v2/executors/" + Segment(ExecutionJson.Text(receipt, "executorId")) + "/receipts", receipt, "ExecutionReceiptRequest", "ExecutionStatus", cancellationToken).ConfigureAwait(false);
+        var result = await SendAsync(HttpMethod.Post, ApiRoutes.ExecutorReceiptSubmit.Path(id: ExecutionJson.Text(receipt, "executorId")), receipt, "ExecutionReceiptRequest", "ExecutionStatus", cancellationToken).ConfigureAwait(false);
         ExecutionJson.Check(ExecutionJson.Equal(scope, ReadScope()));
         VerifyStatus(result, scope);
         ExecutionJson.Receipt(result.GetProperty("operation"), receipt);
@@ -155,7 +150,7 @@ public sealed class ExecutionClient : IDeviceExecutionClient
     public async Task<JsonElement> GetStatusAsync(string sessionId, string operationId, CancellationToken cancellationToken = default)
     {
         var scope = ReadScope();
-        var result = await SendAsync(HttpMethod.Get, "/v2/sessions/" + Segment(sessionId) + "/executions/" + Segment(operationId) + "?protocol=sdk2-ext-v1", null, null, "ExecutionStatus", cancellationToken).ConfigureAwait(false);
+        var result = await SendAsync(HttpMethod.Get, ApiRoutes.ExecutionStatus.Path(id: sessionId, targetId: operationId) + ApiRoutes.ExecutionStatus.Query(("protocol", WireContract.Protocol)), null, null, "ExecutionStatus", cancellationToken).ConfigureAwait(false);
         var operation = result.GetProperty("operation");
         ExecutionJson.Check(ExecutionJson.Equal(scope, ReadScope()));
         ExecutionJson.Check(ExecutionJson.Text(operation, "sessionId") == sessionId && ExecutionJson.Text(operation, "operationId") == operationId);

@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Media;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Views;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
@@ -175,7 +176,7 @@ public sealed class MediaWorkspaceTests
         internal MediaWorkspace Workspace { get; private set; } = null!;
         internal static async Task<Fixture> CreateAsync()
         {
-            var f = new Fixture(); f._http = new HttpClient(f, false);
+            var f = new Fixture(); f._http = UnifiedStamp.Client(f, false);
             f._client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://serve.example"), TokenProvider = _ => Task.FromResult("synthetic-ticket") }, f._http);
             var session = await f._client.CreateSessionAsync(new());
             f.Workspace = new MediaWorkspace(session, new MediaDownloader(new MediaDownloadOptions { AllowedHttpsHosts = new[] { "cdn.example" } }, f)); return f;
@@ -184,8 +185,8 @@ public sealed class MediaWorkspaceTests
         {
             var path = request.RequestUri!.AbsolutePath;
             if (request.RequestUri.Host == "cdn.example") { Assert.Null(request.Headers.Authorization); return new HttpResponseMessage(HttpStatusCode.Gone); }
-            if (path == "/v2/sessions") return Response("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}");
-            if (path == "/v2/sessions/s")
+            if (path == "/api/sessions") return Response("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}");
+            if (path == "/api/sessions/s")
             {
                 if (MissingCatalog) return Response("{\"sessionId\":\"s\",\"lastSeq\":0}");
                 var flag = Enabled ? "true" : "false";

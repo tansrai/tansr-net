@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using ConsoleAssistant;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
 
@@ -30,7 +31,7 @@ public sealed class ConsoleWorkerTests
     public async Task BoundedIndependentSessionsUseFullPromptsAndUnattendedPolicies()
     {
         using var handler = new Handler { CompleteAfter = 2 };
-        using var http = new HttpClient(handler); using var client = CreateClient(http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
         var logs = new ConcurrentQueue<string>();
         var prompt = "全量😀\n" + new string('文', 40000);
         var jobs = new[] { new ConsoleWorker.Job("first", prompt, null), new ConsoleWorker.Job("second", "second", "actual-model"), new ConsoleWorker.Job("third", "third", null) };
@@ -57,7 +58,7 @@ public sealed class ConsoleWorkerTests
     public async Task StopDoesNotStartQueuedJobAndStillClosesEverySessionWhenInterruptFails()
     {
         using var handler = new Handler { FailFirstInterrupt = true };
-        using var http = new HttpClient(handler); using var client = CreateClient(http); using var stop = new CancellationTokenSource();
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http); using var stop = new CancellationTokenSource();
         var logs = new ConcurrentQueue<string>();
         var jobs = Enumerable.Range(1, 3).Select(i => new ConsoleWorker.Job("job-" + i, "run " + i, null)).ToArray();
         var work = ConsoleWorker.RunJobsAsync(jobs, 2, client, null, stop.Token, logs.Enqueue);
@@ -78,7 +79,7 @@ public sealed class ConsoleWorkerTests
     public async Task LostAcceptanceResponseKeepsUnknownAndNeverRepeatsTheJob()
     {
         using var handler = new Handler { LoseMessageResponse = true };
-        using var http = new HttpClient(handler); using var client = CreateClient(http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
         var logs = new ConcurrentQueue<string>();
         Assert.Equal(2, await ConsoleWorker.RunJobsAsync([new("unknown", "effect", null)], 1, client, null, CancellationToken.None, logs.Enqueue).WaitAsync(Deadline));
         Assert.Equal(1, handler.Created); Assert.Equal(1, handler.Sends); Assert.Equal(1, handler.Interrupts); Assert.Equal(1, handler.Closes);
@@ -106,7 +107,7 @@ public sealed class ConsoleWorkerTests
         {
             var path = request.RequestUri!.AbsolutePath;
             Requests.Enqueue(request.Method + " " + path);
-            if (request.Method == HttpMethod.Post && path == "/v2/sessions")
+            if (request.Method == HttpMethod.Post && path == "/api/sessions")
             {
                 var created = Interlocked.Increment(ref Created); var id = "s" + created;
                 using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));

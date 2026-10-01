@@ -40,7 +40,7 @@ public sealed class OwnedServeHttpHandlerTests : IDisposable, IClassFixture<Owne
             var origin = new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port);
             var accepted = listener.AcceptTcpClientAsync();
             using var http = Client(origin, process);
-            var failure = await Assert.ThrowsAsync<TansrProtocolException>(() => http.GetAsync(new Uri(origin, "/v2/sessions")));
+            var failure = await Assert.ThrowsAsync<TansrProtocolException>(() => http.GetAsync(new Uri(origin, "/api/sessions")));
             Assert.Equal("serve_peer_not_owned", failure.Code);
             using var attacker = await accepted.WaitAsync(TimeSpan.FromSeconds(3));
             var bytes = new byte[512];

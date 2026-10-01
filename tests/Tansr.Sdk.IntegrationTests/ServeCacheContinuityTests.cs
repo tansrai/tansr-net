@@ -182,7 +182,7 @@ public sealed class ServeCacheContinuityTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             var response = await base.SendAsync(request, ct);
-            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/v3/sdk2/cache/bindings" && ++Posts == 1)
+            if (request.Method == HttpMethod.Post && request.RequestUri!.AbsolutePath == "/api/cache/bindings" && ++Posts == 1)
             {
                 Assert.True(response.IsSuccessStatusCode); using (response)
                 { Receipt = WireJson.Parse(await response.Content.ReadAsByteArrayAsync(ct)); }

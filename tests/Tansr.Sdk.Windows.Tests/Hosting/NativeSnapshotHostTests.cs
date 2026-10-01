@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
 
@@ -17,7 +18,7 @@ public sealed class NativeSnapshotHostTests
             var scope = Path.Combine(root, "scope.json"); var config = Path.Combine(root, "configuration.json"); var mirrors = Path.Combine(root, "mirrors");
             await File.WriteAllTextAsync(scope, "{\"scope\":{\"applicationScopeId\":\"app\",\"endUserId\":\"user\"}}");
             await File.WriteAllTextAsync(config, JsonSerializer.Serialize(new { scopeFile = scope, directory = mirrors }));
-            using var http = new HttpClient(new Handler()); using var client = new TansrClient(new()
+            using var http = UnifiedStamp.Client(new Handler()); using var client = new TansrClient(new()
             { BaseUri = new("https://serve.test"), TokenProvider = _ => Task.FromResult("synthetic") }, http);
             var session = await client.CreateSessionAsync(new());
             var type = Assembly.Load("ConsoleAssistant").GetType("Tansr.Examples.NativeSnapshotHost", true)!;
@@ -43,8 +44,8 @@ public sealed class NativeSnapshotHostTests
         {
             var path = request.RequestUri!.AbsolutePath;
             HttpResponseMessage Json(string value) => new(HttpStatusCode.OK) { Content = new StringContent(value, Encoding.UTF8, "application/json") };
-            if (path == "/v2/sessions") return Task.FromResult(Json("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}"));
-            if (path == "/v2/sessions/s") return Task.FromResult(Json("{\"sessionId\":\"s\",\"lastSeq\":0}"));
+            if (path == "/api/sessions") return Task.FromResult(Json("{\"sessionId\":\"s\",\"lastSeq\":0,\"resumed\":false}"));
+            if (path == "/api/sessions/s") return Task.FromResult(Json("{\"sessionId\":\"s\",\"lastSeq\":0}"));
             if (path.EndsWith("/checkpoints", StringComparison.Ordinal)) return Task.FromResult(Json("{\"sessionId\":\"s\",\"checkpointId\":\"own-checkpoint\"}"));
             if (request.Method == HttpMethod.Delete && path.EndsWith("/checkpoints/own-checkpoint", StringComparison.Ordinal)) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.NoContent));
             if (path.EndsWith("/export", StringComparison.Ordinal)) return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)

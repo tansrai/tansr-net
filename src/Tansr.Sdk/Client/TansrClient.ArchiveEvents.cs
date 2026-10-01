@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Transport;
 
@@ -67,9 +68,10 @@ public sealed partial class TansrClient
             if (WireJson.CanonicalString(ReadExecutionScope()) != expectedScope) throw new TansrProtocolException("context_changed");
         }
         Check();
-        using var response = await transport.SendAsync(HttpMethod.Get, "/v3/sdk2/bindings/" + Uri.EscapeDataString(bindingId) + "/events?protocol=sdk2-ext-v1",
+        using var response = await transport.SendAsync(HttpMethod.Get, ApiRoutes.ArchiveEventsObserve.Path(id: bindingId) + ApiRoutes.ArchiveEventsObserve.Query(("protocol", WireContract.Protocol)),
             access, null, "text/event-stream", null, lastEventId, connection.Token).ConfigureAwait(false);
         Check();
+        if (transport.EventEnvelopeNegotiated(response)) decoder.Unwrap = data => transport.FrameData(response, data, ArchiveEventDecoder.MaximumFrameBytes);
         if ((int)response.StatusCode != 200)
         {
             if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, controlBytes, connection.Token, true).ConfigureAwait(false);

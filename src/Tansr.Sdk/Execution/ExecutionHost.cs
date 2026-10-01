@@ -523,9 +523,9 @@ public sealed class ExecutionHost : IDisposable
 
     private static bool CanReconnect(Exception error)
     {
-        if (error is TansrHttpException http) return http.RetryAction == "backoff" &&
-            (http.StatusCode == 429 && (http.Code == "capacity_exceeded" || http.Code == "request_limit") ||
-             http.StatusCode == 503 && http.Code == "source_unavailable" || http.StatusCode == 409 && http.Code == "busy");
+        if (error is TansrHttpException http) return http.DomainRetryAction == "backoff" &&
+            (http.DomainStatus == 429 && (http.DomainCode == "capacity_exceeded" || http.DomainCode == "request_limit") ||
+             http.DomainStatus == 503 && http.DomainCode == "source_unavailable" || http.DomainStatus == 409 && http.DomainCode == "busy");
         if (error is TansrProtocolException protocol) return protocol.Code == "network_error" || protocol.Code == "stream_idle_timeout" ||
             protocol.Code == "event_stream_disconnected" || protocol.Code == "sse_incomplete_frame";
         if (error is InvalidDataException || error is WireProtocolException) return false;

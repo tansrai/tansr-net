@@ -1,6 +1,7 @@
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Transport;
@@ -16,7 +17,7 @@ public sealed partial class TansrClient
     internal async Task<JsonElement> SendTerminalControlAsync(HttpMethod method, string path, JsonElement? request,
         string responseName, JsonElement originalScope, CancellationToken cancellationToken)
     {
-        if ((method != HttpMethod.Get && method != HttpMethod.Post) || !path.StartsWith("/v3/terminal/sessions/", StringComparison.Ordinal) ||
+        if ((method != HttpMethod.Get && method != HttpMethod.Post) || !path.StartsWith(ApiRoutes.TerminalConfigurationRead.Root, StringComparison.Ordinal) ||
             path.IndexOf('#') >= 0 || path.IndexOf('\\') >= 0 || Encoding.UTF8.GetByteCount(path) > 8192 ||
             responseName != "ConfigurationResponse" && responseName != "ConfigurationCommitResponse" &&
             responseName != "MemoryStateResponse" && responseName != "MemoryReceiptResponse")
@@ -37,7 +38,7 @@ public sealed partial class TansrClient
         // another transport. Global discovery proves installation only; Serve still checks owner
         // and live authority for the actual session operation.
         using var capabilitiesResponse = await transport.SendAsync(HttpMethod.Get,
-            "/v3/terminal/capabilities?contract=terminal-services-v1", access, null, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+            ApiRoutes.TerminalCapabilities.Path() + ApiRoutes.TerminalCapabilities.Query(("contract", TerminalCandidateContract.Protocol)), access, null, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         Check();
         var capabilities = await ReadTerminalResponseAsync(capabilitiesResponse, "CapabilitiesResponse", WireJson.MaximumControlBytes, Check, cancellation.Token).ConfigureAwait(false);
         Check();
@@ -73,6 +74,7 @@ public sealed partial class TansrClient
         check();
         if (!response.IsSuccessStatusCode)
         {
+            SessionTransport.ThrowUnified(response, body);
             var error = TerminalCandidateContract.Decode("ErrorResponse", body);
             if (error.GetProperty("status").GetInt32() != (int)response.StatusCode) throw new TansrProtocolException("invalid_response");
             throw new TansrHttpException((int)response.StatusCode, TerminalJson.Text(error, "code"), retryAction: TerminalJson.Text(error, "retryAction"));

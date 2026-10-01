@@ -5,6 +5,7 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Transport;
@@ -211,7 +212,7 @@ public sealed class LocalServeHost : IDisposable
 
     private Task<HttpResponseMessage> ProbeAsync(HttpClient client, string token, CancellationToken ct)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUri, "/v2/sessions?limit=1&offset=0"));
+        var request = new HttpRequestMessage(HttpMethod.Get, new Uri(BaseUri, ApiRoutes.SessionList.Path() + ApiRoutes.SessionList.Query(("limit", "1"), ("offset", "0"))));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         foreach (var header in _readinessHeaders) request.Headers.Add(header.Key, header.Value);
         return SendProbeAsync(client, request, ct);

@@ -5,6 +5,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -16,7 +17,7 @@ public sealed class TerminalBorrowedClientTests
     {
         var tokens = 0;
         using var handler = new Handler((_, _) => throw new InvalidOperationException("No request is allowed."));
-        using var http = new HttpClient(handler); var options = Options(); options.TokenProvider = _ => { tokens++; return Task.FromResult("owned-token"); };
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); var options = Options(); options.TokenProvider = _ => { tokens++; return Task.FromResult("owned-token"); };
         using var client = new TansrClient(options, http);
         Assert.Equal("unsupported_capability", Assert.Throws<TansrProtocolException>(() => TerminalConnection.ForClient(client)).Code);
         Assert.Equal(0, handler.Calls); Assert.Equal(0, tokens);
@@ -30,12 +31,12 @@ public sealed class TerminalBorrowedClientTests
         {
             Assert.Equal("owned-private-token", request.Headers.Authorization!.Parameter);
             Assert.Equal("127.0.0.1", request.RequestUri!.Host); Assert.Equal(34567, request.RequestUri.Port);
-            if (request.RequestUri.AbsolutePath == "/v3/terminal/capabilities") return Json(await adapter.GetCapabilitiesAsync(ct));
-            if (request.RequestUri.AbsolutePath == "/v3/terminal/bindings") return Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct));
-            Assert.Equal("/v2/sessions", request.RequestUri.AbsolutePath); Assert.Equal(HttpMethod.Get, request.Method);
+            if (request.RequestUri.AbsolutePath == "/api/capabilities/terminal") return Json(await adapter.GetCapabilitiesAsync(ct));
+            if (request.RequestUri.AbsolutePath == "/api/terminal/bindings") return Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct));
+            Assert.Equal("/api/sessions", request.RequestUri.AbsolutePath); Assert.Equal(HttpMethod.Get, request.Method);
             return Json(JsonSerializer.SerializeToElement(new { sessions = Array.Empty<object>(), total = 0 }));
         });
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         using (var terminal = TerminalConnection.ForClient(client, true))
         {
             var binding = await terminal.BindAsync(Request(adapter)); Assert.Equal("borrowed-binding", binding.Value.GetProperty("requestId").GetString());
@@ -51,11 +52,11 @@ public sealed class TerminalBorrowedClientTests
         var adapter = new TerminalTestAdapter(); using var stream = new PendingStream();
         using var handler = new Handler(async (request, ct) =>
         {
-            if (request.RequestUri!.AbsolutePath == "/v3/terminal/capabilities") return Json(await adapter.GetCapabilitiesAsync(ct));
+            if (request.RequestUri!.AbsolutePath == "/api/capabilities/terminal") return Json(await adapter.GetCapabilitiesAsync(ct));
             if (request.Method == HttpMethod.Post) return Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct));
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(stream) { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } } };
         });
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); using var terminal = TerminalConnection.ForClient(client, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); using var terminal = TerminalConnection.ForClient(client, true);
         var binding = await terminal.BindAsync(Request(adapter));
         var observing = executorNotifications ? terminal.ObserveExecutorAsync(binding, null, (_, _) => Task.CompletedTask)
             : terminal.ObserveOutputAsync(binding, Reference(adapter), null, (_, _) => Task.CompletedTask);
@@ -75,7 +76,7 @@ public sealed class TerminalBorrowedClientTests
         var adapter = new TerminalTestAdapter();
         using var handler = new Handler(async (request, ct) => request.Method == HttpMethod.Post
             ? Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct)) : Json(await adapter.GetCapabilitiesAsync(ct)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); using var terminal = TerminalConnection.ForClient(client, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); using var terminal = TerminalConnection.ForClient(client, true);
         var binding = await terminal.BindAsync(Request(adapter)); using var sink = terminal.CreateOutputSink(binding);
         using var capture = await sink.OpenAsync(adapter.ExistingOperation, default);
         Assert.False(capture.Completion.IsCompleted); Assert.Equal(2, handler.Calls);
@@ -95,7 +96,7 @@ public sealed class TerminalBorrowedClientTests
         var adapter = new TerminalTestAdapter(); var scope = ExecutionFixture.Scope();
         using var handler = new Handler(async (request, ct) => request.Method == HttpMethod.Post
             ? Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct)) : Json(await adapter.GetCapabilitiesAsync(ct)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(() => scope), http); using var terminal = TerminalConnection.ForClient(client, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(() => scope), http); using var terminal = TerminalConnection.ForClient(client, true);
         var binding = await terminal.BindAsync(Request(adapter)); scope = ExecutionFixture.Scope(user: field == "user" ? "other" : "user", application: field == "application" ? "other" : "app", revision: field == "authorization" ? "2" : "1");
         Assert.Equal("context_changed", Assert.Throws<WireProtocolException>(() => terminal.AttachBinding(binding)).Code);
         Assert.Equal("context_changed", (await Assert.ThrowsAsync<WireProtocolException>(() => terminal.GetOutputStatusAsync(binding, Reference(adapter)))).Code);

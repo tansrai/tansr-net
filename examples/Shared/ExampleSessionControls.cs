@@ -187,8 +187,8 @@ internal sealed class ExampleSessionControls
         if (error is TansrProtocolException)
             return error.Code == "contract_mismatch" || error.Code == "unsupported_capability" || error.Code == "payload_too_large";
         if (error is not TansrHttpException http) return false;
-        if (http.StatusCode == 409 && ((http.Code == "revision_conflict" && http.RetryAction == "refresh") ||
-            (http.Code == "busy" && http.RetryAction == "backoff"))) return true;
+        if (http.DomainStatus == 409 && ((http.DomainCode == "revision_conflict" && http.DomainRetryAction == "refresh") ||
+            (http.DomainCode == "busy" && http.DomainRetryAction == "backoff"))) return true;
         if (kind != "configuration") return false;
         return (http.StatusCode == 409 && ((http.Code == "context_transition_required" && http.RetryAction == "refresh") ||
             (http.Code == "unsupported_capability" && http.RetryAction == "discover"))) ||

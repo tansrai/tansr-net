@@ -5,6 +5,7 @@ using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
 
@@ -15,7 +16,7 @@ public sealed class NativeToolExecutionAdapterTests
     [Fact]
     public async Task DeviceRegistrationUsesOriginalDeclarationsAndDelegatesWithoutLegacyDoubleExecution()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var calls = 0; var titles = new List<string>(); var revoked = false;
         var binding = new NativeToolBinding(Json("{\"name\":\"native_echo\",\"description\":\"bounded synthetic echo\",\"readOnly\":true,\"timeoutMs\":10000}"),
             (_, token) => { token.ThrowIfCancellationRequested(); if (revoked) throw new InvalidOperationException("trust_revoked"); calls++; return Task.FromResult(Json("{\"status\":\"ok\",\"content\":[{\"t\":\"text\",\"text\":\"original delegate\"}]}")); });
@@ -55,7 +56,7 @@ public sealed class NativeToolExecutionAdapterTests
     [Fact]
     public async Task PendingLegacySideEffectPreventsSwitchingExecutionPipelines()
     {
-        using var handler = new Handler(); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var binding = new NativeToolBinding(Json("{\"name\":\"native_echo\"}"), async (_, token) =>
         { entered.TrySetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, token); return Json("{}"); });

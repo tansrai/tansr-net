@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -43,7 +44,7 @@ public sealed class TerminalProfileTests
             Assert.Contains("?contract=terminal-profile-v1&sessionContract=sdk1", request.RequestUri!.Query);
             return Task.FromResult(Response(request.RequestUri.AbsolutePath.EndsWith("/usage", StringComparison.Ordinal) ? Usage() : Catalog()));
         });
-        using var http = new HttpClient(handler); http.DefaultRequestHeaders.Add("X-Owned-Host", "kept"); using var owner = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); http.DefaultRequestHeaders.Add("X-Owned-Host", "kept"); using var owner = new TansrClient(Options(), http);
         using (var profile = new TerminalProfileClient(owner, true))
         {
             var catalog = await profile.ReadCatalogAsync("session-1"); Assert.Equal("Authorized", Assert.Single(catalog.Models).DisplayName); Assert.Equal("model-1", catalog.Aliases["main"]);
@@ -57,7 +58,7 @@ public sealed class TerminalProfileTests
     [Fact]
     public async Task DefaultPreviewAndMismatchedSessionFamilyMakeNoRequests()
     {
-        using var handler = new Handler((_, _, _) => throw new InvalidOperationException("Unexpected request")); using var http = new HttpClient(handler); using var owner = new TansrClient(Options(), http);
+        using var handler = new Handler((_, _, _) => throw new InvalidOperationException("Unexpected request")); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(), http);
         Assert.Equal("unsupported_capability", Assert.Throws<TansrProtocolException>(() => new TerminalProfileClient(owner)).Code);
         using var profile = new TerminalProfileClient(owner, true);
         Assert.Equal("binding_conflict", (await Assert.ThrowsAsync<TansrProtocolException>(() => profile.ReadCatalogAsync("session-1", SessionContract.Sdk2OffloadV1))).Code); Assert.Equal(0, handler.Calls);
@@ -82,7 +83,7 @@ public sealed class TerminalProfileTests
         if (attack == "alias-too-many") { var aliases = new JsonObject(); for (var i = 0; i < 1025; i++) aliases["a" + i] = "model-1"; body["aliases"] = aliases; }
         if (attack == "alias-empty") body["aliases"]![""] = "model-1";
         if (attack == "alias-value-object") body["aliases"]!["main"] = new JsonObject();
-        using var handler = new Handler((_, _, _) => Task.FromResult(Response(JsonSerializer.SerializeToElement(body)))); using var http = new HttpClient(handler); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
+        using var handler = new Handler((_, _, _) => Task.FromResult(Response(JsonSerializer.SerializeToElement(body)))); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
         var error = await Record.ExceptionAsync(() => profile.ReadCatalogAsync("session-1")); Assert.True(error is TansrProtocolException or WireProtocolException); Assert.Equal(1, handler.Calls);
     }
     [Theory]
@@ -104,7 +105,7 @@ public sealed class TerminalProfileTests
         if (attack == "unsafe") json = json.Replace("\"inTokens\":1234", "\"inTokens\":9007199254740992", StringComparison.Ordinal);
         if (attack == "fraction") json = json.Replace("\"inTokens\":1234", "\"inTokens\":1.5", StringComparison.Ordinal);
         using var handler = new Handler((_, _, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8, "application/json") }));
-        using var http = new HttpClient(handler); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
         var error = await Record.ExceptionAsync(() => profile.ReadUsageAsync("session-1")); Assert.True(error is TansrProtocolException or WireProtocolException); Assert.Equal(1, handler.Calls);
     }
     [Theory]
@@ -113,7 +114,7 @@ public sealed class TerminalProfileTests
     public async Task OwnerScopeCannotChangeBeforeOrDuringARead(bool during)
     {
         var scope = ExecutionFixture.Scope(); using var handler = new Handler((_, _, _) => { scope = ExecutionFixture.Scope(revision: "2"); return Task.FromResult(Response(Catalog())); });
-        using var http = new HttpClient(handler); using var owner = new TansrClient(Options(() => scope), http); using var profile = new TerminalProfileClient(owner, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(() => scope), http); using var profile = new TerminalProfileClient(owner, true);
         if (!during) scope = ExecutionFixture.Scope(user: "other");
         Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => profile.ReadCatalogAsync("session-1"))).Code); Assert.Equal(during ? 1 : 0, handler.Calls);
     }
@@ -124,7 +125,7 @@ public sealed class TerminalProfileTests
     {
         var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         using var handler = new Handler(async (_, _, ct) => { entered.TrySetResult(true); await Task.Delay(Timeout.Infinite, ct); throw new InvalidOperationException(); });
-        using var http = new HttpClient(handler); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
         var pending = profile.ReadCatalogAsync("session-1"); await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
         if (disposeOwner) owner.Dispose(); else profile.Dispose();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => pending.WaitAsync(TimeSpan.FromSeconds(5)));
@@ -134,7 +135,7 @@ public sealed class TerminalProfileTests
     public async Task SafeTypedErrorHasNoLegacyFallbackOrRetry()
     {
         using var handler = new Handler((_, _, _) => Task.FromResult(Response(JsonSerializer.SerializeToElement(new { contract = "terminal-profile-v1", requestId = "req-1", code = "source_unavailable", status = 503, retryAction = "backoff" }), HttpStatusCode.ServiceUnavailable)));
-        using var http = new HttpClient(handler); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var owner = new TansrClient(Options(), http); using var profile = new TerminalProfileClient(owner, true);
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => profile.ReadUsageAsync("session-1")); Assert.Equal("source_unavailable", error.Code); Assert.Equal("backoff", error.RetryAction); Assert.Equal(503, error.StatusCode); Assert.Equal(1, handler.Calls);
     }
     private static JsonElement Catalog()

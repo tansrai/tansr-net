@@ -212,7 +212,7 @@ internal sealed class NativeToolHost : IDisposable
             if (!result.TryGetProperty("accepted", out var accepted) || accepted.ValueKind != JsonValueKind.True) throw new InvalidOperationException("invalid_tool_receipt_response");
             lock (_gate) call.ReceiptConfirmed = true;
         }
-        catch (TansrHttpException error) when (error.StatusCode == 409 && error.Code == "call_already_resolved")
+        catch (TansrHttpException error) when (error.DomainStatus == 409 && error.DomainCode == "call_already_resolved")
         { lock (_gate) call.ReceiptConfirmed = true; }
         catch (Exception error) { Report("tool_receipt_unconfirmed:" + (error is TansrException sdk ? sdk.Code : error.GetType().Name)); }
     }

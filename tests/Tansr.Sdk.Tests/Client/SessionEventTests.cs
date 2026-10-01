@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -86,7 +87,7 @@ public sealed class SessionEventTests
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post
             ? Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}") : Events(Frame(0, "session.ended")));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         Assert.Equal(-1, session.LastSequence);
         await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });
@@ -100,7 +101,7 @@ public sealed class SessionEventTests
     {
         var text = ": heartbeat\r\n\r\nid: 1\r\ndata: {\"sessionId\":\"s\",\"seq\":1,\r\ndata: \"type\":\"msg.text.delta\",\"text\":\"你😀\"}\r\n\r\n" + Frame(2, "session.ended");
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(text));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });
         Assert.Equal(2, seen.Count); Assert.Equal("你😀", seen[0].Data.GetProperty("text").GetString());
@@ -114,7 +115,7 @@ public sealed class SessionEventTests
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
             Events(Interlocked.Increment(ref connections) == 1 ? Frame(1, "msg.text.delta", ",\"text\":\"one\"")
                 : Frame(1, "msg.text.delta", ",\"text\":\"one\"") + Frame(2, "session.ended")));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<string?>();
         await session.ObserveAsync((item, _) => { seen.Add(item.Id); return Task.CompletedTask; });
         Assert.Equal(new string?[] { null, "1" }, handler.EventCursors);
@@ -126,7 +127,7 @@ public sealed class SessionEventTests
     public async Task MultipleObserversReceiveIndependentCompleteStreams()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(Frame(1, "msg.text.delta") + Frame(2, "session.ended")));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); int one = 0, two = 0;
         await Task.WhenAll(session.ObserveAsync((_, _) => { one++; return Task.CompletedTask; }), session.ObserveAsync((_, _) => { two++; return Task.CompletedTask; }));
         Assert.Equal(2, one); Assert.Equal(2, two); Assert.Equal(2, handler.EventCursors.Count);
@@ -151,7 +152,7 @@ public sealed class SessionEventTests
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream(bytes, bytes.Length)));
         var principal = "app/user-a";
         var options = Options(); options.PrincipalProvider = () => principal;
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
 
         var error = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((item, _) =>
@@ -172,7 +173,7 @@ public sealed class SessionEventTests
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream(bytes, bytes.Length)));
         var token = "ticket-original";
         var options = Options(); options.PrincipalProvider = () => "app/user-a"; options.TokenProvider = _ => Task.FromResult(token);
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<string?>();
 
         await session.ObserveAsync((item, _) => { seen.Add(item.Id); token = "ticket-renewed"; return Task.CompletedTask; });
@@ -187,7 +188,7 @@ public sealed class SessionEventTests
         var control = "event: server.tool.request\nid: 1\ndata: {\"ts\":123,\"callId\":\"c\",\"name\":\"local\",\"args\":{},\"ttlMs\":1000,\"deadlineAt\":1123}\n\n";
         var gap = "event: server.replay.gap\ndata: {\"type\":\"server.replay.gap\",\"sessionId\":\"s\",\"reason\":\"evicted\"}\n\n";
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(control + gap));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         var failure = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; }));
         Assert.Equal("event_replay_gap", failure.Code); Assert.Equal("c", seen[0].Data.GetProperty("payload").GetProperty("callId").GetString());
@@ -203,7 +204,7 @@ public sealed class SessionEventTests
     public async Task CorruptFramesFailWithoutRetry(string frame, string code)
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(frame));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => Task.CompletedTask));
         Assert.Equal(code, error.Code); Assert.Single(handler.EventCursors);
@@ -213,7 +214,7 @@ public sealed class SessionEventTests
     public async Task InvalidUtf8IsNotSilentlyReplaced()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream([100, 97, 116, 97, 58, 32, 0xc3, 0x28, 10, 10])));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         Assert.Equal("invalid_utf8", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => Task.CompletedTask))).Code);
     }
 
@@ -222,7 +223,7 @@ public sealed class SessionEventTests
     {
         var options = Options(); options.MaxEventBytes = 64;
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events("data: " + new string('x', 1000)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http); var session = await client.CreateSessionAsync(new());
         Assert.Equal("sse_frame_too_large", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => Task.CompletedTask))).Code);
     }
 
@@ -231,7 +232,7 @@ public sealed class SessionEventTests
     {
         using var waiting = new WaitingStream();
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(waiting));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         using var cancel = new CancellationTokenSource();
         var observe = session.ObserveAsync((_, _) => Task.CompletedTask, cancel.Token);
         await waiting.Reading.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancel.Cancel();
@@ -250,7 +251,7 @@ public sealed class SessionEventTests
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(stream));
         var options = Options(); options.MaxReconnectAttempts = 0;
         options.StreamIdleTimeout = callerCancels ? TimeSpan.FromSeconds(10) : TimeSpan.FromMilliseconds(30);
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         using var cancellation = new CancellationTokenSource();
         var observe = session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; }, cancellation.Token);
@@ -276,7 +277,7 @@ public sealed class SessionEventTests
     public async Task ObserverFailureIsNotMistakenForTransientNetworkFailure()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(Frame(1, "msg.text.delta")));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         var expected = new TansrProtocolException("network_error");
         var actual = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => throw expected));
         Assert.Same(expected, actual); Assert.Single(handler.EventCursors);
@@ -286,7 +287,7 @@ public sealed class SessionEventTests
     public async Task CleanUnexpectedEofHasABoundedReconnectBudget()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(": heartbeat\n\n"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         Assert.Equal("event_stream_disconnected", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => Task.CompletedTask))).Code);
         Assert.Equal(2, handler.EventCursors.Count);
     }

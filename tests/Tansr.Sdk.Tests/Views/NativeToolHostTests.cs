@@ -6,6 +6,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Views;
 
@@ -36,7 +37,7 @@ public sealed class NativeToolHostTests
     [Fact]
     public async Task ServeRequestInvokesOptionalDelegateOnceAndSubmitsOriginalReceipt()
     {
-        using var handler = new Handler(false); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(false); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var bindingEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var finish = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously); var executions = 0;
         var binding = new NativeToolBinding(Declaration, (args, _) =>
@@ -54,7 +55,7 @@ public sealed class NativeToolHostTests
     [Fact]
     public async Task CancelFrameReachesRunningDelegateWithoutBlockingEventConsumption()
     {
-        using var handler = new Handler(false); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(false); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var binding = new NativeToolBinding(Declaration, async (_, ct) => { entered.SetResult(true); await Task.Delay(Timeout.Infinite, ct); return Receipt; });
         var session = await client.CreateSessionAsync(new CreateSessionOptions());
@@ -74,7 +75,7 @@ public sealed class NativeToolHostTests
     [InlineData("9007199254740992")]
     public async Task ResumedSessionDoesNotReexecuteUnknownPriorMcpWork(string? sequence)
     {
-        using var handler = new Handler(true); using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        using var handler = new Handler(true); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var executions = 0;
         var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "s" });
         using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding });
@@ -90,7 +91,7 @@ public sealed class NativeToolHostTests
     [InlineData("skill_lookup")]
     public async Task ResumedSessionAcceptsNewNativeBusinessMcpAndSkillRequestsAfterTheOriginalWatermark(string tool)
     {
-        using var handler = new Handler(true); using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(true); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var executions = 0; var titles = 0;
         var bindings = new[] { new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); }),
             new NativeToolBinding(Json("{\"name\":\"skill_lookup\",\"readOnly\":true}"), (_, _) => { executions++; return Task.FromResult(Receipt); }) };
@@ -107,7 +108,7 @@ public sealed class NativeToolHostTests
     public async Task ResumedRequestsWaitForTheAuthoritativeMetadataAndUseItsLaterWatermark()
     {
         var metadata = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var handler = new Handler(true) { MetadataGate = metadata.Task, LastSequence = 50 }; using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        using var handler = new Handler(true) { MetadataGate = metadata.Task, LastSequence = 50 }; using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var executions = 0;
         var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "s" });
         using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding });
@@ -122,7 +123,7 @@ public sealed class NativeToolHostTests
     public async Task LiveAttachWithOriginalResumedFalseRejectsPriorRequestsButAcceptsNewRequestsAfterMetadata()
     {
         var metadata = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        using var handler = new Handler(false) { MetadataGate = metadata.Task, LastSequence = 50 }; using var http = new HttpClient(handler); using var client = Client(http);
+        using var handler = new Handler(false) { MetadataGate = metadata.Task, LastSequence = 50 }; using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var executions = 0; var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var options = new CreateSessionOptions { ResumeSessionId = "s" };
         var session = await client.CreateSessionAsync(options); Assert.False(session.Resumed);
@@ -142,7 +143,7 @@ public sealed class NativeToolHostTests
     [InlineData(false)]
     public async Task FailureToReadTheOriginalWatermarkNeverExecutesOrSilentlyRecreatesTheSession(bool resumed)
     {
-        using var handler = new Handler(resumed) { FailMetadata = true }; using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        using var handler = new Handler(resumed) { FailMetadata = true }; using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var executions = 0;
         var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var session = await client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "s" });
         using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, _ => { }, new[] { binding }, resumeRequested: true);
@@ -154,7 +155,7 @@ public sealed class NativeToolHostTests
     [Fact]
     public async Task CompletedConfirmedCallsRetireWithoutLimitingTheConversationOrReexecutingEvictedRequests()
     {
-        using var handler = new Handler(false); using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        using var handler = new Handler(false); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var executions = 0;
         var reports = new ConcurrentQueue<string>(); var binding = new NativeToolBinding(Declaration, (_, _) => { executions++; return Task.FromResult(Receipt); });
         var session = await client.CreateSessionAsync(new()); using var host = new NativeToolHost(session, "test", (_, _) => Task.CompletedTask, reports.Enqueue, new[] { binding });
         for (var i = 1; i <= 270; i++)
@@ -173,7 +174,7 @@ public sealed class NativeToolHostTests
     [InlineData(true)]
     public async Task UnconfirmedReceiptsAndPendingWorkStayBoundedUntilOriginalConfirmationWithoutRepeatingBusinessWork(bool firstPending)
     {
-        using var handler = new Handler(false) { LoseReceipts = true }; using var http = new HttpClient(handler); using var client = Client(http); var executions = 0;
+        using var handler = new Handler(false) { LoseReceipts = true }; using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); var executions = 0;
         var pending = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var reports = new ConcurrentQueue<string>(); var binding = new NativeToolBinding(Declaration, async (args, ct) =>
@@ -225,13 +226,13 @@ public sealed class NativeToolHostTests
             var body = request.Content == null ? default : Json(await request.Content.ReadAsStringAsync(cancellationToken));
             if (request.RequestUri!.AbsolutePath.Contains("/tool-results/", StringComparison.Ordinal))
             { Receipts.Enqueue(body); Submitted.TrySetResult(body); if (LoseReceipts) throw new HttpRequestException("Synthetic unknown receipt."); return Response("{\"accepted\":true}"); }
-            if (request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath == "/v2/sessions/s")
+            if (request.Method == HttpMethod.Get && request.RequestUri.AbsolutePath == "/api/sessions/s")
             {
                 MetadataReads++; if (MetadataGate != null) await MetadataGate.WaitAsync(cancellationToken);
                 if (FailMetadata) return new HttpResponseMessage(HttpStatusCode.Forbidden) { Content = new StringContent("{\"error\":{\"code\":\"forbidden\",\"message\":\"fixture\"}}", Encoding.UTF8, "application/json") };
                 return Response("{\"sessionId\":\"s\",\"endUserId\":\"user\",\"live\":true,\"status\":\"idle\",\"lastSeq\":" + LastSequence + ",\"createdAt\":\"2026-09-27T00:00:00Z\",\"lastActivityAt\":\"2026-09-27T00:00:00Z\"}");
             }
-            Assert.Equal(HttpMethod.Post, request.Method); Assert.Equal("/v2/sessions", request.RequestUri.AbsolutePath); Creates++; CreateBody = body;
+            Assert.Equal(HttpMethod.Post, request.Method); Assert.Equal("/api/sessions", request.RequestUri.AbsolutePath); Creates++; CreateBody = body;
             return Response("{\"sessionId\":\"s\",\"resumed\":" + (resumed ? "true" : "false") + ",\"lastSeq\":" + (resumed ? 40 : -1) + "}");
         }
         private static HttpResponseMessage Response(string body) => new(HttpStatusCode.OK) { Content = new StringContent(body, Encoding.UTF8, "application/json") };

@@ -117,7 +117,7 @@ public sealed class ServeSourceIntegrationTests
         Assert.Equal(4, page.GetProperty("nextOffset").GetInt32());
         Assert.Equal(2, page.GetProperty("messages").GetArrayLength());
         Assert.DoesNotContain(handler.Paths, path => path.Contains("/interrupt", StringComparison.Ordinal));
-        Assert.All(handler.Paths, path => Assert.StartsWith("/v2/", path));
+        Assert.All(handler.Paths, path => Assert.StartsWith("/api/", path));
         await session.CloseAsync(ct);
     }
 

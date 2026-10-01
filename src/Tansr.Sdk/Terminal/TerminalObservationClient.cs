@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Net.Http;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 
@@ -105,8 +106,10 @@ public sealed class TerminalObservationClient : IDisposable
     {
         if (Volatile.Read(ref disposed) != 0) throw new ObjectDisposedException(nameof(TerminalObservationClient));
         if (toolCallId != null) TerminalObservationContract.Validate("LegacyId", TerminalJson.Object(w => w.WriteString("id", toolCallId)).GetProperty("id"));
-        var path = "/v3/terminal-observation/sessions/" + Uri.EscapeDataString(session.GetProperty("sessionId").GetString()!) + "/" + action +
-            "?contract=" + Protocol + "&sessionContract=" + session.GetProperty("sessionContract").GetString() + (toolCallId is null ? "" : "&toolCallId=" + Uri.EscapeDataString(toolCallId));
+        var operation = action == "resources" ? ApiRoutes.TerminalObservationResources : ApiRoutes.TerminalObservationCorrelations;
+        var path = operation.Path(id: session.GetProperty("sessionId").GetString()!) + (toolCallId is null
+            ? operation.Query(("contract", Protocol), ("sessionContract", session.GetProperty("sessionContract").GetString()!))
+            : operation.Query(("contract", Protocol), ("sessionContract", session.GetProperty("sessionContract").GetString()!), ("toolCallId", toolCallId)));
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(ct, stop.Token);
         var result = await client.ReadTerminalObservationAsync(path, responseName, Scope(), deadline.Token).ConfigureAwait(false);
         if (!TerminalJson.Equal(session, result.GetProperty("session"))) throw new TansrProtocolException("integrity_mismatch");

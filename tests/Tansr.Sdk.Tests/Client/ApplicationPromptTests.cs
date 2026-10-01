@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -45,18 +46,19 @@ public sealed class ApplicationPromptTests
     public async Task ExplicitSelectorUsesOriginalFamilyWhileDefaultMetadataRequestsRemainUnchanged(bool sdk2)
     {
         const string prompt = "{\"policy\":\"prepend\",\"source\":\"platform+sdk\"}";
-        using var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/session-capabilities", StringComparison.Ordinal)
+        using var handler = new Handler(request => request.RequestUri!.AbsolutePath == "/api/capabilities/sessions"
             ? Capabilities() : Json(Metadata(request.RequestUri.Query.Length == 0 ? null : prompt, sdk2)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(sdk2), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(sdk2), http);
         var session = new AgentSession(client, "session-1", -1, false);
         var raw = await session.GetMetadataAsync(default);
         var metadata = await session.ReadMetadataAsync(default);
         var observed = await session.ReadApplicationPromptAsync(default);
         Assert.False(raw.TryGetProperty("applicationPrompt", out _)); Assert.False(metadata.ApplicationPrompt.IsKnown);
         Assert.True(observed.IsKnown); Assert.Equal(ApplicationPromptSource.PlatformAndSdk, observed.Source);
-        var root = sdk2 ? "/v3/sdk2" : "/v2";
-        Assert.Equal(new[] { root + "/sessions/session-1", root + "/sessions/session-1", root + "/sessions/session-1?include=applicationPrompt" },
-            handler.Requests.Where(path => !path.Contains("/session-capabilities", StringComparison.Ordinal)));
+        // UAPI-01: one /api entry for both families (sdk2 is discovered through /api/capabilities/sessions first).
+        Assert.Equal(new[] { "/api/sessions/session-1", "/api/sessions/session-1", "/api/sessions/session-1?include=applicationPrompt" },
+            handler.Requests.Where(path => !path.Contains("/capabilities/sessions", StringComparison.Ordinal)));
+        Assert.Equal(sdk2, handler.Requests.Any(path => path.Contains("/capabilities/sessions", StringComparison.Ordinal)));
         Assert.DoesNotContain(handler.Requests, path => path.Contains("/meta", StringComparison.Ordinal));
     }
 
@@ -73,7 +75,7 @@ public sealed class ApplicationPromptTests
     {
         var prompt = "{\"policy\":\"" + policy + "\",\"source\":\"" + source + "\"}";
         using var handler = new Handler(_ => Json(Metadata(prompt)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = new AgentSession(client, "session-1", -1, false);
         var observed = await session.ReadApplicationPromptAsync();
         Assert.True(observed.IsKnown); Assert.Equal(expectedPolicy, observed.Policy); Assert.Equal(expectedSource, observed.Source);
@@ -101,7 +103,7 @@ public sealed class ApplicationPromptTests
     public async Task AbsentNullMalformedUnknownOrBodyBearingAdditionIsUnknownInsteadOfNone(string? prompt)
     {
         using var handler = new Handler(_ => Json(Metadata(prompt)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var observed = await new AgentSession(client, "session-1", -1, false).ReadApplicationPromptAsync();
         Assert.False(observed.IsKnown); Assert.Equal(ApplicationPromptPolicy.Unknown, observed.Policy); Assert.Equal(ApplicationPromptSource.Unknown, observed.Source);
         Assert.Equal("Unknown", observed.ToString()); Assert.DoesNotContain("synthetic-body", observed.ToString());
@@ -119,7 +121,7 @@ public sealed class ApplicationPromptTests
     public async Task SourceRequiresAnExplicitlyLiveSession(string live)
     {
         using var handler = new Handler(_ => Json(Metadata("{\"policy\":\"prepend\",\"source\":\"platform+sdk\"}", live: live)));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var observed = await new AgentSession(client, "session-1", -1, false).ReadApplicationPromptAsync();
         Assert.False(observed.IsKnown); Assert.Equal(ApplicationPromptSource.Unknown, observed.Source);
         Assert.Equal("platform+sdk", observed.Raw!.Value.GetProperty("source").GetString());
@@ -140,19 +142,19 @@ public sealed class ApplicationPromptTests
     [InlineData(true)]
     public async Task ReadStillRejectsAnotherSessionInsteadOfProjectingItsSource(bool sdk2)
     {
-        using var handler = new Handler(request => request.RequestUri!.AbsolutePath.EndsWith("/session-capabilities", StringComparison.Ordinal)
+        using var handler = new Handler(request => request.RequestUri!.AbsolutePath == "/api/capabilities/sessions"
             ? Capabilities() : Json(Metadata("{\"policy\":\"fallback\",\"source\":\"none\"}", sdk2, id: "other-session")));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(sdk2), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(sdk2), http);
         Assert.Equal("invalid_response", (await Assert.ThrowsAsync<TansrProtocolException>(() =>
             new AgentSession(client, "session-1", -1, false).ReadApplicationPromptAsync())).Code);
-        Assert.Equal((sdk2 ? "/v3/sdk2" : "/v2") + "/sessions/session-1?include=applicationPrompt", handler.Requests.Last());
+        Assert.Equal("/api/sessions/session-1?include=applicationPrompt", handler.Requests.Last());
     }
 
     [Fact]
     public async Task ObservationDoesNotMaskHttpFailureAsUnknownOrSendAnythingAfterPreCancellation()
     {
         using var handler = new Handler(_ => Json("{\"error\":{\"code\":\"forbidden\"}}", HttpStatusCode.Forbidden));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = new AgentSession(client, "session-1", -1, false);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.ReadApplicationPromptAsync(new CancellationToken(true)));
         Assert.Empty(handler.Requests);

@@ -60,6 +60,8 @@ internal static class ArchiveJson
         if (operation == "material-response") Need(Text(receipt, "state") == "accepted" && Text(receipt, "outcomeRef") == Text(response, "materialRequestId"));
     }
     internal static string Segment(string value) => Uri.EscapeDataString(value);
-    internal static string Query(params (string Name, object Value)[] entries) => "?" + string.Join("&", entries.Select(e => e.Name + "=" + Segment(Convert.ToString(e.Value, CultureInfo.InvariantCulture)!)));
+    /// <summary>Builds the query string through the operation's manifest whitelist (UAPI-01 ApiRoutes).</summary>
+    internal static string Query(Api.ApiOperation operation, params (string Name, object Value)[] entries) =>
+        operation.Query(entries.Select(e => (e.Name, Convert.ToString(e.Value, CultureInfo.InvariantCulture)!)).ToArray());
     internal static JsonElement Request(string binding, string operation, JsonElement request) => Build(w => { w.WriteString("protocol", Protocol); w.WriteString("bindingId", binding); w.WriteString("operation", operation); Put(w, "request", request); });
 }

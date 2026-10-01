@@ -120,7 +120,7 @@ public sealed class SessionRun : IDisposable
             Volatile.Write(ref acceptanceState, (int)SessionMessageAcceptance.Unconfirmed);
             JsonElement accepted;
             try { accepted = await send(lifetime.Token).ConfigureAwait(false); }
-            catch (TansrHttpException error) when (error.StatusCode >= 400 && error.StatusCode < 500 && error.StatusCode != 408)
+            catch (TansrHttpException error) when (error.DomainStatus >= 400 && error.DomainStatus < 500 && error.DomainStatus != 408)
             { Volatile.Write(ref acceptanceState, (int)SessionMessageAcceptance.Rejected); throw; }
             if (SessionJson.String(accepted, "sessionId") != session.Id || !accepted.TryGetProperty("accepted", out var confirmed) || confirmed.ValueKind != JsonValueKind.True)
                 throw new TansrProtocolException("invalid_response");

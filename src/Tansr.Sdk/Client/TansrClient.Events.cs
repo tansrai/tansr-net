@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Transport;
 
@@ -62,7 +63,7 @@ public sealed partial class TansrClient
         using var connection = RequestCancellation(cancellationToken);
         var access = await transport.AccessAsync(connection.Token).ConfigureAwait(false);
         await EnsureContractAsync(access, connection.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(HttpMethod.Get, Route(SessionPath(session.Id)) + "/events" + suffix, access,
+        using var response = await transport.SendAsync(HttpMethod.Get, ApiRoutes.SessionEventsObserve.Path(id: session.Id) + suffix, access,
             null, "text/event-stream", null, cursor.Id, connection.Token).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, connection.Token).ConfigureAwait(false);
         if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
@@ -86,7 +87,7 @@ public sealed partial class TansrClient
                 // principal before the next frame, so a read-level check is insufficient.
                 transport.AssertCurrent(access);
                 if (frame.Data.Length == 0 && frame.Name is null && frame.Id is null) continue;
-                var value = SessionJson.Parse(Encoding.UTF8.GetBytes(frame.Data));
+                var value = SessionJson.Parse(Encoding.UTF8.GetBytes(transport.FrameData(response, frame.Data, maxEventBytes)));
                 if (frame.Name == "server.replay.gap")
                 {
                     if (SessionJson.String(value, "type") != frame.Name || SessionJson.String(value, "sessionId") != session.Id || frame.Id is not null)
@@ -142,7 +143,7 @@ public sealed partial class TansrClient
             foreach (var c in value) if (!(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '_')) throw new ArgumentException("Invalid event filter.", nameof(options));
             values[i] = value;
         }
-        return "?exclude=" + Uri.EscapeDataString(string.Join(",", values));
+        return ApiRoutes.SessionEventsObserve.Query(("exclude", string.Join(",", values)));
     }
 
     private static async Task NotifyAsync(Func<AgentEvent, CancellationToken, Task> observer, AgentEvent item, CancellationToken cancellationToken)

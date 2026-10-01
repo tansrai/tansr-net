@@ -514,8 +514,8 @@ public sealed class ServeExecutionPipelineTests(ITestOutputHelper output, Window
                 Assert.All(recovery.Items, item => Assert.Equal(ExecutionRecoveryDisposition.Confirmed, item.Disposition));
             }
             Assert.Equal(1, launches); Assert.Single(await File.ReadAllLinesAsync(Path.Combine(work, "launches.txt"), ct));
-            Assert.Contains(deviceTiming.Requests, request => request.Path.EndsWith("/events", StringComparison.Ordinal) && request.Path.StartsWith("/v3/terminal/executors/", StringComparison.Ordinal));
-            Assert.DoesNotContain(deviceTiming.Requests, request => request.Path.StartsWith("/v2/sessions/", StringComparison.Ordinal));
+            Assert.Contains(deviceTiming.Requests, request => request.Path.EndsWith("/events", StringComparison.Ordinal) && request.Path.StartsWith("/api/terminal/executors/", StringComparison.Ordinal));
+            Assert.DoesNotContain(deviceTiming.Requests, request => request.Path.StartsWith("/api/sessions/", StringComparison.Ordinal));
             Assert.Contains(applied, item => item.GetProperty("type").GetString() == "output.block");
             observation!.Cancel(); await observing!.WaitAsync(Step, ct); observing = null;
             observation.Dispose(); observation = null;

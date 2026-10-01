@@ -2,12 +2,13 @@ using System.Net;
 using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Protocol;
 
 public sealed class SessionCompatibilityTests
 {
-    private const string CapabilitiesPath = "/v3/sdk2/session-capabilities?protocol=sdk2-ext-v1";
+    private const string CapabilitiesPath = "/api/capabilities/sessions?protocol=sdk2-ext-v1";
     private const string Available = "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}";
     private const string Missing = "{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"}],\"protocol\":\"sdk2-ext-v1\"}";
     private const string Created = "{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":0,\"contract\":\"sdk2-offload-v1\",\"availability\":\"source-required\"}";
@@ -15,9 +16,12 @@ public sealed class SessionCompatibilityTests
     private sealed class Handler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> respond) : HttpMessageHandler
     {
         internal List<string> Requests { get; } = [];
+        /// <summary>UAPI-01: both families share `/api/sessions`; the family travels in `tansr-session-family`.</summary>
+        internal List<string?> Families { get; } = [];
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             Requests.Add(request.Method + " " + request.RequestUri!.PathAndQuery);
+            Families.Add(request.Headers.TryGetValues("tansr-session-family", out var values) ? string.Join(",", values) : null);
             return respond(request, cancellationToken);
         }
     }
@@ -54,7 +58,7 @@ public sealed class SessionCompatibilityTests
             if (response.TryGetProperty("networkFailure", out var network) && network.GetBoolean()) throw new HttpRequestException("synthetic-private-detail");
             return Task.FromResult(Json(response.GetProperty("body").GetString()!, response.GetProperty("status").GetInt32()));
         });
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(Options(sdk2), http);
         Exception? failure = await Record.ExceptionAsync(() => client.CreateSessionAsync(new() { RequestId = sdk2 ? "create-original" : null }));
         var expectedError = vector.GetProperty("netError");
@@ -65,7 +69,8 @@ public sealed class SessionCompatibilityTests
             Assert.Equal(expectedError.GetString(), Assert.IsAssignableFrom<TansrException>(failure).Code);
             Assert.DoesNotContain("synthetic-private-detail", failure.ToString());
         }
-        Assert.Equal(vector.GetProperty("requests").EnumerateArray().Select(v => v.GetString()), handler.Requests);
+        // `requests` are the legacy Node sdk2 client paths (scripts/check-session-compatibility.mjs); the C# SDK emits the unified /api form.
+        Assert.Equal(vector.GetProperty("apiRequests").EnumerateArray().Select(v => v.GetString()), handler.Requests);
     }
 
     [Theory]
@@ -76,12 +81,12 @@ public sealed class SessionCompatibilityTests
         int discovery = 0;
         using var handler = new Handler((request, _) => Task.FromResult(request.RequestUri!.PathAndQuery != CapabilitiesPath ? Json(Created)
             : ++discovery == 1 ? Json(Available) : missing ? Json(Missing) : Json("{\"error\":{\"code\":\"unauthorized\"}}", 401)));
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(Options(), http);
         await client.CreateSessionAsync(new() { RequestId = "first" });
         Assert.NotNull(await Record.ExceptionAsync(() => client.GetSessionCapabilitiesAsync()));
         Assert.NotNull(await Record.ExceptionAsync(() => client.CreateSessionAsync(new() { RequestId = "second" })));
-        Assert.Equal(["GET " + CapabilitiesPath, "POST /v3/sdk2/sessions", "GET " + CapabilitiesPath, "GET " + CapabilitiesPath], handler.Requests);
+        Assert.Equal(["GET " + CapabilitiesPath, "POST /api/sessions", "GET " + CapabilitiesPath, "GET " + CapabilitiesPath], handler.Requests);
     }
 
     [Fact]
@@ -97,7 +102,7 @@ public sealed class SessionCompatibilityTests
             if (discovery == 2) { entered.SetResult(); await release.Task.WaitAsync(cancellationToken); }
             return Json(Missing);
         });
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(Options(), http);
         await client.CreateSessionAsync(new() { RequestId = "first" });
         var refresh = client.GetSessionCapabilitiesAsync();
@@ -121,7 +126,7 @@ public sealed class SessionCompatibilityTests
             if (++discovery == 1) { entered.SetResult(); await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken); }
             return Json(Available);
         });
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(Options(), http);
         using var cancellation = new CancellationTokenSource();
         var first = client.CreateSessionAsync(new() { RequestId = "original" }, cancellation.Token);
@@ -131,7 +136,8 @@ public sealed class SessionCompatibilityTests
         Assert.Single(handler.Requests);
         Assert.Equal("s", (await client.CreateSessionAsync(new() { RequestId = "original" })).Id);
         Assert.Equal(3, handler.Requests.Count);
-        Assert.DoesNotContain(handler.Requests, request => request.EndsWith("/v2/sessions", StringComparison.Ordinal));
+        // No silent sdk1 fallback: every request still declares the sdk2 family (paths are shared under /api).
+        Assert.All(handler.Families, family => Assert.Equal("sdk2-offload-v1", family));
     }
 
     [Fact]
@@ -142,12 +148,12 @@ public sealed class SessionCompatibilityTests
         options.TokenProvider = _ => Task.FromResult(token);
         using var handler = new Handler((request, _) => Task.FromResult(request.RequestUri!.PathAndQuery == CapabilitiesPath
             ? Json(token == "first-ticket" ? Available : Missing) : Json(Created)));
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(options, http);
         await client.CreateSessionAsync(new() { RequestId = "first" });
         token = "renewed-ticket";
         Assert.Equal("unsupported_capability", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new() { RequestId = "second" }))).Code);
-        Assert.Equal(["GET " + CapabilitiesPath, "POST /v3/sdk2/sessions", "GET " + CapabilitiesPath], handler.Requests);
+        Assert.Equal(["GET " + CapabilitiesPath, "POST /api/sessions", "GET " + CapabilitiesPath], handler.Requests);
     }
 
     [Fact]
@@ -159,7 +165,7 @@ public sealed class SessionCompatibilityTests
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new InvalidOperationException("The request must be canceled.");
         });
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(options, http);
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => client.CreateSessionAsync(new() { RequestId = "original" }));
         Assert.Equal(["GET " + CapabilitiesPath], handler.Requests);
@@ -180,7 +186,7 @@ public sealed class SessionCompatibilityTests
             }
             return Json(Missing);
         });
-        using var http = new HttpClient(handler);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(options, http);
         var refresh = client.GetSessionCapabilitiesAsync();
         await entered.Task;

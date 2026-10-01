@@ -9,7 +9,10 @@ public class TansrException : Exception
     public string Code { get; }
 }
 
-public sealed class TansrHttpException : TansrException
+/// <summary>HTTP 错误事实。统一信封（<c>/api</c>，UAPI-01）由派生类 <c>Tansr.Sdk.Api.UnifiedApiException</c> 承载：
+/// 其 <see cref="Code"/>/<see cref="StatusCode"/>/<see cref="RetryAction"/> 为统一值，原族事实经
+/// <see cref="DomainCode"/>/<see cref="DomainStatus"/>/<see cref="DomainRetryAction"/> 读取；对族自有信封二者相同。</summary>
+public class TansrHttpException : TansrException
 {
     public TansrHttpException(int statusCode, string code, string? scope = null, string? reason = null,
         string? retryAction = null, int? retryAfterMs = null, string? inputOutcome = null) : base(code)
@@ -22,6 +25,12 @@ public sealed class TansrHttpException : TansrException
     public int? RetryAfterMs { get; }
     /// <summary>仅原 inputs 端点的 closed/rejected 事实；不会把其它端点的顶层 code 当作合法错误。</summary>
     public string? InputOutcome { get; }
+    /// <summary>原族错误码（统一信封 <c>detail.domainCode</c>；族自有信封即 <see cref="Code"/>）。</summary>
+    public virtual string DomainCode => Code;
+    /// <summary>原族 wire 状态（统一信封 <c>detail.domainStatus</c>；族自有信封即 <see cref="StatusCode"/>）。</summary>
+    public virtual int DomainStatus => StatusCode;
+    /// <summary>原族 retryAction（统一信封 <c>detail.domainRetryAction</c>）。</summary>
+    public virtual string? DomainRetryAction => RetryAction;
 }
 
 public sealed class TansrProtocolException : TansrException

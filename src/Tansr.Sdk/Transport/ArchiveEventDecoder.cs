@@ -26,6 +26,9 @@ internal sealed class ArchiveEventDecoder
     private bool pendingCr, comments, closed;
     private volatile bool failed;
     private string? id, eventName, data;
+    /// <summary>UAPI-01: when the unified event envelope was negotiated for this connection, maps the envelope
+    /// <c>data:</c> text to the family-native frame text (<c>raw</c>). Null = frames are native (default).</summary>
+    internal Func<string, string>? Unwrap { get; set; }
 
     internal ArchiveEventDecoder(string bindingId, JsonElement generations, JsonElement scope)
     {
@@ -123,7 +126,7 @@ internal sealed class ArchiveEventDecoder
         if (id is null && eventName is null && data is null) return null;
         if (id is null || eventName is null || data is null) throw new TansrProtocolException("invalid_response");
         ValidateCursor(id);
-        var value = SessionJson.Control(Utf8.GetBytes(data), MaximumJsonBytes);
+        var value = SessionJson.Control(Utf8.GetBytes(Unwrap is null ? data : Unwrap(data)), MaximumJsonBytes);
         Validate("EventFrame", value);
         if (SessionJson.String(value, "cursor") != id || SessionJson.String(value, "eventType") != eventName ||
             SessionJson.String(value, "bindingId") != bindingId || WireJson.CanonicalString(value.GetProperty("generations")) != generations)

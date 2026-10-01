@@ -7,6 +7,7 @@ using Tansr.Sdk.Hosting;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 using Tansr.Sdk.Tests.Terminal;
 
@@ -179,12 +180,12 @@ public sealed class TerminalDeviceHostTests
         public JsonElement Reference => JsonSerializer.SerializeToElement(new { operationId = "operation-1", requestDigest = Adapter.ExistingOperation.GetProperty("digest").GetString() });
         public Rig()
         {
-            controllerHttp = new(new Handler(async (request, ct) =>
+            controllerHttp = UnifiedStamp.Client(new Handler(async (request, ct) =>
             {
                 Assert.Equal("controller-only", request.Headers.Authorization!.Parameter);
                 var path = request.RequestUri!.AbsolutePath;
-                if (path == "/v3/terminal/capabilities") return Json(await Adapter.GetCapabilitiesAsync(ct));
-                if (path == "/v3/terminal/bindings")
+                if (path == "/api/capabilities/terminal") return Json(await Adapter.GetCapabilitiesAsync(ct));
+                if (path == "/api/terminal/bindings")
                 {
                     BindingPosts++; Assert.DoesNotContain("poll", Device.Actions);
                     if (FailBinding) throw new HttpRequestException("lost original binding response");
@@ -194,7 +195,7 @@ public sealed class TerminalDeviceHostTests
                 OutputReads++; OutputRequests.Add(request.RequestUri.PathAndQuery);
                 return await (OutputResponse ?? throw new InvalidOperationException("Unexpected output observation"))(request, ct);
             }));
-            deviceHttp = new(new Handler(async (request, ct) =>
+            deviceHttp = UnifiedStamp.Client(new Handler(async (request, ct) =>
             {
                 Assert.Equal("device-only", request.Headers.Authorization!.Parameter);
                 if (request.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal))

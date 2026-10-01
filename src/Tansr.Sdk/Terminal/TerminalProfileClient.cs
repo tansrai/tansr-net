@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 
 namespace Tansr.Sdk.Terminal;
@@ -92,7 +93,8 @@ public sealed class TerminalProfileClient : IDisposable
         TerminalProfileContract.Validate("SessionReference", session);
         if (session.GetProperty("sessionContract").GetString() != client.TerminalSessionContract) throw new TansrProtocolException("binding_conflict");
         if (sessionId == "." || sessionId == "..") throw new TansrProtocolException("invalid_request");
-        var path = "/v3/terminal-profile/sessions/" + Uri.EscapeDataString(sessionId) + "/" + action + "?contract=" + Protocol + "&sessionContract=" + session.GetProperty("sessionContract").GetString();
+        var operation = action == "catalog" ? ApiRoutes.TerminalProfileCatalog : ApiRoutes.TerminalProfileUsage;
+        var path = operation.Path(id: sessionId) + operation.Query(("contract", Protocol), ("sessionContract", session.GetProperty("sessionContract").GetString()!));
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(ct, stop.Token);
         var result = await client.ReadTerminalProfileAsync(path, definition, scope, cancellation.Token).ConfigureAwait(false);
         if (!TerminalJson.Equal(session, result.GetProperty("session")) || !TerminalJson.Equal(scope, Scope())) throw new TansrProtocolException("integrity_mismatch");

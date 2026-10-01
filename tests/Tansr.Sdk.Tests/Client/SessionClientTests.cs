@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Client;
 
@@ -41,7 +42,7 @@ public sealed class SessionClientTests
     public async Task SessionMetadataAllowsEmptyLogSentinelAndSafeSequences(long lastSequence)
     {
         using var handler = new Handler(_ => Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":" + lastSequence.ToString(System.Globalization.CultureInfo.InvariantCulture) + "}"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         Assert.Equal(lastSequence, (await client.CreateSessionAsync(new())).LastSequence);
         Assert.Equal(lastSequence, (await client.GetSessionAsync("s")).LastSequence);
     }
@@ -54,7 +55,7 @@ public sealed class SessionClientTests
     public async Task SessionMetadataRejectsInvalidSequencesBeyondTheEmptyLogSentinel(string lastSequence)
     {
         using var handler = new Handler(_ => Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":" + lastSequence + "}"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         Assert.Equal("invalid_response", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new()))).Code);
         Assert.Equal("invalid_response", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.GetSessionAsync("s"))).Code);
     }
@@ -64,8 +65,8 @@ public sealed class SessionClientTests
     {
         using var handler = new Handler(r => r.Method == "DELETE" && r.Path.Contains("/checkpoints/", StringComparison.Ordinal)
             ? new HttpResponseMessage(HttpStatusCode.NoContent)
-            : Json(r.Path == "/v2/sessions" ? Created : "{\"status\":\"accepted\"}"));
-        using var http = new HttpClient(handler);
+            : Json(r.Path == "/api/sessions" ? Created : "{\"status\":\"accepted\"}"));
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new CreateSessionOptions { Model = "main", MaxTokens = 1000 });
         await session.SendAsync("第一行\n第二行😀");
@@ -87,16 +88,16 @@ public sealed class SessionClientTests
         Assert.All(handler.Requests, r => Assert.Equal("Bearer private-token", r.Authorization));
         Assert.Equal("第一行\n第二行😀", Element(handler.Requests[1].Body!).GetProperty("prompt").GetString());
         Assert.Equal("memory", Element(handler.Requests[3].Body!).GetProperty("ack").GetString());
-        Assert.Equal("/v2/sessions/s/permission/request-1", handler.Requests[4].Path);
+        Assert.Equal("/api/sessions/s/permission/request-1", handler.Requests[4].Path);
         Assert.Equal("DELETE", handler.Requests[^1].Method);
     }
 
     [Fact]
     public async Task SideEffectsAreNeverRetriedAndErrorMessageCannotExposeSecrets()
     {
-        using var handler = new Handler(r => r.Path == "/v2/sessions" ? Json(Created) :
+        using var handler = new Handler(r => r.Path == "/api/sessions" ? Json(Created) :
             Json("{\"error\":{\"code\":\"upstream_unavailable\",\"message\":\"private-token C:\\\\secret\",\"detail\":{\"reason\":\"busy\"}}}", HttpStatusCode.ServiceUnavailable));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => session.SendAsync("pay"));
         Assert.Equal(503, error.StatusCode); Assert.Equal("upstream_unavailable", error.Code);
@@ -119,7 +120,7 @@ public sealed class SessionClientTests
     public async Task RedirectIsRejectedBeforeReadingBody()
     {
         using var handler = new Handler(_ => new(HttpStatusCode.TemporaryRedirect) { Headers = { Location = new("https://other.test/") } });
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         Assert.Equal("redirect_rejected", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new()))).Code);
         Assert.Single(handler.Requests);
     }
@@ -130,7 +131,7 @@ public sealed class SessionClientTests
         string principal = "app-a/user-a";
         var options = Options(); options.PrincipalProvider = () => principal;
         options.TokenProvider = _ => { principal = "app-a/user-b"; return Task.FromResult("next-token"); };
-        using var handler = new Handler(_ => Json(Created)); using var http = new HttpClient(handler);
+        using var handler = new Handler(_ => Json(Created)); using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(options, http);
         Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new()))).Code);
         Assert.Empty(handler.Requests);
@@ -150,12 +151,12 @@ public sealed class SessionClientTests
     public async Task ExplicitSdk2DiscoversAndNeverFallsBack()
     {
         var options = Options(); options.SessionContract = SessionContract.Sdk2OffloadV1; options.PrincipalProvider = () => "a/u";
-        using var handler = new Handler(r => r.Path.StartsWith("/v3/sdk2/session-capabilities", StringComparison.Ordinal)
+        using var handler = new Handler(r => r.Path.StartsWith("/api/capabilities/sessions", StringComparison.Ordinal)
             ? Json("{\"contracts\":[{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}")
             : Json("{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\",\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":0}"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
         var session = await client.CreateSessionAsync(new() { RequestId = "creation-1" });
-        Assert.Equal("s", session.Id); Assert.Equal("/v3/sdk2/sessions", handler.Requests[1].Path);
+        Assert.Equal("s", session.Id); Assert.Equal("/api/sessions", handler.Requests[1].Path);
         Assert.Equal("creation-1", Element(handler.Requests[1].Body!).GetProperty("requestId").GetString());
     }
 
@@ -164,7 +165,7 @@ public sealed class SessionClientTests
     {
         var options = Options(); options.SessionContract = SessionContract.Sdk2OffloadV1; options.PrincipalProvider = () => "a/u";
         using var handler = new Handler(_ => Json("{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"}],\"protocol\":\"sdk2-ext-v1\"}"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(options, http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
         Assert.Equal("unsupported_capability", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new() { RequestId = "creation-1" }))).Code);
         Assert.Single(handler.Requests); Assert.Equal("GET", handler.Requests[0].Method);
     }
@@ -173,7 +174,7 @@ public sealed class SessionClientTests
     public async Task ResponsesAreBoundedBeforeJsonParsing()
     {
         var options = Options(); options.MaxResponseBytes = 32;
-        using var handler = new Handler(_ => Json(new string('x', 33))); using var http = new HttpClient(handler);
+        using var handler = new Handler(_ => Json(new string('x', 33))); using var http = new HttpClient(UnifiedStamp.Stamp(handler));
         using var client = new TansrClient(options, http);
         Assert.Equal("response_too_large", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.CreateSessionAsync(new()))).Code);
     }
@@ -182,10 +183,10 @@ public sealed class SessionClientTests
     public async Task BinaryCheckpointBytesAreNotJsonReencoded()
     {
         var binary = new byte[] { 0, 128, 255, 3 };
-        using var handler = new Handler(r => r.Path == "/v2/sessions" ? Json(Created) : r.Path.EndsWith("/export", StringComparison.Ordinal)
+        using var handler = new Handler(r => r.Path == "/api/sessions" ? Json(Created) : r.Path.EndsWith("/export", StringComparison.Ordinal)
             ? new(HttpStatusCode.OK) { Content = new ByteArrayContent(binary) { Headers = { ContentType = new MediaTypeHeaderValue("application/octet-stream") } } }
             : Json("{\"checkpointId\":\"cp\"}"));
-        using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         Assert.Equal(binary, await session.ExportCheckpointAsync("cp"));
         await session.ImportCheckpointAsync(binary, "new label");
@@ -195,7 +196,7 @@ public sealed class SessionClientTests
     [Fact]
     public async Task InvalidUnicodeInputIsRejectedBeforeNetwork()
     {
-        using var handler = new Handler(_ => Json(Created)); using var http = new HttpClient(handler); using var client = new TansrClient(Options(), http);
+        using var handler = new Handler(_ => Json(Created)); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         Assert.Throws<ArgumentException>(() => { _ = session.SendAsync("broken\ud800"); });
         Assert.Single(handler.Requests);

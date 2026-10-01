@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Tests.Execution;
 
 namespace Tansr.Sdk.Tests.Terminal;
@@ -36,11 +37,11 @@ public sealed class TerminalPublicApiTests
     { w.WriteString("contract", TerminalCandidateContract.Protocol); w.WriteString("type", "output.status"); TerminalJson.Field(w, "status", adapter.Status(reference)); });
     private static HttpResponseMessage Sse(JsonElement value) => new(HttpStatusCode.OK)
     { Content = new StringContent("event: " + TerminalJson.Text(value, "type") + "\ndata: " + WireJson.CanonicalString(value) + "\n\n", Encoding.UTF8, "text/event-stream") };
-    private static HttpClient ControllerHttp(TerminalTestAdapter adapter) => new(new Handler(async (request, token) =>
+    private static HttpClient ControllerHttp(TerminalTestAdapter adapter) => UnifiedStamp.Client(new Handler(async (request, token) =>
     {
         Assert.Equal("controller-only", request.Headers.Authorization!.Parameter);
-        if (request.RequestUri!.AbsolutePath == "/v3/terminal/capabilities") return Json(await adapter.GetCapabilitiesAsync(token));
-        Assert.Equal("/v3/terminal/bindings", request.RequestUri.AbsolutePath);
+        if (request.RequestUri!.AbsolutePath == "/api/capabilities/terminal") return Json(await adapter.GetCapabilitiesAsync(token));
+        Assert.Equal("/api/terminal/bindings", request.RequestUri.AbsolutePath);
         return Json(await adapter.BindAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(token)), token));
     }));
 
@@ -62,11 +63,11 @@ public sealed class TerminalPublicApiTests
         var authenticated = await controller.BindAsync(Request(adapter)); var calls = 0;
         var notification = JsonSerializer.SerializeToElement(new
         { contract = "terminal-services-v1", eventId = "9007199254740993", type = "operations-available", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null });
-        using var deviceHttp = new HttpClient(new Handler((request, _) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler((request, _) =>
         {
             calls++; Assert.Equal("device-only", request.Headers.Authorization!.Parameter);
             Assert.Equal(HttpMethod.Get, request.Method);
-            Assert.Equal("/v3/terminal/executors/executor-1/events?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&connectionId=connection-1", request.RequestUri!.PathAndQuery);
+            Assert.Equal("/api/terminal/executors/executor-1/events?contract=terminal-services-v1&sessionContract=sdk2-offload-v1&connectionId=connection-1", request.RequestUri!.PathAndQuery);
             Assert.Equal("9007199254740992", request.Headers.GetValues("Last-Event-ID").Single());
             return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             { Content = new StringContent("retry: 1000\ndata:\n\nid: 9007199254740993\nevent: operations-available\ndata: " + WireJson.CanonicalString(notification) + "\n\n", Encoding.UTF8, "text/event-stream") });
@@ -90,7 +91,7 @@ public sealed class TerminalPublicApiTests
         var authenticated = await controller.BindAsync(Request(adapter)); var calls = 0;
         var notification = JsonSerializer.SerializeToElement(new
         { contract = "terminal-services-v1", eventId = "0", type = "reconcile-required", executorId = "executor-1", connectionId = "connection-1", operation = (object?)null });
-        using var deviceHttp = new HttpClient(new Handler((_, _) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler((_, _) =>
         {
             calls++; return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
             { Content = new StringContent("id: 0\nevent: reconcile-required\ndata: " + WireJson.CanonicalString(notification) + "\n\n", Encoding.UTF8, "text/event-stream") });
@@ -124,7 +125,7 @@ public sealed class TerminalPublicApiTests
         using var controller = new TerminalConnection(Options(), true, controllerHttp);
         var authenticated = await controller.BindAsync(Request(adapter));
         var deviceRequests = new List<string>();
-        using var deviceHttp = new HttpClient(new Handler(async (request, ct) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler(async (request, ct) =>
         {
             Assert.Equal("device-only", request.Headers.Authorization!.Parameter); deviceRequests.Add(request.Method.Method + " " + request.RequestUri!.AbsolutePath);
             if (request.Method == HttpMethod.Post) return Json(await adapter.SendBatchAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(ct)), ct));
@@ -141,7 +142,7 @@ public sealed class TerminalPublicApiTests
         var status = await sink.ReconcileAsync("operation-1");
         Assert.Equal("receiving", status.GetProperty("state").GetString());
         Assert.Equal(JsonValueKind.Null, status.GetProperty("durableThrough").ValueKind);
-        Assert.Equal(new[] { "POST /v3/terminal/executors/executor-1/output-batches", "GET /v3/terminal/sessions/session-1/tool-output-status" }, deviceRequests);
+        Assert.Equal(new[] { "POST /api/terminal/executors/executor-1/output-batches", "GET /api/terminal/sessions/session-1/tool-output-status" }, deviceRequests);
         Assert.Single(adapter.Sent); Assert.Single(adapter.Received);
         Assert.Equal("commit_unknown", (await Assert.ThrowsAsync<WireProtocolException>(() => sink.OpenAsync(adapter.ExistingOperation, default))).Code);
         sink.ReleaseCapture("operation-1");
@@ -198,7 +199,7 @@ public sealed class TerminalPublicApiTests
         using var controller = new TerminalConnection(Options(), true, controllerHttp);
         var authenticated = await controller.BindAsync(Request(adapter));
         var reference = Reference(adapter.ExistingOperation); var calls = 0;
-        using var deviceHttp = new HttpClient(new Handler((_, _) => { calls++; return Task.FromResult(Sse(StatusEvent(adapter, reference))); }));
+        using var deviceHttp = UnifiedStamp.Client(new Handler((_, _) => { calls++; return Task.FromResult(Sse(StatusEvent(adapter, reference))); }));
         using var device = new TerminalConnection(Options("device-only"), true, deviceHttp);
         var binding = device.AttachBinding(authenticated);
         using var cancel = new CancellationTokenSource();
@@ -227,7 +228,7 @@ public sealed class TerminalPublicApiTests
         var authenticated = await controller.BindAsync(Request(adapter));
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var allEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var entries = 0;
-        using var deviceHttp = new HttpClient(new Handler(async (_, _) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler(async (_, _) =>
         {
             if (Interlocked.Increment(ref entries) == 8) allEntered.TrySetResult();
             await release.Task; return Json(adapter.Status(Reference(adapter.ExistingOperation)));
@@ -264,7 +265,7 @@ public sealed class TerminalPublicApiTests
         using var controller = new TerminalConnection(Options(), true, controllerHttp);
         var authenticated = await controller.BindAsync(Request(adapter));
         var reads = 0;
-        using var deviceHttp = new HttpClient(new Handler(async (request, token) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler(async (request, token) =>
         {
             if (request.Method == HttpMethod.Get) { reads++; return Json(adapter.Status(Reference(adapter.ExistingOperation))); }
             return Json(await adapter.SendBatchAsync(WireJson.DecodeControl(await request.Content!.ReadAsByteArrayAsync(token)), token));
@@ -288,7 +289,7 @@ public sealed class TerminalPublicApiTests
         var authenticated = await controller.BindAsync(Request(adapter));
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var allEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); var entries = 0; var reads = 0;
-        using var deviceHttp = new HttpClient(new Handler(async (request, _) =>
+        using var deviceHttp = UnifiedStamp.Client(new Handler(async (request, _) =>
         {
             if (request.Method == HttpMethod.Get) Interlocked.Increment(ref reads);
             if (Interlocked.Increment(ref entries) == 8) allEntered.TrySetResult();

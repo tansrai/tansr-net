@@ -5,6 +5,7 @@ using System.Text.Json;
 using Tansr.Sdk.Archive;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Tests.Api;
 using static Tansr.Sdk.Tests.Archive.ArchiveFlowFixture;
 using static Tansr.Sdk.Tests.Archive.ArchiveRecoveryFixture;
 
@@ -17,9 +18,9 @@ public sealed class ArchiveRecoveryClientTests
     {
         using var golden = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Terminal", "Fixtures", "sdk2-archive-recovery-v1.golden.json")));
         var data = golden.RootElement; int sends = 0;
-        using var http = new HttpClient(new Handler(async request =>
+        using var http = UnifiedStamp.Client(new Handler(async request =>
         {
-            sends++; Assert.Equal(HttpMethod.Post, request.Method); Assert.Equal("/v3/sdk2/bindings/binding/archive/ack-rebases", request.RequestUri!.AbsolutePath); Assert.Empty(request.RequestUri.Query);
+            sends++; Assert.Equal(HttpMethod.Post, request.Method); Assert.Equal("/api/archive/bindings/binding/archive/ack-rebases", request.RequestUri!.AbsolutePath); Assert.Empty(request.RequestUri.Query);
             Assert.Equal("Bearer", request.Headers.Authorization!.Scheme); Assert.Equal("synthetic-token", request.Headers.Authorization.Parameter);
             Assert.Equal("application/json", request.Content!.Headers.ContentType!.MediaType);
             Assert.Equal(data.GetProperty("wire").GetProperty("request").GetProperty("canonical").GetString(), await request.Content.ReadAsStringAsync());
@@ -39,7 +40,7 @@ public sealed class ArchiveRecoveryClientTests
     public async Task HttpRecoveryRejectsChangedOrAmbiguousEvidence(string mode)
     {
         var f = new ArchiveRecoveryFixture(); var intent = f.Intent(f.Request); int sends = 0;
-        using var http = new HttpClient(new Handler(_ =>
+        using var http = UnifiedStamp.Client(new Handler(_ =>
         {
             sends++; var value = f.Result(intent);
             if (mode == "changed_next") value = Set(value, "next", Set(value.GetProperty("next"), "sourceGeneration", "other"));
@@ -59,7 +60,7 @@ public sealed class ArchiveRecoveryClientTests
     {
         var f = new ArchiveRecoveryFixture(); var intent = LargeIntent(f); int length = WireJson.EncodeControl(intent.GetProperty("previous")).Length; int sends = 0;
         Assert.True(length > 1024);
-        using var http = new HttpClient(new Handler(_ => { sends++; return Task.FromResult(Response(WireJson.EncodeControl(f.Result(intent)))); }));
+        using var http = UnifiedStamp.Client(new Handler(_ => { sends++; return Task.FromResult(Response(WireJson.EncodeControl(f.Result(intent)))); }));
         using var tansr = Client(http, () => f.Data.Scope); var client = new ArchiveClient(tansr, Set(f.Data.Limits, "controlBytes", length - 1));
         await Assert.ThrowsAsync<WireProtocolException>(() => client.RebaseAckAsync(intent)); Assert.Equal(0, sends);
     }
@@ -70,7 +71,7 @@ public sealed class ArchiveRecoveryClientTests
         var f = new ArchiveRecoveryFixture(); var intent = LargeIntent(f); var output = f.Result(intent);
         int cap = Math.Max(WireJson.EncodeControl(intent.GetProperty("previous")).Length, WireJson.EncodeControl(output.GetProperty("next")).Length);
         Assert.True(WireJson.EncodeControl(output).Length > cap);
-        using var http = new HttpClient(new Handler(_ => Task.FromResult(Response(WireJson.EncodeControl(output))))); using var tansr = Client(http, () => f.Data.Scope);
+        using var http = UnifiedStamp.Client(new Handler(_ => Task.FromResult(Response(WireJson.EncodeControl(output))))); using var tansr = Client(http, () => f.Data.Scope);
         var client = new ArchiveClient(tansr, Set(f.Data.Limits, "controlBytes", cap)); Assert.Equal(Text(output), Text(await client.RebaseAckAsync(intent)));
     }
 
@@ -82,7 +83,7 @@ public sealed class ArchiveRecoveryClientTests
     {
         var f = new ArchiveRecoveryFixture(); var intent = f.Intent(f.Request); int sends = 0;
         intent = mode switch { "same_key" => Set(intent, "request", f.Data.RequestIdentity), "different_epoch" => Set(intent, "request", Set(f.Request, "operationEpoch", "new-epoch")), _ => Set(intent, "bindingId", "other-binding") };
-        using var http = new HttpClient(new Handler(_ => { sends++; throw new InvalidOperationException(); })); using var tansr = Client(http, () => f.Data.Scope);
+        using var http = UnifiedStamp.Client(new Handler(_ => { sends++; throw new InvalidOperationException(); })); using var tansr = Client(http, () => f.Data.Scope);
         await Assert.ThrowsAsync<TansrProtocolException>(() => new ArchiveClient(tansr).RebaseAckAsync(intent)); Assert.Equal(0, sends);
     }
 
@@ -91,7 +92,7 @@ public sealed class ArchiveRecoveryClientTests
     {
         using var golden = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Terminal", "Fixtures", "sdk2-archive-recovery-v1.golden.json")));
         var data = golden.RootElement; var entry = data.GetProperty("errors").EnumerateArray().First(x => x.GetProperty("body").GetProperty("code").GetString() == "epoch_unavailable");
-        using var http = new HttpClient(new Handler(_ => Task.FromResult(Response(WireJson.EncodeControl(entry.GetProperty("body")), (HttpStatusCode)503))));
+        using var http = UnifiedStamp.Client(new Handler(_ => Task.FromResult(Response(WireJson.EncodeControl(entry.GetProperty("body")), (HttpStatusCode)503))));
         using var tansr = Client(http, () => data.GetProperty("scope")); var error = await Assert.ThrowsAsync<TansrHttpException>(() => new ArchiveClient(tansr).RebaseAckAsync(data.GetProperty("request")));
         Assert.Equal("epoch_unavailable", error.Code); Assert.Equal("same-request", error.RetryAction); Assert.Equal(503, error.StatusCode);
     }

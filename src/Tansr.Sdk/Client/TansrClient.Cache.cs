@@ -3,6 +3,7 @@ using System.Net.Http;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Cache;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Transport;
@@ -27,7 +28,8 @@ public sealed partial class TansrClient
     internal async Task<JsonElement> SendCacheAsync(HttpMethod method, string path, byte[]? body,
         string owner, CancellationToken cancellationToken)
     {
-        if (!path.StartsWith("/v3/sdk2/cache/", StringComparison.Ordinal) || body is not null && body.Length > CacheJson.MaximumBytes)
+        var operation = ApiRoutes.Match(method.Method, path);
+        if (operation is null || operation.Domain != "cache" || body is not null && body.Length > CacheJson.MaximumBytes)
             throw new TansrProtocolException("invalid_request");
         var currentScope = WireJson.CanonicalString(ReadExecutionScope());
         if (CacheOwner() != owner) throw new TansrProtocolException("context_changed");
@@ -43,8 +45,11 @@ public sealed partial class TansrClient
         // cache-v1 自有能力发现；不把 SDK1 会话隐式升级到 sdk2-offload-v1。
         using var response = await transport.SendAsync(method, path, access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
         SessionTransport.ExpectContent(response, "application/json");
-        var value = CacheJson.Read(await SessionTransport.ReadBodyAsync(response, CacheJson.MaximumBytes, cancellation.Token).ConfigureAwait(false));
+        var bytes = await SessionTransport.ReadBodyAsync(response, CacheJson.MaximumBytes, cancellation.Token).ConfigureAwait(false);
         Check();
+        // 统一信封分支(UAPI-01):cache 族 fallback 只保留于 detail.fallback,不进统一层。
+        if (!response.IsSuccessStatusCode) SessionTransport.ThrowUnified(response, bytes);
+        var value = CacheJson.Read(bytes);
         if (!response.IsSuccessStatusCode)
         {
             CacheJson.Error(value, (int)response.StatusCode);

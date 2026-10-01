@@ -213,19 +213,19 @@ public sealed class NativeMcpBridgeTests
                     var first = lines[0].Split(' '); var lengthLine = lines.FirstOrDefault(x => x.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase));
                     var length = lengthLine == null ? 0 : int.Parse(lengthLine.Substring(15).Trim()); Assert.InRange(length, 0, 65536);
                     var body = new byte[length]; await stream.ReadExactlyAsync(body, _stop.Token);
-                    if (first[0] == "POST" && first[1] == "/v2/sessions")
+                    if (first[0] == "POST" && first[1] == "/api/sessions")
                     {
                         Creation = Json(Encoding.UTF8.GetString(body));
                         await RespondAsync(stream, "{\"sessionId\":\"session\",\"resumed\":" + (_resumed ? "true" : "false") + ",\"lastSeq\":-1}");
                     }
-                    else if (first[0] == "GET" && first[1] == "/v2/sessions/session")
+                    else if (first[0] == "GET" && first[1] == "/api/sessions/session")
                     {
                         Assert.True(_resumed); Interlocked.Increment(ref MetadataReads);
                         // The replayed call at seq 0 predates this authoritative watermark. A
                         // live MCP connection never turns its unknown prior outcome into permission to redo it.
                         await RespondAsync(stream, "{\"sessionId\":\"session\",\"endUserId\":\"bridge-test\",\"live\":true,\"status\":\"idle\",\"lastSeq\":0,\"createdAt\":\"2026-09-27T00:00:00Z\",\"lastActivityAt\":\"2026-09-27T00:00:00Z\"}");
                     }
-                    else if (first[1] == "/v2/sessions/session/events")
+                    else if (first[1] == "/api/sessions/session/events")
                     {
                         await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"), _stop.Token);
                         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -244,7 +244,7 @@ public sealed class NativeMcpBridgeTests
                         await _received.Task.WaitAsync(_stop.Token);
                         await stream.WriteAsync(Encoding.UTF8.GetBytes("id: 2\ndata: {\"type\":\"session.ended\",\"sessionId\":\"session\",\"seq\":2}\n\n"), _stop.Token);
                     }
-                    else if (first[1] == "/v2/sessions/session/tool-results/native-call")
+                    else if (first[1] == "/api/sessions/session/tool-results/native-call")
                     { Receipts.Enqueue(Json(Encoding.UTF8.GetString(body))); await RespondAsync(stream, "{\"accepted\":true}"); _received.TrySetResult(true); }
                     else throw new InvalidOperationException("Unexpected test route: " + first[0] + " " + first[1]);
                 }

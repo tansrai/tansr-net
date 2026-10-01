@@ -4,6 +4,7 @@ using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Views;
 
 namespace Tansr.Sdk.Tests.Examples;
@@ -69,10 +70,10 @@ public sealed class ExampleSessionWorkspaceTests
     }
 
     [Theory]
-    [InlineData(2, "2", "/v2/sessions?limit=25&offset=50")]
-    [InlineData(3, "1", "/v2/sessions/s/history?offset=25&limit=25")]
-    [InlineData(4, "", "/v2/sessions/s/checkpoints")]
-    [InlineData(9, "approved-work", "/v2/sessions/s/cwd")]
+    [InlineData(2, "2", "/api/sessions?limit=25&offset=50")]
+    [InlineData(3, "1", "/api/sessions/s/history?offset=25&limit=25")]
+    [InlineData(4, "", "/api/sessions/s/checkpoints")]
+    [InlineData(9, "approved-work", "/api/sessions/s/cwd")]
     public async Task ManagementUsesPublicSessionRoutesAndOriginalIdentity(int action, string input, string route)
     {
         using var fixture = new Fixture(); await fixture.StartAsync(); await fixture.Workspace.ExecuteAsync(action, input);
@@ -84,7 +85,7 @@ public sealed class ExampleSessionWorkspaceTests
     {
         using var fixture = new Fixture(); await fixture.StartAsync(); var result = await fixture.Workspace.ExecuteAsync(8, "snapshot");
         Assert.Contains("forkSessionId=branch", result, StringComparison.Ordinal); Assert.Equal("s", fixture.Session.Id);
-        Assert.Equal(new[] { "/v2/sessions", "/v2/sessions" }, fixture.Handler.Requests);
+        Assert.Equal(new[] { "/api/sessions", "/api/sessions" }, fixture.Handler.Requests);
         Assert.Contains("\"fork\":{\"sessionId\":\"s\",\"checkpointId\":\"snapshot\"}", fixture.Handler.Bodies.Last(), StringComparison.Ordinal);
     }
 
@@ -133,7 +134,7 @@ public sealed class ExampleSessionWorkspaceTests
         internal ExampleSessionWorkspace Workspace = null!;
         internal Fixture()
         {
-            http = new HttpClient(Handler); client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://example.invalid"), TokenProvider = _ => Task.FromResult("fixture") }, http);
+            http = new HttpClient(UnifiedStamp.Stamp(Handler)); client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://example.invalid"), TokenProvider = _ => Task.FromResult("fixture") }, http);
         }
         internal async Task StartAsync()
         { Session = await client.CreateSessionAsync(new CreateSessionOptions()); Workspace = new ExampleSessionWorkspace(client, Session, () => view.Snapshot, () => "fixture host", Lifetime.Token); }
@@ -153,7 +154,7 @@ public sealed class ExampleSessionWorkspaceTests
                 return new HttpResponseMessage(HttpStatusCode.OK) { Content = content };
             }
             var response = "{}";
-            if (request.Method == HttpMethod.Post && request.RequestUri.AbsolutePath == "/v2/sessions")
+            if (request.Method == HttpMethod.Post && request.RequestUri.AbsolutePath == "/api/sessions")
                 response = "{\"sessionId\":\"" + (body.Contains("fork", StringComparison.Ordinal) ? "branch" : "s") + "\",\"resumed\":false,\"lastSeq\":-1}";
             return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(response, Encoding.UTF8, "application/json") };
         }

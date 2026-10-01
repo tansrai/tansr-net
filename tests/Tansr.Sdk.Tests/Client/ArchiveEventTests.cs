@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Tests.Client;
@@ -93,11 +94,11 @@ public sealed class ArchiveEventTests
     {
         using var handler = new Handler(request =>
         {
-            Assert.Equal("/v3/sdk2/bindings/binding/events?protocol=sdk2-ext-v1", request.RequestUri!.PathAndQuery);
+            Assert.Equal("/api/archive/bindings/binding/events?protocol=sdk2-ext-v1", request.RequestUri!.PathAndQuery);
             Assert.Equal(Cursor, Assert.Single(request.Headers.GetValues("Last-Event-ID")));
             Assert.Equal("token", request.Headers.Authorization!.Parameter); return Stream(Frame(FrameJson()));
         });
-        using var http = new HttpClient(handler); using var client = Client(http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var persisted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var consume = client.ConsumeArchiveEventsAsync("binding", Element(Generations), async (_, _) => { entered.SetResult(true); await persisted.Task; }, Cursor, default);
@@ -108,7 +109,7 @@ public sealed class ArchiveEventTests
     [Fact]
     public async Task FailedConsumerStopsBeforeSecondFrameAndDoesNotReconnect()
     {
-        using var handler = new Handler(_ => Stream(Frame(FrameJson()) + Frame(FrameJson()))); using var http = new HttpClient(handler); using var client = Client(http); int calls = 0;
+        using var handler = new Handler(_ => Stream(Frame(FrameJson()) + Frame(FrameJson()))); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); int calls = 0;
         var error = await Assert.ThrowsAsync<TansrProtocolException>(() => client.ConsumeArchiveEventsAsync("binding", Element(Generations), (_, _) => { calls++; throw new InvalidOperationException("secret material"); }, null, default));
         Assert.Equal("consumer_failed", error.Code); Assert.DoesNotContain("secret", error.ToString()); Assert.Equal(1, calls); Assert.Equal(1, handler.Count);
     }
@@ -116,7 +117,7 @@ public sealed class ArchiveEventTests
     [Fact]
     public async Task CancellationDoesNotWaitForUncooperativeConsumerOrAdvanceCursor()
     {
-        using var handler = new Handler(_ => Stream(Frame(FrameJson()))); using var http = new HttpClient(handler); using var client = Client(http); using var cancel = new CancellationTokenSource();
+        using var handler = new Handler(_ => Stream(Frame(FrameJson()))); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http); using var cancel = new CancellationTokenSource();
         var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously); var finish = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var consume = client.ConsumeArchiveEventsAsync("binding", Element(Generations), (_, _) => { entered.SetResult(true); return finish.Task; }, null, cancel.Token);
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancel.Cancel();
@@ -128,7 +129,7 @@ public sealed class ArchiveEventTests
     public async Task RepeatedReconnectCannotAccumulateUnsettledConsumersAndCapacityReturnsOnlyAfterCompletion()
     {
         using var handler = new Handler(request => Stream(Frame(FrameJson(request.RequestUri!.Segments[4].TrimEnd('/')))));
-        using var http = new HttpClient(handler); using var client = Client(http);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http);
         var pending = new List<TaskCompletionSource<bool>>();
         try
         {
@@ -160,10 +161,10 @@ public sealed class ArchiveEventTests
     {
         string scope = Scope;
         using var handler = new Handler(_ => { scope = Scope.Replace("\"1\"", "\"2\""); return Stream(Frame(FrameJson())); });
-        using var http = new HttpClient(handler); using var client = Client(http, () => Element(scope));
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = Client(http, () => Element(scope));
         await Assert.ThrowsAsync<TansrProtocolException>(() => client.ConsumeArchiveEventsAsync("binding", Element(Generations), (_, _) => Task.CompletedTask, null, default));
         using var missing = new Handler(_ => { var result = Stream(Frame(FrameJson())); result.Headers.CacheControl = null; return result; });
-        using var missingHttp = new HttpClient(missing); using var missingClient = Client(missingHttp);
+        using var missingHttp = UnifiedStamp.Client(missing); using var missingClient = Client(missingHttp);
         await Assert.ThrowsAsync<TansrProtocolException>(() => missingClient.ConsumeArchiveEventsAsync("binding", Element(Generations), (_, _) => Task.CompletedTask, null, default));
     }
 }

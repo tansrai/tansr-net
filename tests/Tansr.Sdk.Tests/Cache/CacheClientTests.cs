@@ -5,6 +5,7 @@ using System.Text.Json.Nodes;
 using Tansr.Sdk.Cache;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Tests.Cache;
 
@@ -46,8 +47,8 @@ public sealed class CacheClientTests
         internal readonly CacheClient Cache;
         internal Fixture()
         {
-            Handler = new Handler(request => Respond?.Invoke(request) ?? Json(request.Path.EndsWith("/capabilities", StringComparison.Ordinal) ? Caps : Reply(request)));
-            Http = new HttpClient(Handler);
+            Handler = new Handler(request => Respond?.Invoke(request) ?? Json(request.Path.StartsWith("/api/capabilities/cache", StringComparison.Ordinal) ? Caps : Reply(request)));
+            Http = new HttpClient(UnifiedStamp.Stamp(Handler));
             Client = new TansrClient(new TansrClientOptions
             {
                 BaseUri = new Uri("https://serve.test/"),
@@ -105,7 +106,7 @@ public sealed class CacheClientTests
         Assert.Equal(original, fixture.Handler.Requests[1].Body); Assert.DoesNotContain(Ticket, receipt.ToString());
         Assert.DoesNotContain(Ticket, receipt.Ticket.ToString()); Assert.DoesNotContain(Ticket, operation.ToString());
         Assert.NotNull(operation.ExportOriginalReceipt());
-        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Path.StartsWith("/v2/", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.Handler.Requests, request => request.Path.StartsWith("/api/sessions", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -174,10 +175,10 @@ public sealed class CacheClientTests
         var original = operation.ExportOriginalRequest(); var altered = operation.ExportOriginalRequest(); altered[0] = 0;
         var receipt = await fixture.Cache.SubmitAsync(operation);
         Assert.Equal(relation, receipt.Raw.GetProperty("relation").GetString()); Assert.Equal("logical", receipt.Binding.LogicalReference);
-        Assert.Equal("/v3/sdk2/cache/capabilities", fixture.Handler.Requests[0].Path);
-        var sent = fixture.Handler.Requests[1]; Assert.Equal("/v3/sdk2/cache/bindings", sent.Path); Assert.Equal(original, sent.Body);
+        Assert.Equal("/api/capabilities/cache", fixture.Handler.Requests[0].Path);
+        var sent = fixture.Handler.Requests[1]; Assert.Equal("/api/cache/bindings", sent.Path); Assert.Equal(original, sent.Body);
         Assert.Equal("epoch", CacheJson.Read(sent.Body!).GetProperty("request").GetProperty("operationEpoch").GetString());
-        Assert.DoesNotContain(fixture.Handler.Requests, item => item.Path.Contains("session-capabilities", StringComparison.Ordinal));
+        Assert.DoesNotContain(fixture.Handler.Requests, item => item.Path.StartsWith("/api/capabilities/sessions", StringComparison.Ordinal));
         Assert.DoesNotContain(Ticket, receipt.ToString()); Assert.DoesNotContain(Ticket, receipt.Ticket!.ToString());
     }
 
@@ -199,7 +200,7 @@ public sealed class CacheClientTests
         var receipt = await fixture.Cache.SubmitAsync(operation);
         Assert.Equal(action, receipt.Raw.GetProperty("operation").GetString());
         var request = fixture.Handler.Requests[1]; var body = CacheJson.Read(request.Body!);
-        Assert.Equal("/v3/sdk2/cache/bindings/binding/" + action, request.Path);
+        Assert.Equal("/api/cache/bindings/binding/" + action, request.Path);
         Assert.Equal("1", body.GetProperty("expectedRevision").GetString());
         Assert.Equal(action != "rebind", body.TryGetProperty("ticket", out _));
         Assert.Equal(action == "rebind", body.TryGetProperty("sessionId", out _));

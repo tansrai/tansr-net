@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Archive.Replication;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
@@ -126,14 +128,18 @@ public sealed class ArchiveSyncHttpTests
                 HttpListenerContext context; try { context = await _listener.GetContextAsync(); } catch (HttpListenerException) { break; } catch (ObjectDisposedException) { break; }
                 try
                 {
-                    Assert.Equal("POST", context.Request.HttpMethod); Assert.Equal("/v3/sdk2/archive-sync/binding", context.Request.Url!.AbsolutePath); Assert.StartsWith("Bearer ", context.Request.Headers["Authorization"]);
+                    Assert.Equal("POST", context.Request.HttpMethod); Assert.Equal("/api/archive/sync/binding", context.Request.Url!.AbsolutePath); Assert.StartsWith("Bearer ", context.Request.Headers["Authorization"]);
                     using var body = new MemoryStream(); await context.Request.InputStream.CopyToAsync(body); var envelope = WireJson.DecodeControl(body.ToArray(), 67108864); Assert.Equal("archive-sync-v1", envelope.GetProperty("format").GetString()); Assert.Equal(WireJson.CanonicalString(_fixture.Identity), WireJson.CanonicalString(envelope.GetProperty("identity")));
                     string method = envelope.GetProperty("method").GetString()!; Calls.Add(method); object? value; int status = 200;
                     try { value = await Dispatch(method, envelope.GetProperty("value")); } catch (StorageException e) { status = 409; value = new { code = e.Code }; }
                     AfterDispatch?.Invoke(method);
                     if (method == "receive" && DropReceiveResponse) { context.Response.Abort(); continue; }
                     var output = new Dictionary<string, object?> { ["format"] = "archive-sync-v1", ["identity"] = AlterIdentity ? Replace(_fixture.Identity, "sourceGeneration", Element("foreign")) : _fixture.Identity, ["method"] = method, [status == 200 ? "value" : "error"] = value };
-                    byte[] bytes = WireJson.EncodeControl(Element(output), 1638400); context.Response.StatusCode = status; context.Response.ContentType = "application/json"; context.Response.ContentLength64 = bytes.Length; await context.Response.OutputStream.WriteAsync(bytes); context.Response.Close();
+                    byte[] bytes = WireJson.EncodeControl(Element(output), 1638400); context.Response.StatusCode = status; context.Response.ContentType = "application/json"; context.Response.ContentLength64 = bytes.Length;
+                    // The unified facade stamps every /api response (UAPI-01); archive-sync-v1 bodies pass through unchanged.
+                    context.Response.Headers[UnifiedHeaders.Contract] = ApiRoutes.Contract; context.Response.Headers[UnifiedHeaders.ManifestRevision] = ApiRoutes.ManifestRevision.ToString(CultureInfo.InvariantCulture);
+                    context.Response.Headers[UnifiedHeaders.Domain] = ApiRoutes.ArchiveSync.Domain; context.Response.Headers[UnifiedHeaders.SchemaHash] = ApiRoutes.DomainSchemaHash(ApiRoutes.ArchiveSync.Domain);
+                    await context.Response.OutputStream.WriteAsync(bytes); context.Response.Close();
                 }
                 catch { context.Response.Abort(); throw; }
             }
