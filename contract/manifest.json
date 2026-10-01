@@ -4,7 +4,46 @@
   "sourceRepository": "tansr-cli",
   "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
   "terminalServices": "separately-pinned-preview",
+  "apiManifest": {
+    "contract": "unified-v1",
+    "format": "tansr-api-manifest-v1",
+    "revision": 6,
+    "schemaHash": "19cafed0f01d3fdb8b8aac695980db30dec43bbd1729824d8c5bc8644a84b4b1",
+    "sourceBranch": "lane/uapi/UAPI-01-facade",
+    "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+    "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
+    "generator": "scripts/generate-api-routes.mjs",
+    "note": "Unified /api route table, headers and envelopes (UAPI-01). Pinned from the UAPI-01 integration tree; tansr-cli main still carried revision 3 when vendored."
+  },
   "files": [
+    {
+      "snapshot": "contract/api-manifest.json",
+      "source": "packages/server/contract/api-manifest.json",
+      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+      "bytes": 77583,
+      "sha256": "42a6b867877565f9afcdabfb87c5f5187864b5679f80bb0da70f7f52f86448b3"
+    },
+    {
+      "snapshot": "contract/unified-v1.schema.json",
+      "source": "doc/rfc/unified-v1.schema.json",
+      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+      "bytes": 80886,
+      "sha256": "a2449bc121b5183e50b0c2432d29042446659ec8b32b355af7f204c6cb684a8e"
+    },
+    {
+      "snapshot": "contract/unified-v1.golden.json",
+      "source": "doc/rfc/unified-v1.golden.json",
+      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+      "bytes": 97871,
+      "sha256": "7c6baad1e7053d57249c19b4c0aeda014a812c98662ec94878e0ec0d1dda0773"
+    },
+    {
+      "snapshot": "contract/canonical-cross-vectors.json",
+      "source": "scripts/api/fixtures/canonical-cross-vectors.json",
+      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+      "bytes": 39961,
+      "sha256": "aba7c6daab723e058d7d8cda6c95f8d8cbb091b516b457c3994bd024ea2de619"
+    },
     {
       "snapshot": "contract/sdk2-ext-v1.schema.json",
       "source": "doc/rfc/sdk2-ext-v1.schema.json",
