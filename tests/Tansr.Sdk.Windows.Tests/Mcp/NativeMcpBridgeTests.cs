@@ -1,11 +1,13 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Tansr.Examples;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Windows.Execution;
@@ -227,7 +229,7 @@ public sealed class NativeMcpBridgeTests
                     }
                     else if (first[1] == "/api/sessions/session/events")
                     {
-                        await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"), _stop.Token);
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n" + UnifiedStamp + "Connection: close\r\n\r\n"), _stop.Token);
                         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                         using var bytes = new MemoryStream();
                         using (var writer = new Utf8JsonWriter(bytes))
@@ -252,10 +254,17 @@ public sealed class NativeMcpBridgeTests
                 catch (Exception error) { Errors.Enqueue(error); _received.TrySetException(error); }
             }
         }
+        // UAPI-01: the unified facade stamps every /api response (session domain here) with the four mandatory headers;
+        // without them the SDK refuses the response as contract_unavailable (D10, no legacy fallback).
+        private static readonly string UnifiedStamp =
+            UnifiedHeaders.Contract + ": " + ApiRoutes.Contract + "\r\n" +
+            UnifiedHeaders.ManifestRevision + ": " + ApiRoutes.ManifestRevision.ToString(CultureInfo.InvariantCulture) + "\r\n" +
+            UnifiedHeaders.Domain + ": " + ApiRoutes.SessionCreate.Domain + "\r\n" +
+            UnifiedHeaders.SchemaHash + ": " + ApiRoutes.DomainSchemaHash(ApiRoutes.SessionCreate.Domain) + "\r\n";
         private async Task RespondAsync(NetworkStream stream, string body)
         {
             var bytes = Encoding.UTF8.GetBytes(body);
-            await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " + bytes.Length + "\r\n\r\n"), _stop.Token);
+            await stream.WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n" + UnifiedStamp + "Connection: close\r\nContent-Length: " + bytes.Length + "\r\n\r\n"), _stop.Token);
             await stream.WriteAsync(bytes, _stop.Token);
         }
         public void Dispose()
