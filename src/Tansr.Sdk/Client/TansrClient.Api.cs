@@ -20,9 +20,9 @@ public sealed partial class TansrClient
 
     /// <summary>Generic unified <c>/api</c> call for any non-stream manifest operation (the C# counterpart of
     /// <c>client.call(name, options)</c> in <c>@tansr/api-client/api</c>). Paths come from <paramref name="operation"/> only;
-    /// <c>Idempotency-Key</c> / <c>If-Match</c> / <c>deadline</c> are validated against the operation before anything is sent
-    /// (<c>invalid_idempotency_key</c>, <c>invalid_if_match</c>, <c>if_match_not_applicable</c>, <c>invalid_deadline</c>,
-    /// <c>deadline_exceeded</c> as <see cref="TansrProtocolException"/>). Errors surface as <see cref="UnifiedApiException"/>
+    /// <c>Idempotency-Key</c> / <c>If-Match</c> / <c>deadline</c> / <c>tansr-closure-id</c> are validated against the operation before
+    /// anything is sent (<c>invalid_idempotency_key</c>, <c>invalid_if_match</c>, <c>if_match_not_applicable</c>, <c>invalid_deadline</c>,
+    /// <c>deadline_exceeded</c>, <c>invalid_closure_id</c>, <c>closure_id_not_applicable</c> as <see cref="TansrProtocolException"/>). Errors surface as <see cref="UnifiedApiException"/>
     /// (unified code first, D19) or <see cref="ContractUnavailableException"/>; nothing is retried here — see
     /// <see cref="UnifiedRetry.RetrySameRequestAsync"/> for the one permitted replay.</summary>
     public async Task<ApiCallResult> CallAsync(ApiOperation operation, ApiCallOptions? options = null, CancellationToken cancellationToken = default)
@@ -40,7 +40,13 @@ public sealed partial class TansrClient
             path += operation.Query(pairs);
         }
         string? closureId = options.ClosureId;
-        if (closureId is not null && !UnifiedHeaders.Digest.IsMatch(closureId)) throw new TansrProtocolException("invalid_closure_id");
+        if (closureId is not null)
+        {
+            if (!UnifiedHeaders.Digest.IsMatch(closureId)) throw new TansrProtocolException("invalid_closure_id");
+            // facade.ts: tansr-closure-id applies to session-scoped write operations only (anything else → 400 invalid_request);
+            // the same rule is applied here, as in @tansr/api-client/api, so the request is never sent.
+            if (operation.Kind != "write" || !operation.Template.StartsWith("/api/sessions/:id/", StringComparison.Ordinal)) throw new TansrProtocolException("closure_id_not_applicable");
+        }
         byte[]? body = null; string? contentType = options.ContentType;
         if (options.RawBody is not null) { body = options.RawBody; contentType ??= "application/octet-stream"; }
         else if (options.Body.HasValue)

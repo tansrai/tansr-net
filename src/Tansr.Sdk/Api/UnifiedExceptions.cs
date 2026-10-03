@@ -158,19 +158,24 @@ public static class UnifiedRetry
         return UnifiedRetryAdvice.None;
     }
 
-    /// <summary>The idempotency key a call carried: <see cref="ApiCallOptions.IdempotencyKey"/> first, else the body's top-level
-    /// <c>requestId</c> / <c>request.requestId</c> (the positions the facade reads, revision 7 <c>requestIdPath</c>); null when none.</summary>
-    public static string? IdempotencyKeyOf(ApiCallOptions options)
+    /// <summary>The idempotency key a call carried: <see cref="ApiCallOptions.IdempotencyKey"/> first, else the JSON body value at the
+    /// operation family's <c>requestIdPath</c> (manifest revision 7, <see cref="ApiRoutes.FamilyRequestIdPath"/>: the SDK2 families read
+    /// <c>request.requestId</c>, the terminal families <c>requestId</c>, a family without such a position — agent-session-v1,
+    /// archive-sync-v1 — recognises the header only). A raw body, a non-object on the path or an empty string → null. This is the
+    /// position the facade maps <c>Idempotency-Key</c> onto, so a key read anywhere else would not identify the same request.</summary>
+    public static string? IdempotencyKeyOf(ApiOperation operation, ApiCallOptions options)
     {
+        if (operation == null) throw new System.ArgumentNullException(nameof(operation));
         if (options == null) throw new System.ArgumentNullException(nameof(options));
         if (!string.IsNullOrEmpty(options.IdempotencyKey)) return options.IdempotencyKey;
-        if (options.Body is JsonElement body && body.ValueKind == JsonValueKind.Object)
+        var path = operation.Family == null ? null : ApiRoutes.FamilyRequestIdPath(operation.Family);
+        if (path == null || options.RawBody != null || options.Body is not JsonElement node) return null;
+        foreach (var key in path)
         {
-            if (body.TryGetProperty("requestId", out var top) && top.ValueKind == JsonValueKind.String && top.GetString()!.Length > 0) return top.GetString();
-            if (body.TryGetProperty("request", out var request) && request.ValueKind == JsonValueKind.Object &&
-                request.TryGetProperty("requestId", out var nested) && nested.ValueKind == JsonValueKind.String && nested.GetString()!.Length > 0) return nested.GetString();
+            if (node.ValueKind != JsonValueKind.Object || !node.TryGetProperty(key, out var next)) return null;
+            node = next;
         }
-        return null;
+        return node.ValueKind == JsonValueKind.String && node.GetString()!.Length > 0 ? node.GetString() : null;
     }
 
     /// <summary>Replays <em>the same request once</em> — only when the server stated <c>same-request</c> (never for unknown outcomes),
@@ -186,7 +191,7 @@ public static class UnifiedRetry
         if (options == null) throw new System.ArgumentNullException(nameof(options));
         var advice = Advice(error);
         if (!advice.Replayable) throw new TansrProtocolException("not_retryable");
-        if (IdempotencyKeyOf(options) == null) throw new TansrProtocolException("retry_key_missing");
+        if (IdempotencyKeyOf(operation, options) == null) throw new TansrProtocolException("retry_key_missing");
         var budget = maxWait ?? System.TimeSpan.FromSeconds(30);
         if (budget < System.TimeSpan.Zero) throw new System.ArgumentOutOfRangeException(nameof(maxWait));
         var wait = System.TimeSpan.FromMilliseconds(advice.RetryAfterMs ?? 0);

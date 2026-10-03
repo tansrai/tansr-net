@@ -12,10 +12,15 @@ namespace Tansr.Sdk.Tests.Api;
 /// <c>./api</c> semantics), the one permitted same-request replay, and the A29 capability-intersection replay: every closure
 /// operation is called against a fake serve that answers exactly what the declared closure says — <c>enabled</c> → 200,
 /// <c>disabled</c> → 403 <c>capability_unavailable</c>, <c>unavailable</c> → 404 <c>capability_unavailable</c> — and the SDK must
-/// surface that code unchanged with a single request (no legacy prefix, no alternative operation, no retry).</summary>
+/// surface that code unchanged with a single request (no legacy prefix, no alternative operation, no retry). The real facade
+/// fences guarded session-scoped writes itself and lets the domain answer the rest; the fake answers every fenced operation the
+/// same way because what is under test is the SDK's handling of the answer, not the facade's enforcement point.</summary>
 public sealed class UnifiedCallTests
 {
     private const string TraceId = "5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d";
+
+    /// <summary>facade.ts / client.ts: <c>tansr-closure-id</c> applies to session-scoped write operations only.</summary>
+    private static bool ClosureIdApplies(ApiOperation operation) => operation.Kind == "write" && operation.Template.StartsWith("/api/sessions/:id/", StringComparison.Ordinal);
 
     private sealed class Handler(Func<HttpRequestMessage, HttpResponseMessage> respond) : HttpMessageHandler
     {
@@ -74,6 +79,9 @@ public sealed class UnifiedCallTests
             var path = request.RequestUri!.AbsolutePath;
             if (path == "/api/sessions/s/capabilities") return Json(closureJson.GetRawText(), domain: "discovery", decorate: r => r.Headers.TryAddWithoutValidation(UnifiedHeaders.ClosureId, closure.ClosureId));
             var operation = ApiRoutes.Match(request.Method.Method, path)!;
+            // facade.ts: a tansr-closure-id on anything but a session-scoped write is 400 invalid_request — a leaked header fails the replay.
+            if (request.Headers.Contains(UnifiedHeaders.ClosureId) && !ClosureIdApplies(operation))
+                return Json(Facade("invalid_request", 400, "none", "{\"header\":\"tansr-closure-id\"}"), HttpStatusCode.BadRequest, operation.Domain);
             var state = closure.State(operation);
             if (state == "enabled") return Json("{}", domain: operation.Domain);
             // facade.ts: outside-closure answers are facade-owned (requestId null) with the operation / state / closureId facts.
@@ -85,12 +93,13 @@ public sealed class UnifiedCallTests
         var declared = await client.GetCapabilityClosureAsync("s");
         Assert.Equal(closure.ClosureId, declared.ClosureId);
 
-        int enabled = 0, fenced = 0, streams = 0;
+        int enabled = 0, fenced = 0, streams = 0, guarded = 0;
         foreach (var operation in UnifiedCapabilityClosure.Operations)
         {
             if (operation.Sse) { streams++; continue; } // streams are not CallAsync subjects
             int before = handler.Requests.Count;
-            var options = Ids(operation, o => o.ClosureId = declared.ClosureId);
+            // The declared closure id travels only where the facade accepts it (session-scoped writes); elsewhere the SDK must not send it.
+            var options = Ids(operation, o => { if (ClosureIdApplies(operation)) { o.ClosureId = declared.ClosureId; guarded++; } });
             if (operation.Kind == "write") { options.Body = Element("{\"requestId\":\"r-1\"}"); options.IdempotencyKey = "r-1"; }
             if (declared.IsEnabled(operation))
             {
@@ -109,15 +118,67 @@ public sealed class UnifiedCallTests
                 Assert.False(UnifiedRetry.Advice(error).Replayable);
                 fenced++;
             }
-            // Exactly one request, on the operation's own /api template, carrying the declared closure id: no fallback of any kind.
+            // Exactly one request, on the operation's own /api template, carrying the declared closure id where it applies: no fallback of any kind.
             Assert.Equal(before + 1, handler.Requests.Count);
             var sent = handler.Requests[^1];
             Assert.StartsWith("/api/", sent.RequestUri!.AbsolutePath); Assert.Same(operation, ApiRoutes.Match(sent.Method.Method, sent.RequestUri.AbsolutePath));
-            Assert.Equal(declared.ClosureId, sent.Headers.GetValues(UnifiedHeaders.ClosureId).Single());
+            if (ClosureIdApplies(operation)) Assert.Equal(declared.ClosureId, sent.Headers.GetValues(UnifiedHeaders.ClosureId).Single());
+            else Assert.False(sent.Headers.Contains(UnifiedHeaders.ClosureId));
         }
         Assert.Equal(UnifiedCapabilityClosure.Operations.Count, enabled + fenced + streams); Assert.Equal(4, streams);
         Assert.Equal(declared.Enabled().Count(o => !o.Sse), enabled); Assert.Equal(declared.Fenced().Count(o => !o.Sse), fenced);
-        Assert.True(fenced > 0 && enabled > 0);
+        Assert.True(fenced > 0 && enabled > 0 && guarded > 0);
+        Assert.Equal(UnifiedCapabilityClosure.Operations.Count(o => !o.Sse && ClosureIdApplies(o)), guarded);
+    }
+
+    [Fact]
+    public async Task ClosureIdIsRejectedLocallyOutsideSessionScopedWrites()
+    {
+        using var handler = new Handler(_ => Json("{}"));
+        using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
+        var id = new string('a', 64);
+        foreach (var operation in new[] { ApiRoutes.SessionGet, ApiRoutes.SessionCreate, ApiRoutes.All.First(o => o.Kind == "write" && o.Domain == "cache") })
+        {
+            var error = await Assert.ThrowsAsync<TansrProtocolException>(() => client.CallAsync(operation, Ids(operation, o => o.ClosureId = id)));
+            Assert.Equal("closure_id_not_applicable", error.Code);
+        }
+        var malformed = await Assert.ThrowsAsync<TansrProtocolException>(() => client.CallAsync(ApiRoutes.SessionMessageSend, Ids(ApiRoutes.SessionMessageSend, o => o.ClosureId = "ABC")));
+        Assert.Equal("invalid_closure_id", malformed.Code);
+        Assert.Empty(handler.Requests);
+        await client.CallAsync(ApiRoutes.SessionMessageSend, Ids(ApiRoutes.SessionMessageSend, o => { o.ClosureId = id; o.Body = Element("{}"); }));
+        Assert.Equal(id, handler.Requests.Single().Headers.GetValues(UnifiedHeaders.ClosureId).Single());
+    }
+
+    [Fact]
+    public async Task IdempotencyKeyOfReadsTheBodyAtTheFamilyRequestIdPathOnly()
+    {
+        var sdk2 = ApiRoutes.CacheBindingRenew;                                   // sdk2-cache-v1 → request.requestId
+        var terminal = ApiRoutes.TerminalConfigurationCommit;                      // terminal-services-v1 → requestId
+        var session = ApiRoutes.SessionCreate;                                     // agent-session-v1 → no body position (header only)
+        var sync = ApiRoutes.All.First(o => o.Family == "archive-sync-v1" && o.Kind == "write"); // archive-sync-v1 → header only
+        Assert.Equal(new[] { "request", "requestId" }, ApiRoutes.FamilyRequestIdPath("sdk2-cache-v1")); Assert.Equal(new[] { "requestId" }, ApiRoutes.FamilyRequestIdPath("terminal-services-v1"));
+        Assert.Null(ApiRoutes.FamilyRequestIdPath("agent-session-v1")); Assert.Null(ApiRoutes.FamilyRequestIdPath("archive-sync-v1"));
+
+        Assert.Equal("c-1", UnifiedRetry.IdempotencyKeyOf(sdk2, new ApiCallOptions { Body = Element("{\"request\":{\"requestId\":\"c-1\"}}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(sdk2, new ApiCallOptions { Body = Element("{\"requestId\":\"c-1\"}") }));       // wrong position for this family
+        Assert.Equal("t-1", UnifiedRetry.IdempotencyKeyOf(terminal, new ApiCallOptions { Body = Element("{\"requestId\":\"t-1\"}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(terminal, new ApiCallOptions { Body = Element("{\"request\":{\"requestId\":\"t-1\"}}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(session, new ApiCallOptions { Body = Element("{\"requestId\":\"s-1\",\"request\":{\"requestId\":\"s-1\"}}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(sync, new ApiCallOptions { Body = Element("{\"requestId\":\"a-1\"}") }));
+        Assert.Equal("h-1", UnifiedRetry.IdempotencyKeyOf(session, new ApiCallOptions { IdempotencyKey = "h-1" }));                 // header wins everywhere
+        Assert.Equal("h-1", UnifiedRetry.IdempotencyKeyOf(sdk2, new ApiCallOptions { IdempotencyKey = "h-1", Body = Element("{\"request\":{\"requestId\":\"c-1\"}}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(sdk2, new ApiCallOptions { Body = Element("{\"request\":{\"requestId\":\"\"}}") }));   // empty string is no key
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(sdk2, new ApiCallOptions { Body = Element("{\"request\":[\"requestId\"]}") }));
+        Assert.Null(UnifiedRetry.IdempotencyKeyOf(terminal, new ApiCallOptions { RawBody = Encoding.UTF8.GetBytes("{\"requestId\":\"t-1\"}") }));
+
+        // Replay: a key at a position the family does not read is not a key — retry_key_missing, nothing sent.
+        using var handler = new Handler(_ => Json(Facade("capacity_exceeded", 429, "same-request", "{}", "c-1"), HttpStatusCode.TooManyRequests, "cache", r => r.Headers.TryAddWithoutValidation("retry-after", "1")));
+        using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
+        var options = new ApiCallOptions { Id = "b", Body = Element("{\"requestId\":\"c-1\"}") };
+        var busy = await Assert.ThrowsAsync<UnifiedApiException>(() => client.CallAsync(sdk2, options));
+        Assert.True(UnifiedRetry.Advice(busy).Replayable);
+        var missing = await Assert.ThrowsAsync<TansrProtocolException>(() => UnifiedRetry.RetrySameRequestAsync(client, sdk2, options, busy));
+        Assert.Equal("retry_key_missing", missing.Code); Assert.Single(handler.Requests);
     }
 
     [Fact]
@@ -163,7 +224,7 @@ public sealed class UnifiedCallTests
         Assert.Equal("k-1", sent.Headers.GetValues(UnifiedRequestHeaders.IdempotencyKey).Single());
         Assert.Equal("\"7\"", sent.Headers.GetValues(UnifiedRequestHeaders.IfMatch).Single()); // bare decimal normalised to the strong form
         Assert.Equal("2030-01-02T03:04:05.678Z", sent.Headers.GetValues(UnifiedRequestHeaders.Deadline).Single());
-        Assert.Equal(operation.Family != null && operation.Family != "agent-session-v1" ? "{\"requestId\":\"k-1\"}" : "{\"requestId\":\"k-1\"}", handler.Bodies[0]);
+        Assert.Equal("{\"requestId\":\"k-1\"}", handler.Bodies[0]); // strict family: canonical control encoding of the same object
 
         // A read never carries an idempotency key; a write without an expectedRevision position never carries If-Match.
         var read = ApiRoutes.All.First(o => o.Kind == "read" && !o.Sse);

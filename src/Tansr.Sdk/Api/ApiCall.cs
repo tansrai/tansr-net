@@ -80,7 +80,8 @@ public sealed class ApiCallOptions
     /// <summary>Raw body bytes (<c>application/octet-stream</c> unless <see cref="ContentType"/> says otherwise); exclusive with <see cref="Body"/>.</summary>
     public byte[]? RawBody { get; set; }
     public string? ContentType { get; set; }
-    /// <summary>Closure precondition → <c>tansr-closure-id</c> (session-scoped guarded writes; stale → 412 <c>rediscover</c>).</summary>
+    /// <summary>Closure precondition → <c>tansr-closure-id</c> (session-scoped write operations only — the facade answers 400 anywhere
+    /// else, so other operations are rejected locally with <c>closure_id_not_applicable</c>; stale → 412 <c>rediscover</c>).</summary>
     public string? ClosureId { get; set; }
     /// <summary>Write-operation idempotency key → <c>Idempotency-Key</c> (1–128 printable ASCII). Rejected locally on reads / streams
     /// (<c>invalid_idempotency_key</c>) because the facade answers 400 <c>idempotency_key_not_applicable</c>.</summary>
