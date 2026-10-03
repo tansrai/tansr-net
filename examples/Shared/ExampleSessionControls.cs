@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Terminal;
 
@@ -187,15 +188,18 @@ internal sealed class ExampleSessionControls
         if (error is TansrProtocolException)
             return error.Code == "contract_mismatch" || error.Code == "unsupported_capability" || error.Code == "payload_too_large";
         if (error is not TansrHttpException http) return false;
-        if (http.DomainStatus == 409 && ((http.DomainCode == "revision_conflict" && http.DomainRetryAction == "refresh") ||
-            (http.DomainCode == "busy" && http.DomainRetryAction == "backoff"))) return true;
+        // D19: the refusals below are the terminal family's own pre-commit answers, so the family fact decides — read from
+        // UnifiedApiException.Detail on a unified envelope (null when the facade translated nothing), from the wire on a passthrough.
+        string? code = FamilyFacts.Code(http), retry = FamilyFacts.RetryAction(http); int? status = FamilyFacts.Status(http);
+        if (status == 409 && ((code == "revision_conflict" && retry == "refresh") || (code == "busy" && retry == "backoff"))) return true;
         if (kind != "configuration") return false;
-        // UAPI-01: the unified envelope carries the session family's own code/status/retryAction in detail.domain*;
-        // the outer code/status are the facade mapping and must not be matched against family codes.
-        return (http.DomainStatus == 409 && ((http.DomainCode == "context_transition_required" && http.DomainRetryAction == "refresh") ||
-            (http.DomainCode == "unsupported_capability" && http.DomainRetryAction == "discover"))) ||
-            (http.DomainStatus == 400 && http.DomainCode == "invalid_request" && http.DomainRetryAction == "none") ||
-            (http.DomainStatus == 429 && http.DomainCode == "request_limit" && http.DomainRetryAction == "backoff");
+        // Refused before any domain saw it: a unified 400 invalid_request / none with no family translation (facade or request-header layer).
+        if (http is UnifiedApiException unified && unified.Code == UnifiedErrorCode.InvalidRequest && unified.StatusCode == 400 &&
+            unified.RetryAction == UnifiedRetryAction.None && unified.Detail.DomainStatus == null) return true;
+        return (status == 409 && ((code == "context_transition_required" && retry == "refresh") ||
+            (code == "unsupported_capability" && retry == "discover"))) ||
+            (status == 400 && code == "invalid_request" && retry == "none") ||
+            (status == 429 && code == "request_limit" && retry == "backoff");
     }
 
     private JsonElement? Read(string kind)

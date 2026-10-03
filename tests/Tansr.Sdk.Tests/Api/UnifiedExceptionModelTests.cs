@@ -8,11 +8,26 @@ using Tansr.Sdk.Client;
 namespace Tansr.Sdk.Tests.Api;
 
 /// <summary>D19 (U8-NET): the public face of every <c>/api</c> failure is the unified code + <c>retryAction</c>; the family code is
-/// a detail (<c>Detail.DomainCode</c>) and the former <c>Domain*</c> reads are bridges that fall back to the unified values. The 19
-/// codes, 6 retry actions and 17 reasons are pinned to the vendored schema so a vocabulary drift fails here, not at a catch site.</summary>
+/// a detail (<c>Detail.DomainCode</c>) and the former <c>Domain*</c> reads are obsolete read-only bridges that fall back to the unified
+/// values. The 19 codes, 6 retry actions and 17 reasons are pinned to the vendored schema so a vocabulary drift fails here, not at a catch site.</summary>
 public sealed class UnifiedExceptionModelTests
 {
     private const string TraceId = "5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d";
+
+    [Fact]
+    public void DomainBridgeIsAnObsoleteReadOnlyBridgeAndNotRedeclaredOnTheUnifiedException()
+    {
+        foreach (var name in new[] { "DomainCode", "DomainStatus", "DomainRetryAction" })
+        {
+            var bridge = typeof(TansrHttpException).GetProperty(name);
+            Assert.NotNull(bridge); Assert.False(bridge!.CanWrite); Assert.False(bridge.GetMethod!.IsVirtual);
+            Assert.NotNull(System.Reflection.CustomAttributeExtensions.GetCustomAttribute<ObsoleteAttribute>(bridge));
+            Assert.Null(typeof(UnifiedApiException).GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.DeclaredOnly));
+        }
+        // The primary face carries no obsolete mark.
+        foreach (var name in new[] { "Code", "StatusCode", "RetryAction", "Detail" })
+            Assert.Null(System.Reflection.CustomAttributeExtensions.GetCustomAttribute<ObsoleteAttribute>(typeof(UnifiedApiException).GetProperty(name)!));
+    }
     private static readonly JsonDocument Schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json")));
 
     private static string[] Enum(string definition) =>
@@ -82,8 +97,10 @@ public sealed class UnifiedExceptionModelTests
             var error = Decode(Envelope(code, status, action, requestId, detail), status);
             Assert.Equal(code, error.Code); Assert.Equal(status, error.StatusCode); Assert.Equal(action, error.RetryAction);
             Assert.Equal(TraceId, error.TraceId); Assert.Equal(requestId, error.RequestId);
-            // Bridge reads fall back to the unified values when no family fact was translated.
+            // The (obsolete) bridge reads fall back to the unified values when no family fact was translated.
+#pragma warning disable CS0618
             Assert.Equal(detail == null ? code : "closure_stale", error.DomainCode); Assert.Equal(status, error.DomainStatus); Assert.Equal(action, error.DomainRetryAction);
+#pragma warning restore CS0618
             Assert.Equal(detail == null, error.Detail.IsEmpty || error.Detail.DomainCode == null);
         }
         // A retry action the code does not allow is a malformed envelope, never a misread business error.
@@ -125,13 +142,17 @@ public sealed class UnifiedExceptionModelTests
         Assert.Equal(UnifiedErrorCode.Conflict, error.Code); Assert.Equal(UnifiedRetryAction.Refresh, error.RetryAction);
         Assert.Equal("revision_conflict", error.Detail.DomainCode); Assert.Equal(409, error.Detail.DomainStatus); Assert.Equal("refresh", error.Detail.DomainRetryAction);
         Assert.Equal("terminal", error.Detail.Domain); Assert.Equal("terminal-services-v1", error.Family);
+#pragma warning disable CS0618
         Assert.Equal(error.Detail.DomainCode, error.DomainCode); Assert.False(error.FacadeOwned);
+#pragma warning restore CS0618
         // Consumption rule: switch on Code first, refine on Detail.DomainCode.
         var handled = error.Code switch { UnifiedErrorCode.Conflict when error.Detail.DomainCode == "revision_conflict" => "refresh-config", UnifiedErrorCode.Conflict => "generic", _ => "other" };
         Assert.Equal("refresh-config", handled);
         // A family that reports no retry position: domainRetryAction null on the wire ⇒ bridge reads null, unified action still primary.
         var silent = Decode(Envelope("gone", 410, "none", "s-1", "{\"domain\":\"session\",\"family\":\"agent-session-v1\",\"domainCode\":\"session_ended\",\"domainStatus\":410,\"domainRetryAction\":null}"), 410);
+#pragma warning disable CS0618
         Assert.True(silent.Detail.HasDomainRetryAction); Assert.Null(silent.DomainRetryAction); Assert.Equal(UnifiedRetryAction.None, silent.RetryAction);
+#pragma warning restore CS0618
         Assert.Equal("none", UnifiedRetry.Advice(silent).Action);
     }
 
@@ -192,6 +213,8 @@ public sealed class UnifiedExceptionModelTests
         Assert.Null(error.Detail.Domain); Assert.Null(error.Detail.LimitBytes); Assert.Null(error.Detail.ClosureId);
         var bare = Decode(Envelope("unauthorized", 401, "none", null), 401);
         Assert.True(bare.Detail.IsEmpty); Assert.Same(UnifiedErrorDetail.Empty, bare.Detail); Assert.Null(bare.Reason); Assert.Null(bare.Detail.Raw);
+#pragma warning disable CS0618
         Assert.Equal("unauthorized", bare.DomainCode); Assert.True(bare.FacadeOwned);
+#pragma warning restore CS0618
     }
 }

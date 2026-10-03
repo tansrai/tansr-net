@@ -14,11 +14,14 @@ public class TansrException : Exception
 }
 
 /// <summary>HTTP 错误事实。统一信封（<c>/api</c>，UAPI-01 / D19）由派生类 <c>Tansr.Sdk.Api.UnifiedApiException</c> 承载：
-/// 其 <see cref="Code"/>/<see cref="StatusCode"/>/<see cref="RetryAction"/> 为统一值，原族事实在其 <c>Detail</c>；
-/// <see cref="DomainCode"/>/<see cref="DomainStatus"/>/<see cref="DomainRetryAction"/> 为桥接读法（不再是主判据）。
-/// 直接实例仅出现在门面未包装的族直通信封（archive-sync-v1）与各族 wire 严格 <c>ErrorResponse</c> 残余路径，此时二者相同。</summary>
+/// 其 <see cref="Code"/>/<see cref="StatusCode"/>/<see cref="RetryAction"/> 为统一值，原族事实在其 <c>Detail</c>
+/// （<c>Detail.DomainCode / DomainStatus / DomainRetryAction</c>，无族事实时为 null，与 Node <c>ApiError.domainCode</c> 同形）。
+/// 旧读法 <see cref="DomainCode"/>/<see cref="DomainStatus"/>/<see cref="DomainRetryAction"/> 保留为只读桥接并已标弃用：
+/// 无族事实时回落统一值，不再是主判据，1.0 前移除。直接实例仅出现在门面未包装的族直通信封（archive-sync-v1）与各族 wire 严格
+/// <c>ErrorResponse</c> 残余路径，此时族事实即 <see cref="Code"/>/<see cref="StatusCode"/>/<see cref="RetryAction"/>。</summary>
 public class TansrHttpException : TansrException
 {
+    internal const string DomainBridgeObsolete = "D19: branch on Code / StatusCode / RetryAction (the unified face). The family fact is UnifiedApiException.Detail.DomainCode / DomainStatus / DomainRetryAction (null when absent); on a family passthrough it is Code / StatusCode / RetryAction itself. This bridge falls back to the unified value and will be removed before 1.0.";
     public TansrHttpException(int statusCode, string code, string? scope = null, string? reason = null,
         string? retryAction = null, int? retryAfterMs = null, string? inputOutcome = null) : base(code)
     { StatusCode = statusCode; Scope = scope; Reason = reason; RetryAction = retryAction; RetryAfterMs = retryAfterMs; InputOutcome = inputOutcome; }
@@ -31,12 +34,20 @@ public class TansrHttpException : TansrException
     public int? RetryAfterMs { get; }
     /// <summary>仅原 inputs 端点的 closed/rejected 事实；不会把其它端点的顶层 code 当作合法错误。</summary>
     public string? InputOutcome { get; }
-    /// <summary>原族错误码（统一信封 <c>detail.domainCode</c>；族自有信封即 <see cref="Code"/>）。</summary>
-    public virtual string DomainCode => Code;
-    /// <summary>原族 wire 状态（统一信封 <c>detail.domainStatus</c>；族自有信封即 <see cref="StatusCode"/>）。</summary>
-    public virtual int DomainStatus => StatusCode;
-    /// <summary>原族 retryAction（统一信封 <c>detail.domainRetryAction</c>）。</summary>
-    public virtual string? DomainRetryAction => RetryAction;
+    /// <summary>桥接（已弃用）：原族错误码；统一信封取 <c>Detail.DomainCode</c>，缺席回落 <see cref="Code"/>。改读 <c>UnifiedApiException.Detail.DomainCode</c>。</summary>
+    [Obsolete(DomainBridgeObsolete)]
+    public string DomainCode => FamilyCode;
+    /// <summary>桥接（已弃用）：原族 wire 状态；统一信封取 <c>Detail.DomainStatus</c>，缺席回落 <see cref="StatusCode"/>。改读 <c>UnifiedApiException.Detail.DomainStatus</c>。</summary>
+    [Obsolete(DomainBridgeObsolete)]
+    public int DomainStatus => FamilyStatus;
+    /// <summary>桥接（已弃用）：原族 retryAction；统一信封在 <c>domainRetryAction</c> 在场时取其值（可为 null），否则回落 <see cref="RetryAction"/>。改读 <c>UnifiedApiException.Detail.DomainRetryAction</c>。</summary>
+    [Obsolete(DomainBridgeObsolete)]
+    public string? DomainRetryAction => FamilyRetryAction;
+
+    // SDK 内部的族客户端（会话 / 执行 / 档案）按各族状态机分支，需要族事实；统一信封从 Detail 取、族直通形即自身。
+    internal virtual string FamilyCode => Code;
+    internal virtual int FamilyStatus => StatusCode;
+    internal virtual string? FamilyRetryAction => RetryAction;
 }
 
 public sealed class TansrProtocolException : TansrException

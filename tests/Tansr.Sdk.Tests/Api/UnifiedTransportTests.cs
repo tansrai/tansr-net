@@ -83,7 +83,10 @@ public sealed class UnifiedTransportTests
         var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<UnifiedApiException>(() => session.CancelAsync());
         Assert.Equal("conflict", error.Code); Assert.Equal(409, error.StatusCode); Assert.Equal("refresh", error.RetryAction);
+        Assert.Equal("session_ended", error.Detail.DomainCode); Assert.Equal(409, error.Detail.DomainStatus); Assert.Equal("none", error.Detail.DomainRetryAction);
+#pragma warning disable CS0618 // the obsolete bridge reads the same family facts
         Assert.Equal("session_ended", error.DomainCode); Assert.Equal(409, error.DomainStatus); Assert.Equal("none", error.DomainRetryAction);
+#pragma warning restore CS0618
         Assert.Equal("req-1", error.RequestId); Assert.Equal("5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d", error.TraceId); Assert.False(error.FacadeOwned);
         Assert.Equal("session", error.Domain); Assert.Equal(ApiRoutes.ManifestRevision, error.Meta.ManifestRevision);
         // The family-native exception type is still what business code catches.
@@ -98,7 +101,10 @@ public sealed class UnifiedTransportTests
         using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<TansrHttpException>(() => session.CancelAsync());
-        Assert.Equal("session_ended", error.Code); Assert.Equal(409, error.StatusCode); Assert.Equal(error.Code, error.DomainCode);
+        Assert.Equal("session_ended", error.Code); Assert.Equal(409, error.StatusCode); Assert.IsNotType<UnifiedApiException>(error);
+#pragma warning disable CS0618 // passthrough: the obsolete bridge is the wire value itself
+        Assert.Equal(error.Code, error.DomainCode);
+#pragma warning restore CS0618
     }
 
     [Fact]
@@ -121,7 +127,7 @@ public sealed class UnifiedTransportTests
         using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new());
         var error = await Assert.ThrowsAsync<UnifiedApiException>(() => session.CancelAsync());
-        Assert.True(error.RequiresRediscovery); Assert.True(error.FacadeOwned); Assert.Equal(new string('b', 64), error.ClosureId); Assert.Equal("closure_stale", error.DomainCode);
+        Assert.True(error.RequiresRediscovery); Assert.True(error.FacadeOwned); Assert.Equal(new string('b', 64), error.ClosureId); Assert.Equal("closure_stale", error.Detail.DomainCode);
         Assert.Equal(2, handler.Requests.Count); // no automatic retry: rediscovery is the caller's decision
     }
 

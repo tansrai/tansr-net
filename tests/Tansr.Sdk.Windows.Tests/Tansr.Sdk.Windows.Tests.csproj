@@ -3,6 +3,7 @@
   <ItemGroup>
     <None Update="Storage/node-memory-publication-interop.mjs" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Storage/Fixtures/memory-publication-source-manifest.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Include="../../examples/Shared/FamilyFacts.cs" Link="Shared/FamilyFacts.cs" />
     <Compile Include="../../examples/Shared/NativeToolHost.cs" Link="Shared/NativeToolHost.cs" />
     <Compile Include="../../examples/Shared/NativeTerminalDeviceHost.cs" Link="Shared/NativeTerminalDeviceHost.cs" />
     <Compile Include="../../examples/Shared/NativeMcpToolConnection.cs" Link="Shared/NativeMcpToolConnection.cs" />

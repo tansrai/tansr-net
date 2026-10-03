@@ -97,7 +97,9 @@ public sealed class UnifiedGoldenTests
             Assert.Equal(value["detail"]?["reason"]?.GetValue<string>(), unified.Reason);
             Assert.Equal(value["detail"]?["operation"]?.GetValue<string>(), unified.Detail.Operation); Assert.Equal(value["detail"]?["state"]?.GetValue<string>(), unified.Detail.State);
             // Facade-owned: no family translation happened; the only facade domain code is closure_stale (precondition_failed).
+#pragma warning disable CS0618 // the obsolete bridge must still read the same facts
             Assert.Equal(value["detail"]?["domainCode"]?.GetValue<string>() ?? unified.Code, unified.DomainCode); Assert.Equal(unified.StatusCode, unified.DomainStatus);
+#pragma warning restore CS0618
             Assert.Equal(value["detail"]?["closureId"]?.GetValue<string>(), unified.ClosureId);
         }
         else Assert.True(error is ContractUnavailableException { Reason: "invalid_error_body" } || Divergence("FacadeError", name, error), Describe(name, error));
@@ -114,11 +116,13 @@ public sealed class UnifiedGoldenTests
             Assert.Equal(value["code"]!.GetValue<string>(), unified.Code); Assert.Equal(value["status"]!.GetValue<int>(), unified.StatusCode);
             Assert.Equal(value["requestId"]?.GetValue<string>(), unified.RequestId);
             Assert.Equal(value["retryAfterMs"]?.GetValue<int>(), unified.RetryAfterMs);
-            // Domain facts: translated values when present, otherwise the unified values (business catch sites read
-            // Domain* uniformly; a null domainRetryAction on the wire means "the family had no action position").
+            // Obsolete Domain* bridge: translated values when present, otherwise the unified values (a null domainRetryAction on
+            // the wire means "the family had no action position"). The primary reads are Code / Detail.DomainCode below.
+#pragma warning disable CS0618
             Assert.Equal(detail?["domainCode"]?.GetValue<string>() ?? unified.Code, unified.DomainCode);
             Assert.Equal(detail?["domainStatus"]?.GetValue<int>() ?? unified.StatusCode, unified.DomainStatus);
             Assert.Equal(detail != null && detail.ContainsKey("domainRetryAction") ? detail["domainRetryAction"]?.GetValue<string>() : unified.RetryAction, unified.DomainRetryAction);
+#pragma warning restore CS0618
             Assert.Equal(detail?["family"]?.GetValue<string>(), unified.Family);
             Assert.Equal(detail?["fallback"]?.GetValue<string>(), unified.Fallback);
             Assert.Equal(detail?["closureId"]?.GetValue<string>(), unified.ClosureId);

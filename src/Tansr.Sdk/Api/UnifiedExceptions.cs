@@ -57,14 +57,11 @@ public sealed class UnifiedApiException : TansrHttpException
     private static string? Text(JsonElement? detail, string name) =>
         detail.HasValue && detail.Value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() : null;
 
-    // ---- D19 bridge: family facts forwarded from Detail. These exist so pre-D19 catch sites keep compiling; they are not
-    // the primary discriminator. A missing family fact falls back to the unified value (what the family would have said).
-    /// <summary>Bridge: <c>Detail.DomainCode ?? Code</c>. Prefer <c>Detail.DomainCode</c> (null when no family code exists).</summary>
-    public override string DomainCode => Detail.DomainCode ?? Code;
-    /// <summary>Bridge: <c>Detail.DomainStatus ?? StatusCode</c>.</summary>
-    public override int DomainStatus => Detail.DomainStatus ?? StatusCode;
-    /// <summary>Bridge: <c>Detail.DomainRetryAction</c> when the key was present on the wire (possibly null), else <see cref="RetryAction"/>.</summary>
-    public override string? DomainRetryAction => Detail.HasDomainRetryAction ? Detail.DomainRetryAction : RetryAction;
+    // ---- D19: family facts live in Detail. The inherited (obsolete) Domain* bridge reads them from here and falls back to the
+    // unified value when the family fact is absent; SDK-internal family clients read the same through Family*.
+    internal override string FamilyCode => Detail.DomainCode ?? Code;
+    internal override int FamilyStatus => Detail.DomainStatus ?? StatusCode;
+    internal override string? FamilyRetryAction => Detail.HasDomainRetryAction ? Detail.DomainRetryAction : RetryAction;
     /// <summary>Bridge: cache family <c>detail.fallback</c> (none | legacy-cold).</summary>
     public string? Fallback => Detail.Fallback;
     /// <summary>Bridge: <c>detail.family</c>.</summary>

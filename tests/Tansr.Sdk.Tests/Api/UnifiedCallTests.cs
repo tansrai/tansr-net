@@ -113,8 +113,10 @@ public sealed class UnifiedCallTests
                 Assert.Equal(declared.ExpectedStatus(operation), error.StatusCode); Assert.True(error.FacadeOwned);
                 Assert.Equal(UnifiedErrorReason.OutsideClosure, error.Reason); Assert.Equal(operation.Name, error.Detail.Operation); Assert.Equal(declared.State(operation), error.Detail.State);
                 Assert.Equal(declared.ClosureId, error.ClosureId);
-                // D19 bridge: no family translated this, so the family face equals the unified face — nothing to "downgrade" to.
+                // D19 (obsolete) bridge: no family translated this, so the family face equals the unified face — nothing to "downgrade" to.
+#pragma warning disable CS0618
                 Assert.Equal(error.Code, error.DomainCode); Assert.Equal(error.StatusCode, error.DomainStatus);
+#pragma warning restore CS0618
                 Assert.False(UnifiedRetry.Advice(error).Replayable);
                 fenced++;
             }

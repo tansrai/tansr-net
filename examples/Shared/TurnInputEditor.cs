@@ -56,7 +56,8 @@ internal sealed class TurnInputEditor
                 Save(record.With("accepted", result.GetRawText()));
                 return Describe();
             }
-            catch (TansrHttpException error) when (error.DomainCode == "input_not_found")
+            // 族事实判定（D19：统一信封取 Detail.DomainCode，inputs 端点直通形即 Code）：该码不在门面码表内，统一码不区分它。
+            catch (TansrHttpException error) when (FamilyFacts.Code(error) == "input_not_found")
             {
                 // current-and-last-turn 保留窗外的 404 不能证明旧输入从未接纳。
                 Save(record.With("not_found", null));

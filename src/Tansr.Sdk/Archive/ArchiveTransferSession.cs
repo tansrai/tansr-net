@@ -79,7 +79,7 @@ public sealed class ArchiveTransferSession
     private async Task<JsonElement> PostAck(JsonElement ack, Action check, CancellationToken ct)
     {
         try { return await _client.AcknowledgeAsync(ack, ct).ConfigureAwait(false); }
-        catch (TansrHttpException error) when (error.DomainStatus == 409 && error.DomainCode == "binding_conflict")
+        catch (TansrHttpException error) when (error.FamilyStatus == 409 && error.FamilyCode == "binding_conflict")
         { check(); throw new ArchiveAcknowledgementConflictException(ack); }
     }
     private async Task<byte[]> Download(JsonElement reference, JsonElement limits, Action check, CancellationToken ct)
