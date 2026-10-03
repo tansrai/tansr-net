@@ -46,7 +46,7 @@ if (-not $RecoveryCliRoot) {
 Exclude-WindowsMethod 'Execution.WindowsExecutionBenchmarkTests.OriginalElectronAndServeShareSameFlushedCommandAndQpcCollector' 'Requires its existing Electron/Serve/QPC benchmark runner; not an ordinary unit test.'
 if (-not $PreviousPackageDirectory) { $scope.notRun += @{ name = 'Previous-package public API and upgrade/rollback'; reason = 'No approved previous package input. Never compare a new package to itself as compatibility evidence.' } }
 $filter = ($scope.excludedWindowsMethods | ForEach-Object { 'FullyQualifiedName!=' + $_.name }) -join '&'
-$steps = @('toolchain', 'node-version', 'contract', 'parity', 'parity-tests', 'ci-receipt-tests')
+$steps = @('toolchain', 'node-version', 'contract', 'parity', 'parity-tests', 'api-routes-check', 'api-routes-tests', 'ci-receipt-tests')
 if ($CliRoot) { $steps += @('upstream-contract', 'upstream-parity', 'node-session-compatibility') }
 $steps += @('native-mcp-publish', 'locked-restore', 'release-build', 'core-tests', 'windows-tests', 'sandbox-golden', 'framework-mcp', 'framework-session', 'format', 'pack-core', 'pack-windows', 'package-notices', 'package-consumers', 'package-examples')
 if ($PreviousPackageDirectory) { $steps += 'public-api' }
