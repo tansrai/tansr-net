@@ -27,10 +27,13 @@ public sealed class UnifiedGoldenTests
 
     private static JsonElement Vector(string name) => Golden.RootElement.GetProperty("vectors").EnumerateArray().Single(v => v.GetProperty("name").GetString() == name);
 
-    /// <summary>Materialises the vector value: inline `value`, or `base` + `patch`.</summary>
+    /// <summary>Materialises the vector value: inline `value`, `valueFile` (a repo artifact referenced by path — the vendored copy
+    /// under `contract/` is byte-identical to the cli source, as the lock pins), or `base` + `patch`.</summary>
     internal static JsonNode? Value(JsonElement vector)
     {
         if (vector.TryGetProperty("value", out var inline)) return JsonNode.Parse(inline.GetRawText());
+        if (vector.TryGetProperty("valueFile", out var file))
+            return JsonNode.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", Path.GetFileName(file.GetString()!))));
         var node = Value(Vector(vector.GetProperty("base").GetString()!));
         foreach (var operation in vector.GetProperty("patch").EnumerateArray())
         {
@@ -88,7 +91,11 @@ public sealed class UnifiedGoldenTests
             Assert.Equal(value["code"]!.GetValue<string>(), unified.Code); Assert.Equal(value["status"]!.GetValue<int>(), unified.StatusCode);
             Assert.Equal(value["retryAction"]!.GetValue<string>(), unified.RetryAction); Assert.Equal(value["traceId"]!.GetValue<string>(), unified.TraceId);
             Assert.Contains(unified.Code, UnifiedErrorEnvelope.FacadeCodes);
-            Assert.Equal(unified.Code == "precondition_failed", unified.RequiresRediscovery);
+            // D19: the follow-up is read from retryAction, not inferred from the code.
+            Assert.Equal(unified.RetryAction == UnifiedRetryAction.Rediscover, unified.RequiresRediscovery);
+            Assert.Equal(unified.RetryAction == UnifiedRetryAction.Refresh, unified.RequiresRefresh);
+            Assert.Equal(value["detail"]?["reason"]?.GetValue<string>(), unified.Reason);
+            Assert.Equal(value["detail"]?["operation"]?.GetValue<string>(), unified.Detail.Operation); Assert.Equal(value["detail"]?["state"]?.GetValue<string>(), unified.Detail.State);
             // Facade-owned: no family translation happened; the only facade domain code is closure_stale (precondition_failed).
             Assert.Equal(value["detail"]?["domainCode"]?.GetValue<string>() ?? unified.Code, unified.DomainCode); Assert.Equal(unified.StatusCode, unified.DomainStatus);
             Assert.Equal(value["detail"]?["closureId"]?.GetValue<string>(), unified.ClosureId);
@@ -116,6 +123,13 @@ public sealed class UnifiedGoldenTests
             Assert.Equal(detail?["fallback"]?.GetValue<string>(), unified.Fallback);
             Assert.Equal(detail?["closureId"]?.GetValue<string>(), unified.ClosureId);
             if (detail != null && detail.ContainsKey("domainStatus")) Assert.False(unified.FacadeOwned, name);
+            // D19 primary face: unified code + retryAction; the family code is a detail.
+            Assert.Equal(value["retryAction"]!.GetValue<string>(), unified.RetryAction);
+            Assert.Equal(detail?["domainCode"]?.GetValue<string>(), unified.Detail.DomainCode);
+            Assert.Equal(detail?["reason"]?.GetValue<string>(), unified.Reason); Assert.Equal(detail?["header"]?.GetValue<string>(), unified.Header);
+            Assert.Equal(detail?["limitBytes"]?.GetValue<int>(), unified.Detail.LimitBytes);
+            Assert.Equal(unified.RetryAction == UnifiedRetryAction.Refresh, unified.RequiresRefresh);
+            Assert.Equal(unified.RetryAction == UnifiedRetryAction.Rediscover, unified.RequiresRediscovery);
         }
         else Assert.True(error is ContractUnavailableException { Reason: "invalid_error_body" } || Divergence("UnifiedError", name, error), Describe(name, error));
     }
@@ -184,6 +198,136 @@ public sealed class UnifiedGoldenTests
         if (valid) Assert.True(accepted, name);
         else if (tansr.Count > 0) Assert.False(accepted, name);
         else Assert.True(true, "server-side vocabulary vector: " + name);
+    }
+
+    public static IEnumerable<object[]> CapabilityClosures => Names("CapabilityClosure");
+    public static IEnumerable<object[]> Capabilities => Names("Capabilities");
+    public static IEnumerable<object[]> Manifests => Names("Manifest");
+
+    [Theory]
+    [MemberData(nameof(CapabilityClosures))]
+    public void CapabilityClosureVectorsDecodeStrictlyWithTheIdRederived(string name)
+    {
+        var vector = Vector(name); var bytes = Bytes(Value(vector));
+        if (vector.GetProperty("expect").GetString() == "valid")
+        {
+            var closure = UnifiedCapabilityClosure.Parse(bytes); var value = Value(vector)!;
+            Assert.Equal(value["closureId"]!.GetValue<string>(), closure.ClosureId);
+            Assert.Equal(value["authorizationRevision"]?.GetValue<string>(), closure.AuthorizationRevision);
+            foreach (var domain in UnifiedCapabilityClosure.Domains)
+            {
+                Assert.Equal(value["domains"]![domain]!["installed"]!.GetValue<bool>(), closure.Domain(domain).Installed);
+                Assert.Equal(value["domains"]![domain]!["revision"]?.GetValue<string>(), closure.Domain(domain).Revision);
+            }
+            foreach (var operation in UnifiedCapabilityClosure.Operations)
+            {
+                var state = value["operations"]![operation.Name]!.GetValue<string>();
+                Assert.Equal(state, closure.State(operation)); Assert.Equal(state == "enabled", closure.IsEnabled(operation));
+                Assert.Equal(state switch { "disabled" => 403, "unavailable" => 404, _ => (int?)null }, closure.ExpectedStatus(operation));
+            }
+            Assert.Equal(UnifiedCapabilityClosure.Operations.Count, closure.Enabled().Count + closure.Fenced().Count);
+        }
+        else
+        {
+            var error = Record.Exception(() => UnifiedCapabilityClosure.Parse(bytes));
+            Assert.True(error is TansrProtocolException { Code: "invalid_closure" }, Describe(name, error));
+        }
+    }
+
+    [Theory]
+    [MemberData(nameof(Capabilities))]
+    public void CapabilitiesVectorsDecodeStrictlyWithoutUrlNavigationFields(string name)
+    {
+        var vector = Vector(name); var bytes = Bytes(Value(vector));
+        if (vector.GetProperty("expect").GetString() == "valid")
+        {
+            var capabilities = UnifiedCapabilities.Parse(bytes); var value = Value(vector)!;
+            Assert.Equal(value["manifestRevision"]!.GetValue<int>(), capabilities.ManifestRevision);
+            Assert.Equal(value["schemaHash"]!.GetValue<string>(), capabilities.SchemaHash);
+            foreach (var domain in UnifiedCapabilityClosure.Domains)
+            {
+                var expected = value["domains"]![domain]!; var actual = capabilities.Domain(domain);
+                Assert.Equal(expected["installed"]!.GetValue<bool>(), actual.Installed); Assert.Equal(expected["contract"]!.GetValue<string>(), actual.Contract);
+                Assert.Equal(expected["status"]!.GetValue<string>(), actual.Status); Assert.Equal(expected["schemaHash"]!.GetValue<string>(), actual.SchemaHash);
+                Assert.Equal(ApiRoutes.DomainFamily(domain), actual.Contract);
+                Assert.Equal(expected["family"]?["preferred"]?.GetValue<string>(), actual.PreferredFamily);
+                Assert.Equal(expected["family"]?["available"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.AvailableFamilies);
+            }
+            foreach (var operation in ApiRoutes.All)
+                Assert.Equal(operation.Domain == "discovery" || value["domains"]![operation.Domain]!["installed"]!.GetValue<bool>(), capabilities.IsInstalled(operation));
+        }
+        else
+        {
+            var error = Record.Exception(() => UnifiedCapabilities.Parse(bytes));
+            Assert.True(error is TansrProtocolException { Code: "invalid_capabilities" }, Describe(name, error));
+        }
+    }
+
+    /// <summary>The manifest is consumed at build time (generate-api-routes.mjs → ApiRoutes.generated.cs); the runtime never parses
+    /// one. The valid repo-artifact vector is therefore replayed against the generated table — every operation fact the SDK acts on
+    /// (method, template, kind, sse, family, domain, etagPath, expectedRevision) and every family fact (sha256, requestIdPath) must
+    /// agree. The negative vectors are generator-validation subjects and are accounted as such in <see cref="NotConsumed"/>.</summary>
+    [Fact]
+    public void ManifestRepoArtifactVectorAgreesWithTheGeneratedRouteTable()
+    {
+        var manifest = Value(Vector("manifest-repo-artifact"))!.AsObject();
+        Assert.Equal(ApiRoutes.Contract, manifest["contract"]!.GetValue<string>());
+        var operations = manifest["operations"]!.AsArray();
+        Assert.Equal(ApiRoutes.All.Count, operations.Count);
+        for (int i = 0; i < operations.Count; i++)
+        {
+            var expected = operations[i]!.AsObject(); var actual = ApiRoutes.All[i];
+            Assert.Equal(expected["name"]!.GetValue<string>(), actual.Name); Assert.Equal(expected["domain"]!.GetValue<string>(), actual.Domain);
+            Assert.Equal(expected["family"]?.GetValue<string>(), actual.Family); Assert.Equal(expected["method"]!.GetValue<string>(), actual.Method);
+            Assert.Equal(expected["apiPath"]!.GetValue<string>(), actual.Template); Assert.Equal(expected["kind"]!.GetValue<string>(), actual.Kind);
+            Assert.Equal(expected["sse"]!.GetValue<bool>(), actual.Sse);
+            Assert.Equal(expected["aliases"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.Aliases);
+            Assert.Equal(expected["query"]!.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.QueryParameters);
+            Assert.Equal(expected["etagPath"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.EtagPath);
+            Assert.Equal(expected["expectedRevision"]?["path"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.ExpectedRevisionPath);
+            Assert.Equal(expected["expectedRevision"]?["kind"]?.GetValue<string>(), actual.ExpectedRevisionKind);
+            Assert.Equal(actual.ExpectedRevisionPath != null, actual.AcceptsIfMatch); Assert.Equal(actual.Kind == "write", actual.AcceptsIdempotencyKey);
+        }
+        var families = manifest["families"]!.AsArray();
+        foreach (var family in families)
+        {
+            var id = family!["id"]!.GetValue<string>();
+            Assert.Equal(family["requestIdPath"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), ApiRoutes.FamilyRequestIdPath(id));
+        }
+        // Closure catalogue = manifest operations minus discovery minus the session-contract probe (closure.ts CLOSURE_OPERATIONS).
+        var schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json")));
+        var fenced = schema.RootElement.GetProperty("definitions").GetProperty("CapabilityClosure").GetProperty("properties").GetProperty("operations").GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray();
+        Assert.Equal(fenced, UnifiedCapabilityClosure.Operations.Select(o => o.Name).ToArray());
+        Assert.Equal(77, fenced.Length);
+    }
+
+    /// <summary>Vectors with no C# consumer, each with the reason. Everything else in the fixture must be replayed by a theory above;
+    /// <see cref="EveryGoldenVectorIsReplayedOrExplicitlyNotConsumed"/> fails when the fixture grows without this list (or a test) following.</summary>
+    private static readonly Dictionary<string, string> NotConsumed = new(StringComparer.Ordinal)
+    {
+        ["Manifest/manifest-runtime-view"] = "runtime manifest view is served by the facade; the SDK consumes the manifest only at build time (generated ApiRoutes)",
+    };
+
+    private static bool ManifestNegative(JsonElement vector) =>
+        vector.GetProperty("definition").GetString() == "Manifest" && vector.GetProperty("expect").GetString() == "invalid";
+
+    [Fact]
+    public void EveryGoldenVectorIsReplayedOrExplicitlyNotConsumed()
+    {
+        var replayed = new[] { "FacadeError", "UnifiedError", "EventEnvelope", "ResponseHeaders", "RequestHeaders", "CapabilityClosure", "Capabilities" };
+        int total = 0, consumed = 0, generatorSubjects = 0, declared = 0;
+        foreach (var vector in Golden.RootElement.GetProperty("vectors").EnumerateArray())
+        {
+            total++;
+            var definition = vector.GetProperty("definition").GetString()!; var name = vector.GetProperty("name").GetString()!;
+            if (replayed.Contains(definition) || name == "manifest-repo-artifact") { consumed++; continue; }
+            if (ManifestNegative(vector)) { generatorSubjects++; continue; } // validated by generate-api-routes.mjs at build time, not by the runtime
+            Assert.True(NotConsumed.ContainsKey(definition + "/" + name), "unaccounted golden vector: " + definition + "/" + name);
+            declared++;
+        }
+        Assert.Equal(165, total); Assert.Equal(total, consumed + generatorSubjects + declared);
+        Assert.Equal(NotConsumed.Count, declared); Assert.Equal(23, generatorSubjects);
+        foreach (var entry in NotConsumed) Assert.Equal(entry.Key.Substring(0, entry.Key.IndexOf('/')), Vector(entry.Key.Substring(entry.Key.IndexOf('/') + 1)).GetProperty("definition").GetString());
     }
 
     /// <summary>Negative vectors the C# decoder does not reject on its own. Each one is a registered divergence that must

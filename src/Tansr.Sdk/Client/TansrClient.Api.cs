@@ -72,6 +72,27 @@ public sealed partial class TansrClient
         return new ApiCallResult(status, value, meta);
     }
 
+    /// <summary>Deployment-level discovery (<c>GET /api/capabilities</c>): installed domains, families, fingerprints. Strictly parsed
+    /// (<see cref="UnifiedCapabilities.Parse(byte[], int)"/>); an uninstalled domain is a fact to intersect with, not a reason to
+    /// try a different path.</summary>
+    public async Task<UnifiedCapabilities> GetCapabilitiesAsync(CancellationToken cancellationToken = default)
+    {
+        using var cancellation = RequestCancellation(cancellationToken);
+        var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
+        using var response = await transport.SendAsync(HttpMethod.Get, ApiRoutes.DiscoveryCapabilities.Path(), access,
+            null, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);
+        if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
+        var meta = SessionTransport.Meta(response);
+        SessionTransport.ExpectContent(response, "application/json");
+        var capabilities = UnifiedCapabilities.Parse(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellation.Token).ConfigureAwait(false));
+        // Discovery headers and body describe the same manifest: revision and aggregate fingerprint must agree.
+        if (capabilities.ManifestRevision != meta.ManifestRevision || !string.Equals(capabilities.SchemaHash, meta.SchemaHash, StringComparison.Ordinal))
+            throw new TansrProtocolException("invalid_response");
+        transport.AssertCurrent(access);
+        return capabilities;
+    }
+
     /// <summary>Declared fence for a session (<c>GET /api/sessions/:id/capabilities</c>, facade-owned discovery). The returned
     /// closure is what a caller intersects its operations with; its <see cref="UnifiedCapabilityClosure.ClosureId"/> is the value to
     /// send as <see cref="ApiCallOptions.ClosureId"/> on guarded writes. The body is parsed strictly and its id re-derived

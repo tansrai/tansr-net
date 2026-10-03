@@ -122,10 +122,16 @@ public static class UnifiedRetry
     /// <summary>Family retry words → unified action (unknown word → none).</summary>
     public static readonly IReadOnlyDictionary<string, string> DomainRetryActionMap = new Dictionary<string, string>(System.StringComparer.Ordinal)
     {
-        ["none"] = UnifiedRetryAction.None, ["same-request"] = UnifiedRetryAction.SameRequest, ["backoff"] = UnifiedRetryAction.SameRequest,
-        ["query-status"] = UnifiedRetryAction.QueryStatus, ["reconcile"] = UnifiedRetryAction.QueryStatus, ["rebind"] = UnifiedRetryAction.Rebind,
-        ["refresh"] = UnifiedRetryAction.Refresh, ["refresh-projection"] = UnifiedRetryAction.Refresh,
-        ["discover"] = UnifiedRetryAction.Rediscover, ["rediscover"] = UnifiedRetryAction.Rediscover,
+        ["none"] = UnifiedRetryAction.None,
+        ["same-request"] = UnifiedRetryAction.SameRequest,
+        ["backoff"] = UnifiedRetryAction.SameRequest,
+        ["query-status"] = UnifiedRetryAction.QueryStatus,
+        ["reconcile"] = UnifiedRetryAction.QueryStatus,
+        ["rebind"] = UnifiedRetryAction.Rebind,
+        ["refresh"] = UnifiedRetryAction.Refresh,
+        ["refresh-projection"] = UnifiedRetryAction.Refresh,
+        ["discover"] = UnifiedRetryAction.Rediscover,
+        ["rediscover"] = UnifiedRetryAction.Rediscover,
     };
 
     /// <summary>Codes whose side effect is unknown: only <c>query-status</c> / <c>rebind</c>, never a replay under a new key.</summary>
