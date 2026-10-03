@@ -164,6 +164,8 @@ try {
         Invoke-CiStep 'contract' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-contract.ps1'))
         Invoke-CiStep 'parity' 'node' @('scripts/check-parity.mjs')
         Invoke-CiStep 'parity-tests' 'node' @('--test', 'scripts/check-parity.test.mjs')
+        Invoke-CiStep 'api-routes-check' 'node' @('scripts/generate-api-routes.mjs', '--check')
+        Invoke-CiStep 'api-routes-tests' 'node' @('--test', 'scripts/generate-api-routes.test.mjs')
         Invoke-CiStep 'ci-receipt-tests' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'test-ci-receipts.ps1'))
         if ($CliRoot) {
             Invoke-CiStep 'upstream-contract' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-contract.ps1'), '-SourceRoot', $CliRoot)

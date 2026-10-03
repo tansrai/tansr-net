@@ -305,12 +305,42 @@ public sealed class UnifiedGoldenTests
         Assert.Equal(77, fenced.Length);
     }
 
-    /// <summary>Vectors with no C# consumer, each with the reason. Everything else in the fixture must be replayed by a theory above;
-    /// <see cref="EveryGoldenVectorIsReplayedOrExplicitlyNotConsumed"/> fails when the fixture grows without this list (or a test) following.</summary>
+    /// <summary>Vectors the runtime does not replay, each with its status. Manifest negatives marked <c>generator-validated</c> have
+    /// the same mutation re-targeted at the repo artifact by <c>scripts/generate-api-routes.test.mjs</c> (the golden patches target
+    /// <c>manifest-runtime-view</c>), which also asserts this list names exactly what it covers. Everything else in the fixture must be
+    /// replayed by a theory above; <see cref="EveryGoldenVectorIsReplayedOrExplicitlyNotConsumed"/> fails when the fixture grows without
+    /// this list (or a test) following.</summary>
     private static readonly Dictionary<string, string> NotConsumed = new(StringComparer.Ordinal)
     {
         ["Manifest/manifest-runtime-view"] = "runtime manifest view is served by the facade; the SDK consumes the manifest only at build time (generated ApiRoutes)",
+        // generator-validated: generate-api-routes.mjs rejects the same mutation on the repo artifact (route-table facts it emits).
+        ["Manifest/manifest-missing-schema-hash"] = GeneratorValidated,
+        ["Manifest/manifest-revision-zero"] = GeneratorValidated,
+        ["Manifest/manifest-family-sha256-short"] = GeneratorValidated,
+        ["Manifest/manifest-operation-name-case"] = GeneratorValidated,
+        ["Manifest/manifest-operation-method-put"] = GeneratorValidated,
+        ["Manifest/manifest-operation-stream-without-sse"] = GeneratorValidated,
+        ["Manifest/manifest-operation-post-read"] = GeneratorValidated,
+        ["Manifest/manifest-operation-read-with-expected-revision"] = GeneratorValidated,
+        ["Manifest/manifest-operation-etag-path-empty"] = GeneratorValidated,
+        ["Manifest/manifest-family-request-id-path-string"] = GeneratorValidated,
+        ["Manifest/manifest-discovery-operation-with-family"] = GeneratorValidated,
+        ["Manifest/manifest-operation-api-path-legacy"] = GeneratorValidated,
+        // not consumed: shapes the route-table generator does not emit and the runtime never parses (the SDK does not validate
+        // GET /api/manifest bodies; capability values come from GET /api/capabilities and are covered by the Capabilities vectors).
+        ["Manifest/manifest-extra-top-level-field"] = "not consumed: top-level key set is a schema additionalProperties fact, not a route-table fact",
+        ["Manifest/manifest-family-status-unknown"] = "not consumed: family status only reaches a doc comment in ApiRoutes.Families",
+        ["Manifest/manifest-family-golden-sha-invalid"] = "not consumed: golden SHAs are checked by scripts/check-contract.ps1 against the vendored files, not emitted",
+        ["Manifest/manifest-client-unknown"] = "not consumed: families[].clients lock entries are not emitted",
+        ["Manifest/manifest-operation-schema-ref-form"] = "not consumed: request/response schema refs are not emitted",
+        ["Manifest/manifest-capability-limit-string-value"] = "not consumed: capabilities[] values are read from GET /api/capabilities, not from the manifest",
+        ["Manifest/manifest-capability-feature-object-value"] = "not consumed: capabilities[] values are read from GET /api/capabilities, not from the manifest",
+        ["Manifest/manifest-runtime-session-family-unknown"] = "not consumed: the runtime block exists only on the facade view, never in the repo artifact",
+        ["Manifest/manifest-runtime-missing-domain"] = "not consumed: the runtime block exists only on the facade view, never in the repo artifact",
+        ["Manifest/manifest-runtime-url-field"] = "not consumed: the runtime block exists only on the facade view, never in the repo artifact",
+        ["Manifest/manifest-platform-api-empty-entries"] = "not consumed: platformApi[] is not emitted",
     };
+    private const string GeneratorValidated = "generator-validated";
 
     private static bool ManifestNegative(JsonElement vector) =>
         vector.GetProperty("definition").GetString() == "Manifest" && vector.GetProperty("expect").GetString() == "invalid";
@@ -319,18 +349,20 @@ public sealed class UnifiedGoldenTests
     public void EveryGoldenVectorIsReplayedOrExplicitlyNotConsumed()
     {
         var replayed = new[] { "FacadeError", "UnifiedError", "EventEnvelope", "ResponseHeaders", "RequestHeaders", "CapabilityClosure", "Capabilities" };
-        int total = 0, consumed = 0, generatorSubjects = 0, declared = 0;
+        int total = 0, consumed = 0, generatorValidated = 0, notConsumed = 0;
         foreach (var vector in Golden.RootElement.GetProperty("vectors").EnumerateArray())
         {
             total++;
             var definition = vector.GetProperty("definition").GetString()!; var name = vector.GetProperty("name").GetString()!;
             if (replayed.Contains(definition) || name == "manifest-repo-artifact") { consumed++; continue; }
-            if (ManifestNegative(vector)) { generatorSubjects++; continue; } // validated by generate-api-routes.mjs at build time, not by the runtime
-            Assert.True(NotConsumed.ContainsKey(definition + "/" + name), "unaccounted golden vector: " + definition + "/" + name);
-            declared++;
+            Assert.True(NotConsumed.TryGetValue(definition + "/" + name, out var status), "unaccounted golden vector: " + definition + "/" + name);
+            if (status == GeneratorValidated) { Assert.True(ManifestNegative(vector), name); generatorValidated++; }
+            else notConsumed++;
         }
-        Assert.Equal(165, total); Assert.Equal(total, consumed + generatorSubjects + declared);
-        Assert.Equal(NotConsumed.Count, declared); Assert.Equal(23, generatorSubjects);
+        // 165 = 141 replayed (7 definitions + the repo artifact) + 12 generator-validated + 12 explicitly not consumed.
+        Assert.Equal(165, total); Assert.Equal(total, consumed + generatorValidated + notConsumed);
+        Assert.Equal(141, consumed); Assert.Equal(12, generatorValidated); Assert.Equal(12, notConsumed);
+        Assert.Equal(NotConsumed.Count, generatorValidated + notConsumed);
         foreach (var entry in NotConsumed) Assert.Equal(entry.Key.Substring(0, entry.Key.IndexOf('/')), Vector(entry.Key.Substring(entry.Key.IndexOf('/') + 1)).GetProperty("definition").GetString());
     }
 

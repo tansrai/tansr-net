@@ -40,7 +40,7 @@ public sealed class ApiOperation
     public IReadOnlyList<string> QueryParameters { get; }
     /// <summary>True when the response is a <c>text/event-stream</c>.</summary>
     public bool Sse { get; }
-    /// <summary>read, write, delete or stream (stream ⇔ <see cref="Sse"/>).</summary>
+    /// <summary><c>read</c>, <c>write</c> or <c>stream</c> (unified-v1 <c>ManifestOperation.kind</c>; stream ⇔ <see cref="Sse"/>, GET ⇒ read | stream, other methods ⇒ write).</summary>
     public string Kind { get; }
     /// <summary>Response body key path the facade derives the strong <c>ETag</c> <c>"&lt;revision&gt;"</c> from (manifest
     /// <c>etagPath</c>, revision 7); null when the resource has no version and the facade never emits <c>ETag</c>.</summary>

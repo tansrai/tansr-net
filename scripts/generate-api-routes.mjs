@@ -3,15 +3,18 @@
 // Source of truth: contract/api-manifest.json (vendored byte-for-byte from tansr-cli
 // packages/server/contract/api-manifest.json and locked in contract/manifest.json).
 //
-//   node scripts/generate-api-routes.mjs          # regenerate the C# module
-//   node scripts/generate-api-routes.mjs --check  # verify lock + generated file, exit 1 on drift
+//   node scripts/generate-api-routes.mjs                   # regenerate the C# module
+//   node scripts/generate-api-routes.mjs --check           # verify lock + generated file, exit 1 on drift
+//   node scripts/generate-api-routes.mjs --validate <file> # structural checks only, against any manifest file; no lock, no write
 import { createHash } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const manifestPath = resolve(root, 'contract/api-manifest.json');
+const validateAt = process.argv.indexOf('--validate');
+const validateOnly = validateAt >= 0;
+const manifestPath = validateOnly ? resolve(process.argv[validateAt + 1] ?? '') : resolve(root, 'contract/api-manifest.json');
 const lockPath = resolve(root, 'contract/manifest.json');
 const outputPath = resolve(root, 'src/Tansr.Sdk/Api/ApiRoutes.generated.cs');
 const check = process.argv.includes('--check');
@@ -19,7 +22,12 @@ const check = process.argv.includes('--check');
 const manifestBytes = readFileSync(manifestPath);
 const manifestSha = createHash('sha256').update(manifestBytes).digest('hex');
 const manifest = JSON.parse(manifestBytes.toString('utf8'));
+if (!Array.isArray(manifest?.operations) || !Array.isArray(manifest?.families)) { console.error(`api-routes: ${manifestPath} is not a manifest (operations/families must be arrays)`); process.exit(1); }
 const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+// Vocabularies come from the vendored unified-v1 schema (same revision as the manifest), never from a copy kept here.
+const unifiedSchema = JSON.parse(readFileSync(resolve(root, 'contract/unified-v1.schema.json'), 'utf8'));
+const definition = (name) => unifiedSchema.definitions?.[name] ?? {};
+const patternOf = (name) => new RegExp(definition(name).pattern ?? '(?!)');
 
 const failures = [];
 const fail = (message) => failures.push(message);
@@ -29,23 +37,35 @@ if (manifest.contract !== 'unified-v1') fail(`unexpected manifest contract ${man
 if (!Number.isInteger(manifest.revision) || manifest.revision < 1) fail('manifest revision must be a positive integer');
 if (!/^[0-9a-f]{64}$/.test(manifest.schemaHash ?? '')) fail('manifest schemaHash must be 64 hex chars');
 
-const lockEntry = (lock.files ?? []).find((file) => file.snapshot === 'contract/api-manifest.json');
-if (!lockEntry) fail('contract/manifest.json has no entry for contract/api-manifest.json');
-else {
-  if (lockEntry.sha256 !== manifestSha) fail(`lock sha256 ${lockEntry.sha256} != actual ${manifestSha}`);
-  if (lockEntry.bytes !== manifestBytes.length) fail(`lock bytes ${lockEntry.bytes} != actual ${manifestBytes.length}`);
+if (!validateOnly) {
+  const lockEntry = (lock.files ?? []).find((file) => file.snapshot === 'contract/api-manifest.json');
+  if (!lockEntry) fail('contract/manifest.json has no entry for contract/api-manifest.json');
+  else {
+    if (lockEntry.sha256 !== manifestSha) fail(`lock sha256 ${lockEntry.sha256} != actual ${manifestSha}`);
+    if (lockEntry.bytes !== manifestBytes.length) fail(`lock bytes ${lockEntry.bytes} != actual ${manifestBytes.length}`);
+  }
+  if (lock.apiManifest) {
+    if (lock.apiManifest.revision !== manifest.revision) fail(`lock apiManifest.revision ${lock.apiManifest.revision} != ${manifest.revision}`);
+    if (lock.apiManifest.schemaHash !== manifest.schemaHash) fail(`lock apiManifest.schemaHash != manifest schemaHash`);
+  } else fail('contract/manifest.json has no apiManifest block');
 }
-if (lock.apiManifest) {
-  if (lock.apiManifest.revision !== manifest.revision) fail(`lock apiManifest.revision ${lock.apiManifest.revision} != ${manifest.revision}`);
-  if (lock.apiManifest.schemaHash !== manifest.schemaHash) fail(`lock apiManifest.schemaHash != manifest schemaHash`);
-} else fail('contract/manifest.json has no apiManifest block');
 
+// Operation facts that end up in ApiRoutes are validated against the schema's own vocabulary and co-constraints
+// (ManifestOperation.method / kind enums and its allOf rules): a drift fails here, before any C# is written.
+const methods = definition('ManifestOperation').properties?.method?.enum ?? [];
+const kinds = definition('ManifestOperation').properties?.kind?.enum ?? [];
+if (methods.length === 0 || kinds.length === 0) fail('unified-v1.schema.json lacks ManifestOperation method/kind enums');
+const operationName = patternOf('OperationName');
+const familyId = patternOf('FamilyId');
+const digest = patternOf('Digest');
+const familyIds = new Set((manifest.families ?? []).map((family) => family.id));
 // Placeholder vocabulary is closed; ApiOperation.Path exposes exactly these named parameters.
 const allowedPlaceholders = ['id', 'targetId', 'uploadId', 'ticketId'];
 const placeholdersOf = (template) => [...template.matchAll(/:([A-Za-z][A-Za-z0-9]*)/g)].map((m) => m[1]);
 const pascal = (name) => name.split(/[.\-_]/).filter(Boolean).map((part) => part[0].toUpperCase() + part.slice(1)).join('');
 const names = new Set();
 for (const op of manifest.operations) {
+  if (!operationName.test(op.name ?? '')) fail(`${op.name}: name is not an OperationName`);
   if (!op.apiPath.startsWith('/api/') && op.apiPath !== '/api') fail(`${op.name}: apiPath ${op.apiPath} is outside /api`);
   for (const template of [op.apiPath, ...op.aliases]) {
     for (const placeholder of placeholdersOf(template)) {
@@ -55,9 +75,14 @@ for (const op of manifest.operations) {
   const member = pascal(op.name);
   if (names.has(member)) fail(`${op.name}: duplicate C# member name ${member}`);
   names.add(member);
-  if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(op.method)) fail(`${op.name}: method ${op.method}`);
-  if (!['read', 'write', 'delete', 'stream'].includes(op.kind)) fail(`${op.name}: kind ${op.kind}`);
+  if (!methods.includes(op.method)) fail(`${op.name}: method ${op.method} outside the schema enum`);
+  if (!kinds.includes(op.kind)) fail(`${op.name}: kind ${op.kind} outside the schema enum`);
   if ((op.kind === 'stream') !== (op.sse === true)) fail(`${op.name}: kind/sse disagree`);
+  // schema allOf: GET ⇒ read | stream, any other method ⇒ write.
+  if (op.method === 'GET' ? op.kind === 'write' : op.kind !== 'write') fail(`${op.name}: ${op.method} cannot be ${op.kind}`);
+  // schema allOf: discovery operations are facade-owned (family null); every other operation names a declared family.
+  if ((op.domain === 'discovery') !== (op.family === null)) fail(`${op.name}: discovery operations have family null, others name their family`);
+  if (op.family !== null && !familyIds.has(op.family)) fail(`${op.name}: family ${op.family} is not declared`);
   // revision 7 facts (U7-OPS §3): etagPath / expectedRevision are required keys (null when the resource has no version);
   // expectedRevision only on write operations; KeyPath = 1..8 object keys.
   if (!('etagPath' in op) || !('expectedRevision' in op)) fail(`${op.name}: revision 7 requires etagPath and expectedRevision keys`);
@@ -68,6 +93,8 @@ for (const op of manifest.operations) {
   }
 }
 for (const family of manifest.families) {
+  if (!familyId.test(family.id ?? '')) fail(`${family.id}: id is not a FamilyId`);
+  if (!digest.test(family.sha256 ?? '')) fail(`${family.id}: sha256 is not a Digest`);
   if (!('requestIdPath' in family)) fail(`${family.id}: revision 7 requires requestIdPath`);
   if (family.requestIdPath !== null && !isKeyPath(family.requestIdPath)) fail(`${family.id}: requestIdPath is not a KeyPath`);
 }
@@ -80,11 +107,16 @@ function isKeyPath(value) {
 const domainFamily = new Map();
 for (const family of manifest.families) for (const domain of family.domains) if (!domainFamily.has(domain)) domainFamily.set(domain, family);
 // Domain vocabulary = unified-v1 schema `Domain` enum (same set as route-table.ts ApiDomain); every operation domain must be in it.
-const unifiedSchema = JSON.parse(readFileSync(resolve(root, 'contract/unified-v1.schema.json'), 'utf8'));
-const domains = unifiedSchema.definitions?.Domain?.enum;
+const domains = definition('Domain').enum;
 if (!Array.isArray(domains) || domains.length === 0) fail('unified-v1.schema.json lacks definitions.Domain.enum');
 for (const op of manifest.operations) if (!domains?.includes(op.domain)) fail(`${op.name}: domain ${op.domain} outside the unified vocabulary`);
 for (const domain of domains ?? []) if (domain !== 'discovery' && !domainFamily.has(domain)) fail(`domain ${domain} has no family`);
+
+if (validateOnly) {
+  if (failures.length) { for (const message of failures) console.error('api-routes: ' + message); process.exit(1); }
+  console.log(`api-routes: valid (${manifest.operations.length} operations, revision ${manifest.revision}, sha256 ${manifestSha})`);
+  process.exit(0);
+}
 
 const literal = (value) => value === null || value === undefined ? 'null' : JSON.stringify(value);
 const array = (values) => values.length === 0 ? 'System.Array.Empty<string>()' : `new[] { ${values.map(literal).join(', ')} }`;
