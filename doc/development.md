@@ -545,3 +545,15 @@ A24已有2958双包四类消费、旧API兼容、三NuGet示例和原Console/两
 - `NativeMcpBridgeTests` 假 Serve 迁到 `/api` 后未加盖四个必带响应头，SDK 按 D10 抛 `contract_unavailable`。上文"5 例因缺 `TANSR_TEST_MCP_EXE` 失败"的归因不成立：按 CI 方式发布 ConsoleAssistant 后，3 例失败原因是缺头；补 `UnifiedStamp` 后 Windows 测试（`test-ci.ps1` 同款排除过滤）451/451。
 
 复验门禁：`dotnet build` Release 0 警告 0 错误；核心测试 1330/1330；Windows 451/451；`IntegrationTests` 仅 `sandbox-golden` 1/1（其余须真实 UAPI-01 Serve）；`dotnet format --verify-no-changes` 通过；生成器 `--check`、`check-contract.ps1` 通过。
+
+## 2026-10-03 UAPI-01 U8-NET：合同 revision 7 对齐、D19 统一码主位异常模型、金样全量归账
+
+事实源改钉 tansr-cli `main` `64df76b24bfd3bc62850f4b04093553708b7708c`（manifest revision 7，schemaHash `b60e77ff…bb57`）；四件套逐字节 vendoring，`contract/manifest.json` 更新 `apiManifest` 块与四项 `files[]`（SHA 见 [报告](report/UAPI-01-统一合同r7对齐与D19异常模型-2026-10-03.md)）。
+
+- 生成器校验并产出 revision 7 事实（操作级 `etagPath` / `expectedRevision{path,kind}`、族级 `requestIdPath`），`ApiRoutes.generated.cs` 81 操作（`ApprovalCredentialSubmit`、`:ticketId`）。
+- D19：`UnifiedApiException` 公开面为统一码 + `RetryAction`，族码降为 `Detail.DomainCode`；`Domain*` 作桥接读；`RequiresRediscovery` / `RequiresRefresh` 按 `retryAction` 判定；新增 `UnifiedErrorCode` / `UnifiedRetryAction` / `UnifiedErrorReason` / `UnifiedErrorDetail` / `UnifiedRetry`。迁移表见 `CHANGELOG.md` 与 README。
+- 三头：`TansrClient.CallAsync(ApiOperation, ApiCallOptions)` 通用入口，`Idempotency-Key` / `If-Match` / `deadline` 按操作事实本地校验后逐字发出；`UnifiedResponseMeta.ETag` 仅强形；`UnifiedRetry.RetrySameRequestAsync` 同键同体单次重放、deadline 不延。
+- 发现：`GetCapabilitiesAsync` / `GetCapabilityClosureAsync` 与 `UnifiedCapabilities` / `UnifiedCapabilityClosure` 严格解码（`closureId` 复推）；围栏外 `capability_unavailable` 原码上浮，零降级。
+- 金样 165 向量逐条归账：消费 140（新接 CapabilityClosure 18、Capabilities 16、`manifest-repo-artifact` 对照生成表）、生成器校验对象 23、明示不消费 1；`closure-partial-mixed` 驱动 73 条非流式围栏操作能力交集重放。
+
+验收门读数：`dotnet build` Release 0 警告 0 错误；核心测试 1416/1416；`dotnet format --verify-no-changes`、生成器 `--check`、`check-contract.ps1` 通过。cli 侧 `consumer-conformance.mjs --strict`：`tansr-net` 行 match 2 / source 7 / stale 0 / missing 0；全局退出码 1 仅由 android / ios 固定目录的 3 项 `missing` 造成。Windows 测试池本轮未运行。本仓无 serve-demo 副本，Demo 尾项不适用。
