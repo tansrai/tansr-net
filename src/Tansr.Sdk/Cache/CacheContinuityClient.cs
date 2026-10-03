@@ -68,8 +68,8 @@ public sealed class CacheContinuityClient
     {
         try { return await operation().ConfigureAwait(false); }
         catch (CacheHttpException error) { throw new CacheContinuityException(error.StatusCode, error.Code, error.RetryAction, error.Fallback); }
-        // UAPI-01 统一信封:原族码/状态/retryAction 与 fallback 自 detail 读取;统一层本身不含 fallback。
-        catch (UnifiedApiException error) { throw new CacheContinuityException(error.DomainStatus, error.DomainCode, error.DomainRetryAction ?? error.RetryAction ?? "none", error.Fallback ?? "none"); }
+        // UAPI-01 / D19 统一信封:公开面取统一码 / 状态 / retryAction;原族码 / 状态 / 动作与 fallback 自 detail 保留为 Domain* 位。
+        catch (UnifiedApiException error) { throw new CacheContinuityException(error, error.Fallback ?? "none"); }
     }
 }
 
@@ -137,12 +137,27 @@ public sealed class CacheContinuityOperation
     public override string ToString() => "CacheContinuityOperation(redacted)";
 }
 
-/// <summary>原缓存合同错误与精确恢复建议，未包含服务端自由文本或秘密。</summary>
+/// <summary>缓存合同错误与精确恢复建议，未包含服务端自由文本或秘密。D19：经 <c>/api</c> 统一信封到达时
+/// <see cref="TansrException.Code"/>/<see cref="StatusCode"/>/<see cref="RetryAction"/> 为统一值，原族事实在
+/// <see cref="DomainCode"/>/<see cref="DomainStatus"/>/<see cref="DomainRetryAction"/>（族直通信封二者相同）；
+/// 完整统一信封见 <see cref="Unified"/>。</summary>
 public sealed class CacheContinuityException : TansrException
 {
     internal CacheContinuityException(int statusCode, string code, string retryAction, string fallback) : base(code)
-    { StatusCode = statusCode; RetryAction = retryAction; Fallback = fallback; }
+    { StatusCode = statusCode; RetryAction = retryAction; Fallback = fallback; DomainCode = code; DomainStatus = statusCode; DomainRetryAction = retryAction; }
+    internal CacheContinuityException(UnifiedApiException unified, string fallback) : base(unified.Code)
+    {
+        StatusCode = unified.StatusCode; RetryAction = unified.RetryAction; Fallback = fallback; Unified = unified;
+        DomainCode = unified.Detail.DomainCode ?? unified.Code; DomainStatus = unified.Detail.DomainStatus ?? unified.StatusCode;
+        DomainRetryAction = (unified.Detail.HasDomainRetryAction ? unified.Detail.DomainRetryAction : null) ?? unified.RetryAction;
+    }
     public int StatusCode { get; }
     public string RetryAction { get; }
     public string Fallback { get; }
+    /// <summary>原族码（统一信封 <c>detail.domainCode</c>；缺席或族直通时等于 <see cref="TansrException.Code"/>）。</summary>
+    public string DomainCode { get; }
+    public int DomainStatus { get; }
+    public string DomainRetryAction { get; }
+    /// <summary>到达时的统一信封；族直通残余形为 null。</summary>
+    public UnifiedApiException? Unified { get; }
 }

@@ -15,13 +15,16 @@ namespace Tansr.Sdk.Api;
 /// malformed envelope is <c>contract_unavailable</c> rather than a misread business error.</summary>
 public static class UnifiedErrorEnvelope
 {
-    /// <summary>The 19 unified codes (RFC §2.1).</summary>
+    /// <summary>The 19 unified codes (RFC §2.1; constants in <see cref="UnifiedErrorCode"/>).</summary>
     public static readonly IReadOnlyList<string> Codes = new[]
     {
-        "invalid_request", "protocol_mismatch", "unauthorized", "forbidden", "not_found", "method_not_allowed", "gone", "conflict",
-        "stale_generation", "gap", "capability_unavailable", "capacity_exceeded", "payload_too_large", "upstream_unavailable",
-        "result_unknown", "rejected", "internal_error", "precondition_failed", "not_canonical",
+        UnifiedErrorCode.InvalidRequest, UnifiedErrorCode.ProtocolMismatch, UnifiedErrorCode.Unauthorized, UnifiedErrorCode.Forbidden, UnifiedErrorCode.NotFound,
+        UnifiedErrorCode.MethodNotAllowed, UnifiedErrorCode.Gone, UnifiedErrorCode.Conflict, UnifiedErrorCode.StaleGeneration, UnifiedErrorCode.Gap,
+        UnifiedErrorCode.CapabilityUnavailable, UnifiedErrorCode.CapacityExceeded, UnifiedErrorCode.PayloadTooLarge, UnifiedErrorCode.UpstreamUnavailable,
+        UnifiedErrorCode.ResultUnknown, UnifiedErrorCode.Rejected, UnifiedErrorCode.InternalError, UnifiedErrorCode.PreconditionFailed, UnifiedErrorCode.NotCanonical,
     };
+    /// <summary>The 17 <c>detail.reason</c> values (schema <c>UnifiedErrorDetail.reason</c>, revision 7; constants in <see cref="UnifiedErrorReason"/>).</summary>
+    public static IReadOnlyList<string> Reasons => UnifiedErrorReason.All;
     /// <summary>The facade-owned subset (RFC §1.3).</summary>
     public static readonly IReadOnlyList<string> FacadeCodes = new[]
     {
@@ -129,10 +132,10 @@ public static class UnifiedErrorEnvelope
         var retryValue = body.GetProperty("retryAction");
         if (retryValue.ValueKind != JsonValueKind.String || !In(RetryActions, retryValue.GetString()!)) throw Invalid(status);
         var retryAction = retryValue.GetString()!;
-        // Code-bound retry semantics (RFC §2.3 / D7): result_unknown never replays the same request; precondition_failed
-        // always rediscovers; not_canonical never retries the same bytes.
+        // Code-bound retry semantics (RFC §2.3 / D7; revision 7): result_unknown never replays the same request;
+        // precondition_failed rediscovers (closure_stale) or refreshes (If-Match stale, U7-HDR); not_canonical never retries the same bytes.
         if (code == "result_unknown" && retryAction != "query-status" && retryAction != "rebind") throw Invalid(status);
-        if (code == "precondition_failed" && retryAction != "rediscover") throw Invalid(status);
+        if (code == "precondition_failed" && retryAction != "rediscover" && retryAction != "refresh") throw Invalid(status);
         if (code == "not_canonical" && retryAction != "none") throw Invalid(status);
         int? retryAfterMs = null;
         if (body.TryGetProperty("retryAfterMs", out var retryAfter))
@@ -150,10 +153,14 @@ public static class UnifiedErrorEnvelope
             detail = detailValue.Clone();
         }
         // Facade-owned envelopes never carry a client idempotency key, use the 8-code subset and carry no translated
-        // family facts (RFC §1.3); domain-translated envelopes keep the original status in detail.domainStatus.
-        bool facadeOwned = requestId == null && In(FacadeCodes, code) && (detail == null || !detail.Value.TryGetProperty("domainStatus", out _));
+        // family facts (RFC §1.3); domain-translated envelopes keep the original status in detail.domainStatus. Request-header
+        // rejections (revision 7, request-headers.ts) carry a header reason and / or a non-closure domainCode and validate as
+        // UnifiedError even when the facade wrote them (schema FacadeError description, U7-OPS §5).
+        string? reason = detail.HasValue && detail.Value.TryGetProperty("reason", out var reasonValue) && reasonValue.ValueKind == JsonValueKind.String ? reasonValue.GetString() : null;
+        bool facadeOwned = requestId == null && In(FacadeCodes, code) && (detail == null || !detail.Value.TryGetProperty("domainStatus", out _))
+            && !UnifiedErrorReason.IsRequestHeaderReason(reason) && !(code == "precondition_failed" && retryAction != "rediscover");
         if (facadeOwned) ValidateFacade(code, declared, retryAction, retryAfterMs, detail, status);
-        throw new UnifiedApiException(status, code, retryAction, retryAfterMs, traceId.GetString()!, requestId, detail, meta, facadeOwned);
+        throw new UnifiedApiException(status, code, retryAction, retryAfterMs, traceId.GetString()!, requestId, detail, meta, facadeOwned, message.GetString());
     }
 
     private static bool Contains(IReadOnlyList<int> values, int value)
@@ -176,8 +183,9 @@ public static class UnifiedErrorEnvelope
                 case "domainStatus": if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var domainStatus) || domainStatus < 100 || domainStatus > 599) throw Invalid(status); break;
                 case "domainRetryAction": if (value.ValueKind != JsonValueKind.Null && (!IsString(value) || !In(DomainRetryActions, value.GetString()!))) throw Invalid(status); break;
                 case "fallback": if (!IsString(value) || value.GetString() != "none" && value.GetString() != "legacy-cold") throw Invalid(status); break;
-                case "reason": if (!IsString(value) || value.GetString() != "not_installed" && value.GetString() != "outside_closure") throw Invalid(status); break;
+                case "reason": if (!IsString(value) || !UnifiedErrorReason.Contains(value.GetString()!)) throw Invalid(status); break;
                 case "header": if (!IsString(value) || !HeaderNamePattern.IsMatch(value.GetString()!)) throw Invalid(status); break;
+                case "limitBytes": if (value.ValueKind != JsonValueKind.Number || !value.TryGetInt32(out var limitBytes) || limitBytes < 1) throw Invalid(status); break;
                 case "closureId": if (!IsString(value) || !UnifiedHeaders.Digest.IsMatch(value.GetString()!)) throw Invalid(status); break;
                 case "operation": if (!IsString(value) || !IsClosureOperation(value.GetString()!)) throw Invalid(status); break;
                 case "state": if (!IsString(value) || value.GetString() != "enabled" && value.GetString() != "disabled" && value.GetString() != "unavailable") throw Invalid(status); break;

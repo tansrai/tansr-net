@@ -33,8 +33,8 @@ public static class UnifiedHeaders
 /// <summary>The four mandatory response headers plus optional ones, read from one <c>/api</c> response.</summary>
 public sealed class UnifiedResponseMeta
 {
-    private UnifiedResponseMeta(string contract, int manifestRevision, string domain, string schemaHash, string? closureId, string? eventEnvelope, string? requestId, int? retryAfterSeconds)
-    { Contract = contract; ManifestRevision = manifestRevision; Domain = domain; SchemaHash = schemaHash; ClosureId = closureId; EventEnvelope = eventEnvelope; RequestId = requestId; RetryAfterSeconds = retryAfterSeconds; }
+    private UnifiedResponseMeta(string contract, int manifestRevision, string domain, string schemaHash, string? closureId, string? eventEnvelope, string? requestId, int? retryAfterSeconds, string? etag)
+    { Contract = contract; ManifestRevision = manifestRevision; Domain = domain; SchemaHash = schemaHash; ClosureId = closureId; EventEnvelope = eventEnvelope; RequestId = requestId; RetryAfterSeconds = retryAfterSeconds; ETag = etag; }
 
     public string Contract { get; }
     public int ManifestRevision { get; }
@@ -45,6 +45,9 @@ public sealed class UnifiedResponseMeta
     public string? EventEnvelope { get; }
     public string? RequestId { get; }
     public int? RetryAfterSeconds { get; }
+    /// <summary>Strong validator <c>"&lt;revision&gt;"</c> the facade derives for versioned resources (revision 7 <c>etagPath</c>);
+    /// null when absent or not in the strong decimal form. Feed it back as <c>If-Match</c> for a conditional write.</summary>
+    public string? ETag { get; }
     public bool EventEnvelopeNegotiated => EventEnvelope == UnifiedHeaders.EventEnvelopeContract;
 
     private static string? Single(HttpResponseMessage response, string name)
@@ -93,7 +96,15 @@ public sealed class UnifiedResponseMeta
             if (!UnifiedHeaders.Revision.IsMatch(retryText) || retryText.Length > 9) throw new ContractUnavailableException("invalid_contract_headers", status);
             retryAfter = int.Parse(retryText, CultureInfo.InvariantCulture);
         }
-        return new UnifiedResponseMeta(contract, int.Parse(revisionText, CultureInfo.InvariantCulture), domain, schemaHash, closureId, envelope, requestId, retryAfter);
+        // ETag is only meaningful in the strong decimal form the facade derives; anything else is not a revision and is dropped.
+        string? etag = null;
+        if (response.Headers.TryGetValues(UnifiedRequestHeaders.ETag, out var etags))
+        {
+            int count = 0;
+            foreach (var value in etags) { count++; var text = value.Trim(); etag = UnifiedRequestHeaders.StrongETagPattern.IsMatch(text) ? text : null; }
+            if (count != 1) etag = null;
+        }
+        return new UnifiedResponseMeta(contract, int.Parse(revisionText, CultureInfo.InvariantCulture), domain, schemaHash, closureId, envelope, requestId, retryAfter, etag);
     }
 
     private static bool IsKnownHeader(string name) =>

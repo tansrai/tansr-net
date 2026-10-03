@@ -134,9 +134,12 @@ internal sealed class SessionTransport : IDisposable
     /// <summary>Sends one request under the unified <c>/api</c> contract (UAPI-01). Paths outside <c>/api</c> are
     /// rejected (D10: no legacy prefix). Every response must carry <c>tansr-contract: unified-v1</c> plus the other
     /// three mandatory headers; otherwise <see cref="ContractUnavailableException"/> is raised and nothing is read.
-    /// <paramref name="closureId"/> sends <c>tansr-closure-id</c> for session-scoped guarded writes.</summary>
+    /// <paramref name="closureId"/> sends <c>tansr-closure-id</c> for session-scoped guarded writes; <paramref name="conditions"/>
+    /// sends the validated <c>Idempotency-Key</c> / <c>If-Match</c> / <c>deadline</c> (RFC §1.2). A deadline already past at send
+    /// time is <c>deadline_exceeded</c> here and the request is not sent — a replay never extends it.</summary>
     internal async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, SessionAccess access,
-        byte[]? body, string accept, string? contentType, string? lastEventId, CancellationToken cancellationToken, string? closureId = null)
+        byte[]? body, string accept, string? contentType, string? lastEventId, CancellationToken cancellationToken, string? closureId = null,
+        ApiRequestConditions? conditions = null)
     {
         AssertCurrent(access);
         if (!path.StartsWith("/", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal) || path.IndexOf('\\') >= 0 || !ApiRoutes.IsApiPath(path))
@@ -144,6 +147,7 @@ internal sealed class SessionTransport : IDisposable
         var target = new Uri(origin, path);
         if (!SameOrigin(target)) throw new TansrProtocolException("invalid_request");
         bool streaming = string.Equals(accept, "text/event-stream", StringComparison.OrdinalIgnoreCase);
+        if (conditions?.Deadline is DateTimeOffset deadline && deadline <= DateTimeOffset.UtcNow) throw new TansrProtocolException("deadline_exceeded");
         using var request = new HttpRequestMessage(method, target);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access.Token);
         foreach (var header in additionalHeaders) request.Headers.Add(header.Key, header.Value);
@@ -159,6 +163,14 @@ internal sealed class SessionTransport : IDisposable
             request.Headers.Add(UnifiedHeaders.ClosureId, closureId);
         }
         if (streaming && negotiateEventEnvelope) request.Headers.Add(UnifiedHeaders.EventEnvelope, UnifiedHeaders.EventEnvelopeContract);
+        if (conditions is not null)
+        {
+            // Already validated against the operation (ApiRequestConditions.From); here they are emitted verbatim so a
+            // replay with the same conditions is byte-identical (same key, same precondition, same deadline).
+            if (conditions.IdempotencyKey is not null) request.Headers.TryAddWithoutValidation(UnifiedRequestHeaders.IdempotencyKey, conditions.IdempotencyKey);
+            if (conditions.IfMatch is not null) request.Headers.TryAddWithoutValidation(UnifiedRequestHeaders.IfMatch, conditions.IfMatch);
+            if (conditions.Deadline is DateTimeOffset at) request.Headers.TryAddWithoutValidation(UnifiedRequestHeaders.Deadline, UnifiedRequestHeaders.FormatDeadline(at));
+        }
         if (body is not null)
         {
             request.Content = new ByteArrayContent(body);
