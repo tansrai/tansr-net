@@ -12,10 +12,12 @@ public sealed class ApiOperation
     private readonly string[] placeholders;
 
     internal ApiOperation(string name, string domain, string? family, string method, string template,
-        string[] aliases, string[] query, bool sse, string kind)
+        string[] aliases, string[] query, bool sse, string kind,
+        string[]? etagPath = null, string[]? expectedRevisionPath = null, string? expectedRevisionKind = null)
     {
         Name = name; Domain = domain; Family = family; Method = method; Template = template;
         Aliases = aliases; QueryParameters = query; Sse = sse; Kind = kind;
+        EtagPath = etagPath; ExpectedRevisionPath = expectedRevisionPath; ExpectedRevisionKind = expectedRevisionKind;
         var found = new List<string>();
         foreach (var segment in template.Split('/'))
             if (segment.Length > 1 && segment[0] == ':') found.Add(segment.Substring(1));
@@ -40,6 +42,18 @@ public sealed class ApiOperation
     public bool Sse { get; }
     /// <summary>read, write, delete or stream (stream ⇔ <see cref="Sse"/>).</summary>
     public string Kind { get; }
+    /// <summary>Response body key path the facade derives the strong <c>ETag</c> <c>"&lt;revision&gt;"</c> from (manifest
+    /// <c>etagPath</c>, revision 7); null when the resource has no version and the facade never emits <c>ETag</c>.</summary>
+    public IReadOnlyList<string>? EtagPath { get; }
+    /// <summary>Request body key path the facade fills from <c>If-Match</c> (manifest <c>expectedRevision.path</c>); null when
+    /// <c>If-Match</c> is not applicable to this operation (reads, streams and writes without a precondition position).</summary>
+    public IReadOnlyList<string>? ExpectedRevisionPath { get; }
+    /// <summary><c>sequence</c> (decimal string) or <c>integer</c> for <see cref="ExpectedRevisionPath"/>; null when not applicable.</summary>
+    public string? ExpectedRevisionKind { get; }
+    /// <summary>True when <c>If-Match</c> applies (a write operation with an <c>expectedRevision</c> position).</summary>
+    public bool AcceptsIfMatch => ExpectedRevisionPath != null;
+    /// <summary>True when <c>Idempotency-Key</c> applies (manifest <c>kind: write</c>; the facade rejects it on reads / streams).</summary>
+    public bool AcceptsIdempotencyKey => Kind == "write";
     /// <summary>Placeholder names in template order.</summary>
     public IReadOnlyList<string> Placeholders => placeholders;
     /// <summary>Literal template prefix up to (and including the slash before) the first placeholder; the whole

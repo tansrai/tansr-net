@@ -58,6 +58,21 @@ for (const op of manifest.operations) {
   if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(op.method)) fail(`${op.name}: method ${op.method}`);
   if (!['read', 'write', 'delete', 'stream'].includes(op.kind)) fail(`${op.name}: kind ${op.kind}`);
   if ((op.kind === 'stream') !== (op.sse === true)) fail(`${op.name}: kind/sse disagree`);
+  // revision 7 facts (U7-OPS §3): etagPath / expectedRevision are required keys (null when the resource has no version);
+  // expectedRevision only on write operations; KeyPath = 1..8 object keys.
+  if (!('etagPath' in op) || !('expectedRevision' in op)) fail(`${op.name}: revision 7 requires etagPath and expectedRevision keys`);
+  if (op.etagPath !== null && !isKeyPath(op.etagPath)) fail(`${op.name}: etagPath is not a KeyPath`);
+  if (op.expectedRevision !== null) {
+    if (op.kind !== 'write') fail(`${op.name}: expectedRevision on a ${op.kind} operation`);
+    if (!isKeyPath(op.expectedRevision?.path) || !['sequence', 'integer'].includes(op.expectedRevision?.kind)) fail(`${op.name}: expectedRevision shape`);
+  }
+}
+for (const family of manifest.families) {
+  if (!('requestIdPath' in family)) fail(`${family.id}: revision 7 requires requestIdPath`);
+  if (family.requestIdPath !== null && !isKeyPath(family.requestIdPath)) fail(`${family.id}: requestIdPath is not a KeyPath`);
+}
+function isKeyPath(value) {
+  return Array.isArray(value) && value.length >= 1 && value.length <= 8 && value.every((key) => typeof key === 'string' && /^[A-Za-z][A-Za-z0-9]*$/.test(key) && key.length <= 64);
 }
 
 // Domain -> first family (manifest order) that declares the domain. This matches the facade's
@@ -99,10 +114,12 @@ lines.push(`    /// <summary>SHA-256 of the vendored <c>contract/api-manifest.js
 lines.push(`    public const string ManifestSha256 = ${literal(manifestSha)};`);
 lines.push(`    public const int OperationCount = ${manifest.operations.length};`);
 lines.push('');
+const keyPath = (values) => values === null ? 'null' : array(values);
 for (const op of manifest.operations) {
   const member = pascal(op.name);
-  lines.push(`    /// <summary><c>${op.method} ${op.apiPath}</c> (${op.domain}${op.family ? ', ' + op.family : ''}).</summary>`);
-  lines.push(`    public static readonly ApiOperation ${member} = new ApiOperation(${literal(op.name)}, ${literal(op.domain)}, ${literal(op.family)}, ${literal(op.method)}, ${literal(op.apiPath)}, ${array(op.aliases)}, ${array(op.query)}, ${op.sse ? 'true' : 'false'}, ${literal(op.kind)});`);
+  const versioned = op.etagPath !== null || op.expectedRevision !== null;
+  lines.push(`    /// <summary><c>${op.method} ${op.apiPath}</c> (${op.domain}${op.family ? ', ' + op.family : ''})${versioned ? `; versioned: ETag ← ${op.etagPath === null ? 'none' : op.etagPath.join('.')}, If-Match → ${op.expectedRevision === null ? 'none' : op.expectedRevision.path.join('.') + ' (' + op.expectedRevision.kind + ')'}` : ''}.</summary>`);
+  lines.push(`    public static readonly ApiOperation ${member} = new ApiOperation(${literal(op.name)}, ${literal(op.domain)}, ${literal(op.family)}, ${literal(op.method)}, ${literal(op.apiPath)}, ${array(op.aliases)}, ${array(op.query)}, ${op.sse ? 'true' : 'false'}, ${literal(op.kind)}, ${keyPath(op.etagPath)}, ${keyPath(op.expectedRevision?.path ?? null)}, ${literal(op.expectedRevision?.kind ?? null)});`);
 }
 lines.push('');
 lines.push('    /// <summary>All operations in manifest order.</summary>');
@@ -122,6 +139,16 @@ for (const family of manifest.families) {
   lines.push(`        public const string ${pascal(family.id)} = ${literal(family.sha256)};`);
 }
 lines.push('    }');
+lines.push('');
+// revision 7: per-family idempotency-key position (ManifestFamily.requestIdPath). null = the family body has no such
+// position (agent-session-v1 / archive-sync-v1 dedupe by request fingerprint); unknown family → null as well.
+lines.push('    /// <summary>Body key path the facade fills from <c>Idempotency-Key</c> for a family (<c>families[].requestIdPath</c>, revision 7),');
+lines.push('    /// or null when the family body has no such position or the family is unknown.</summary>');
+lines.push('    public static IReadOnlyList<string>? FamilyRequestIdPath(string family) => family switch');
+lines.push('    {');
+for (const family of manifest.families) if (family.requestIdPath !== null) lines.push(`        ${literal(family.id)} => ${array(family.requestIdPath)},`);
+lines.push('        _ => null,');
+lines.push('    };');
 lines.push('');
 lines.push('    /// <summary>Primary family for a domain (first manifest family declaring it), or null for unknown domains.</summary>');
 lines.push('    public static string? DomainFamily(string domain) => domain switch');

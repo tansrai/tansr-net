@@ -7,40 +7,40 @@
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 6,
-    "schemaHash": "19cafed0f01d3fdb8b8aac695980db30dec43bbd1729824d8c5bc8644a84b4b1",
-    "sourceBranch": "lane/uapi/UAPI-01-facade",
-    "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+    "revision": 7,
+    "schemaHash": "b60e77ffcbf08d985a993dbdbd4cf610f12f7c7e70f090aee5ff8d523f70bb57",
+    "sourceBranch": "main",
+    "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "Unified /api route table, headers and envelopes (UAPI-01). Pinned from the UAPI-01 integration tree; tansr-cli main still carried revision 3 when vendored."
+    "note": "Unified /api route table, headers and envelopes (UAPI-01). Revision 7 pinned from tansr-cli main 64df76b2 (U7-OPS: approval.credential.submit, :ticketId placeholder, etagPath / expectedRevision / requestIdPath facts, archive-sync-v1 and cache family fingerprints)."
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
-      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
-      "bytes": 77583,
-      "sha256": "42a6b867877565f9afcdabfb87c5f5187864b5679f80bb0da70f7f52f86448b3"
+      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
+      "bytes": 85134,
+      "sha256": "f6255bc868b4de5cb2af759a55069ab4651027d4125ef86d37f14a91d3307288"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
-      "bytes": 80886,
-      "sha256": "a2449bc121b5183e50b0c2432d29042446659ec8b32b355af7f204c6cb684a8e"
+      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
+      "bytes": 86449,
+      "sha256": "fd07962916f7662ecc69c3f8c8d2b79aa5b99f542cbfd310a50f56777e51f117"
     },
     {
       "snapshot": "contract/unified-v1.golden.json",
       "source": "doc/rfc/unified-v1.golden.json",
-      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
-      "bytes": 97871,
-      "sha256": "7c6baad1e7053d57249c19b4c0aeda014a812c98662ec94878e0ec0d1dda0773"
+      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
+      "bytes": 100944,
+      "sha256": "42531a3937563d8c0d719c5970629b25bbabf3a8ea8436550db5bfddf9d206fd"
     },
     {
       "snapshot": "contract/canonical-cross-vectors.json",
       "source": "scripts/api/fixtures/canonical-cross-vectors.json",
-      "sourceRevision": "46984bf2c73a4c249a18c3e3991aef91ad582eb8",
+      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
       "bytes": 39961,
       "sha256": "aba7c6daab723e058d7d8cda6c95f8d8cbb091b516b457c3994bd024ea2de619"
     },

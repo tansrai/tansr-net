@@ -1,8 +1,8 @@
 {
   "format": "tansr-api-manifest-v1",
   "contract": "unified-v1",
-  "revision": 6,
-  "schemaHash": "19cafed0f01d3fdb8b8aac695980db30dec43bbd1729824d8c5bc8644a84b4b1",
+  "revision": 7,
+  "schemaHash": "b60e77ffcbf08d985a993dbdbd4cf610f12f7c7e70f090aee5ff8d523f70bb57",
   "families": [
     {
       "id": "agent-session-v1",
@@ -68,6 +68,7 @@
           "drift": false
         }
       ],
+      "requestIdPath": null,
       "sessionManifestRevision": 9,
       "sessionManifestSha256": "6e1876edc476322e2fc3613958f5b44700bb80ea23550fa794f5729220674f3e"
     },
@@ -163,6 +164,10 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "request",
+        "requestId"
       ]
     },
     {
@@ -226,6 +231,10 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "request",
+        "requestId"
       ]
     },
     {
@@ -235,15 +244,15 @@
       ],
       "status": "additive",
       "rfc": "doc/rfc/SDK2-档案同步与保留扩展.md",
-      "source": "packages/server/src/sdk2/archive-sync.ts",
-      "sha256": "fac68e8ba9540c6511f677d23ef0d18c32c2eb91b5157556ae3e2869e7f4e533",
+      "source": "doc/rfc/archive-sync-v1.schema.json",
+      "sha256": "7468fb72c80ce8d0bbe298219c894578020f249d7532c63cad91e8dad4a412bb",
       "golden": {},
       "generated": [],
       "legacyEntries": [
-        "/v3/sdk2/archive-sync/:bindingId"
+        "/v3/sdk2/archive-sync/:id"
       ],
       "apiEntries": [
-        "/api/archive/sync/:bindingId"
+        "/api/archive/sync/:id"
       ],
       "clients": [
         {
@@ -286,7 +295,8 @@
           "observed": "2026-10-01",
           "drift": false
         }
-      ]
+      ],
+      "requestIdPath": null
     },
     {
       "id": "sdk2-cache-v1",
@@ -316,7 +326,7 @@
           "client": "node",
           "repo": "tansr-cli",
           "file": "packages/providers/src/twp/cache-wire.ts",
-          "lock": "hand-written",
+          "lock": "88e7941861fab1a6380b9226e3a42adb8c872efdf720dc36e92ffa42da43d818",
           "observed": "2026-10-01",
           "drift": false
         },
@@ -349,6 +359,10 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "request",
+        "requestId"
       ]
     },
     {
@@ -373,10 +387,14 @@
           "client": "node",
           "repo": "tansr-cli",
           "file": "packages/providers/src/twp/cache-core-wire.ts",
-          "lock": "hand-written",
+          "lock": "5b052117919f3ef751310a36db3a2c1dac96daeda2f10a4bb78028edc0d5cbff",
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "request",
+        "requestId"
       ]
     },
     {
@@ -448,6 +466,9 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "requestId"
       ]
     },
     {
@@ -512,6 +533,9 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "requestId"
       ]
     },
     {
@@ -576,6 +600,9 @@
           "observed": "2026-10-01",
           "drift": false
         }
+      ],
+      "requestIdPath": [
+        "requestId"
       ]
     },
     {
@@ -613,7 +640,8 @@
           "observed": "2026-10-01",
           "drift": false
         }
-      ]
+      ],
+      "requestIdPath": null
     },
     {
       "id": "unified-v1",
@@ -623,9 +651,9 @@
       "status": "candidate",
       "rfc": "doc/rfc/RFC-UAPI-1-统一信封与canonical单模块.md",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sha256": "a2449bc121b5183e50b0c2432d29042446659ec8b32b355af7f204c6cb684a8e",
+      "sha256": "fd07962916f7662ecc69c3f8c8d2b79aa5b99f542cbfd310a50f56777e51f117",
       "golden": {
-        "doc/rfc/unified-v1.golden.json": "7c6baad1e7053d57249c19b4c0aeda014a812c98662ec94878e0ec0d1dda0773"
+        "doc/rfc/unified-v1.golden.json": "42531a3937563d8c0d719c5970629b25bbabf3a8ea8436550db5bfddf9d206fd"
       },
       "generated": [],
       "legacyEntries": [],
@@ -683,7 +711,8 @@
           "observed": "2026-10-01",
           "drift": false
         }
-      ]
+      ],
+      "requestIdPath": null
     }
   ],
   "operations": [
@@ -701,7 +730,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "门面自答:本 manifest + runtime.installed(已装配域);无领域 schema"
+      "notes": "门面自答:本 manifest + runtime.installed(已装配域);无领域 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "discovery.capabilities",
@@ -717,7 +748,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "门面自答:域可用性 / 族与 schemaHash / 会话族 preferred+available(部署级;不含 URL 导航字段,RFC-SDK2-1 §10.5)"
+      "notes": "门面自答:域可用性 / 族与 schemaHash / 会话族 preferred+available(部署级;不含 URL 导航字段,RFC-SDK2-1 §10.5)",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "discovery.session.capabilities",
@@ -733,7 +766,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "会话级能力闭合围栏(方案 §3.6 / RFC-UAPI-1 §1.4):{ contract, closureId, authorizationRevision, domains, operations } + 响应头 tansr-closure-id;写操作可携 tansr-closure-id 作前置(412 closure_stale)"
+      "notes": "会话级能力闭合围栏(方案 §3.6 / RFC-UAPI-1 §1.4):{ contract, closureId, authorizationRevision, domains, operations } + 响应头 tansr-closure-id;写操作可携 tansr-closure-id 作前置(412 closure_stale)",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.capabilities",
@@ -751,7 +786,9 @@
       "query": [
         "protocol"
       ],
-      "notes": "会话族发现 { protocol, contracts[{ contract, availability }] } 内联于 v2/routes.ts,无命名 schema"
+      "notes": "会话族发现 { protocol, contracts[{ contract, availability }] } 内联于 v2/routes.ts,无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.create",
@@ -767,7 +804,9 @@
       "request": "agent-session-v1#CreateSessionBodySchema",
       "response": null,
       "query": [],
-      "notes": "201 { sessionId, resumed, lastSeq, ...familyView } 无命名响应 schema;attach / resume / fork 同端点"
+      "notes": "201 { sessionId, resumed, lastSeq, ...familyView } 无命名响应 schema;attach / resume / fork 同端点",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.list",
@@ -786,7 +825,9 @@
         "limit",
         "offset"
       ],
-      "notes": "响应 { sessions: V2SessionMetaView[], total } 无命名 schema"
+      "notes": "响应 { sessions: V2SessionMetaView[], total } 无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.get",
@@ -804,7 +845,9 @@
       "query": [
         "include"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.close",
@@ -820,7 +863,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "202 { sessionId, accepted: true };休眠会话幂等 202"
+      "notes": "202 { sessionId, accepted: true };休眠会话幂等 202",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.message.send",
@@ -836,7 +881,9 @@
       "request": "agent-session-v1#MessagesBodySchema",
       "response": null,
       "query": [],
-      "notes": "202 { sessionId, accepted: true };事件经 session.events.observe"
+      "notes": "202 { sessionId, accepted: true };事件经 session.events.observe",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.events.observe",
@@ -854,7 +901,9 @@
       "query": [
         "exclude"
       ],
-      "notes": "Last-Event-ID 续订;帧 = KernelEvent(golden kernel-event.schema.json)+ 控制帧 CONTROL_FRAME"
+      "notes": "Last-Event-ID 续订;帧 = KernelEvent(golden kernel-event.schema.json)+ 控制帧 CONTROL_FRAME",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.interrupt",
@@ -870,7 +919,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "202 { sessionId, accepted: true }"
+      "notes": "202 { sessionId, accepted: true }",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.history.read",
@@ -889,7 +940,9 @@
         "offset",
         "limit"
       ],
-      "notes": "响应 { sessionId, lastSeq, messages[, total, offset] } 无命名 schema"
+      "notes": "响应 { sessionId, lastSeq, messages[, total, offset] } 无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.tool.result",
@@ -905,7 +958,9 @@
       "request": "agent-session-v1#ToolResultReceiptSchema",
       "response": null,
       "query": [],
-      "notes": ":targetId = toolCallId(doc/98 ⑨ :callId);200 { accepted: true }"
+      "notes": ":targetId = toolCallId(doc/98 ⑨ :callId);200 { accepted: true }",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.permission.decide",
@@ -921,7 +976,9 @@
       "request": "agent-session-v1#PermissionReceiptSchema",
       "response": null,
       "query": [],
-      "notes": "wire 仍为 requestId(/v2 ⑩⑪ 服务端签发票据);统一层按 RFC-UAPI-1 §3 消歧命名 :ticketId,旧模板占位为 :targetId"
+      "notes": "wire 仍为 requestId(/v2 ⑩⑪ 服务端签发票据);统一层按 RFC-UAPI-1 §3 消歧命名 :ticketId(D26 代拍 2026-10-03:/api 观测模板同口径),内部 /v2 / /v3 模板占位为 :targetId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.question.answer",
@@ -937,7 +994,9 @@
       "request": "agent-session-v1#QuestionReceiptSchema",
       "response": null,
       "query": [],
-      "notes": "wire 仍为 requestId(/v2 ⑩⑪ 服务端签发票据);统一层按 RFC-UAPI-1 §3 消歧命名 :ticketId,旧模板占位为 :targetId"
+      "notes": "wire 仍为 requestId(/v2 ⑩⑪ 服务端签发票据);统一层按 RFC-UAPI-1 §3 消歧命名 :ticketId(D26 代拍 2026-10-03:/api 观测模板同口径),内部 /v2 / /v3 模板占位为 :targetId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.compact",
@@ -953,7 +1012,9 @@
       "request": "agent-session-v1#CompactBodySchema",
       "response": "agent-session-v1#V2CompactResult",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.list",
@@ -969,7 +1030,9 @@
       "request": null,
       "response": "agent-session-v1#V2CheckpointList",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.create",
@@ -985,7 +1048,9 @@
       "request": "agent-session-v1#CheckpointBodySchema",
       "response": "agent-session-v1#V2CheckpointMeta",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.import",
@@ -1003,7 +1068,9 @@
       "query": [
         "label"
       ],
-      "notes": "体 = checkpoint.export 原字节(application/octet-stream,≤ 32 MiB),非 JSON schema;201"
+      "notes": "体 = checkpoint.export 原字节(application/octet-stream,≤ 32 MiB),非 JSON schema;201",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.restore",
@@ -1019,7 +1086,9 @@
       "request": "agent-session-v1#RestoreBodySchema",
       "response": "agent-session-v1#V2RestoreResult",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.export",
@@ -1035,7 +1104,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "200 application/octet-stream:{ format: \"tansr-checkpoint/1\", checkpoint, attachments },非 JSON schema"
+      "notes": "200 application/octet-stream:{ format: \"tansr-checkpoint/1\", checkpoint, attachments },非 JSON schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.checkpoint.delete",
@@ -1051,7 +1122,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "204 无体"
+      "notes": "204 无体",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.cwd.set",
@@ -1067,7 +1140,9 @@
       "request": "agent-session-v1#SetCwdBodySchema",
       "response": "agent-session-v1#V2SetCwdResult",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.audio.transcribe",
@@ -1083,7 +1158,9 @@
       "request": "agent-session-v1#AudioTranscriptionsBodySchema",
       "response": null,
       "query": [],
-      "notes": "响应为平台转写结果透传(doc/123 §3.1),无本仓命名 schema"
+      "notes": "响应为平台转写结果透传(doc/123 §3.1),无本仓命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.audio.speak",
@@ -1099,7 +1176,9 @@
       "request": "agent-session-v1#AudioSpeechBodySchema",
       "response": null,
       "query": [],
-      "notes": "响应为平台合成结果透传(doc/123 §3.2),无本仓命名 schema"
+      "notes": "响应为平台合成结果透传(doc/123 §3.2),无本仓命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.input.capabilities",
@@ -1115,7 +1194,9 @@
       "request": null,
       "response": null,
       "query": [],
-      "notes": "响应 = kernel SessionInputCapabilities(字段见 CAPABILITIES session.input.*),contract.ts 无命名 schema"
+      "notes": "响应 = kernel SessionInputCapabilities(字段见 CAPABILITIES session.input.*),contract.ts 无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.input.submit",
@@ -1131,7 +1212,9 @@
       "request": "agent-session-v1#SubmitInputBodySchema",
       "response": null,
       "query": [],
-      "notes": "响应 = kernel SessionInputResult(accepted 携 SessionInputReceipt),contract.ts 无命名 schema"
+      "notes": "响应 = kernel SessionInputResult(accepted 携 SessionInputReceipt),contract.ts 无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "session.input.status",
@@ -1150,7 +1233,27 @@
         "historyEpoch",
         "turnId"
       ],
-      "notes": ":targetId = inputId;响应 = kernel SessionInputReceipt,contract.ts 无命名 schema"
+      "notes": ":targetId = inputId;响应 = kernel SessionInputReceipt,contract.ts 无命名 schema",
+      "etagPath": null,
+      "expectedRevision": null
+    },
+    {
+      "name": "approval.credential.submit",
+      "domain": "session",
+      "family": "agent-session-v1",
+      "method": "POST",
+      "apiPath": "/api/approvals/:id/credential",
+      "aliases": [],
+      "legacyPath": "/v1/approvals/:id/credential",
+      "legacyOffloadPath": null,
+      "kind": "write",
+      "sse": false,
+      "request": null,
+      "response": null,
+      "query": [],
+      "notes": ":id = challengeId;体 { digest, verdict: approve|deny, approver }(RFC-K11 §3.2,无命名 schema);200 { challengeId, result: \"accepted\" };拒绝经统一信封:unknown_challenge → not_found 404、expired → gone 410、digest_mismatch / already_resolved → conflict 409(detail.submitCode 留原 SubmitCode);approvals 缝未接线 → 404 capability_unavailable",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "execution.initialize",
@@ -1166,7 +1269,9 @@
       "request": "sdk2-ext-v1#SessionInitializeRequest",
       "response": "sdk2-ext-v1#SessionExecutionCapabilities",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "execution.capabilities",
@@ -1184,7 +1289,9 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "execution.boundary",
@@ -1202,7 +1309,9 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "execution.binding.create",
@@ -1218,7 +1327,9 @@
       "request": "sdk2-ext-v1#ExecutionBindingRequest",
       "response": "sdk2-ext-v1#SessionExecutionCapabilities",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "execution.status",
@@ -1236,7 +1347,9 @@
       "query": [
         "protocol"
       ],
-      "notes": ":targetId = operationId"
+      "notes": ":targetId = operationId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "executor.register",
@@ -1252,7 +1365,9 @@
       "request": "sdk2-ext-v1#ExecutorRegistrationRequest",
       "response": "sdk2-ext-v1#ExecutorConnection",
       "query": [],
-      "notes": "201"
+      "notes": "201",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "executor.heartbeat",
@@ -1268,7 +1383,9 @@
       "request": "sdk2-ext-v1#ExecutorHeartbeatRequest",
       "response": "sdk2-ext-v1#ExecutorConnection",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "executor.operations.poll",
@@ -1287,7 +1404,9 @@
         "protocol",
         "connectionId"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "executor.receipt.submit",
@@ -1303,7 +1422,9 @@
       "request": "sdk2-ext-v1#ExecutionReceiptRequest",
       "response": "sdk2-ext-v1#ExecutionStatus",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.capabilities",
@@ -1319,7 +1440,9 @@
       "request": null,
       "response": "sdk2-ext-v1#CapabilitiesResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.binding.target",
@@ -1337,7 +1460,11 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "archive.binding.create",
@@ -1353,7 +1480,16 @@
       "request": "sdk2-ext-v1#BindingCreateRequest",
       "response": "sdk2-ext-v1#BindingView",
       "query": [],
-      "notes": "201"
+      "notes": "201",
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "archive.binding.get",
@@ -1371,7 +1507,11 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "archive.binding.close",
@@ -1387,7 +1527,16 @@
       "request": "sdk2-ext-v1#BindingCloseRequest",
       "response": "sdk2-ext-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "archive.status",
@@ -1405,7 +1554,11 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "archive.events.observe",
@@ -1423,7 +1576,9 @@
       "query": [
         "protocol"
       ],
-      "notes": "Last-Event-ID 续订(独立重放日志 / 游标)"
+      "notes": "Last-Event-ID 续订(独立重放日志 / 游标)",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.records.read",
@@ -1447,7 +1602,9 @@
         "maxBytes",
         "afterSequence"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.artifact.read",
@@ -1470,7 +1627,9 @@
         "offset",
         "maxBytes"
       ],
-      "notes": ":targetId = artifactId"
+      "notes": ":targetId = artifactId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.ack.commit",
@@ -1486,7 +1645,16 @@
       "request": "sdk2-ext-v1#ArchiveAckRequest",
       "response": "sdk2-ext-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "archive.ack.rebase",
@@ -1502,7 +1670,9 @@
       "request": "sdk2-archive-recovery-v1#AckRebaseRequest",
       "response": "sdk2-archive-recovery-v1#AckRebaseReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.operation.query",
@@ -1525,7 +1695,9 @@
         "bindingId",
         "sessionId"
       ],
-      "notes": "operation ∈ binding-create(携 sessionId)| archive-ack | material-response | binding-close(携 bindingId);material-response 回 MaterialReceipt"
+      "notes": "operation ∈ binding-create(携 sessionId)| archive-ack | material-response | binding-close(携 bindingId);material-response 回 MaterialReceipt",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "archive.sync",
@@ -1538,10 +1710,12 @@
       "legacyOffloadPath": null,
       "kind": "write",
       "sse": false,
-      "request": null,
-      "response": null,
+      "request": "archive-sync-v1#Request",
+      "response": "archive-sync-v1#Response",
       "query": [],
-      "notes": "体 { format: \"archive-sync-v1\", identity, method, value };method 词表见 sdk2/archive-sync.ts;无 schema 文件(UAPI-03 补);:id = bindingId"
+      "notes": "单入口多方法:method 词表 archive-sync-v1#Method(= sdk2/archive-sync.ts methods);value 形随方法;错误形 archive-sync-v1#ErrorResponse(不在统一错误矩阵,经 /api 原样透传);:id = bindingId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "material.response.submit",
@@ -1557,7 +1731,9 @@
       "request": "sdk2-ext-v1#MaterialResponseRequest",
       "response": "sdk2-ext-v1#MaterialReceipt",
       "query": [],
-      "notes": "202"
+      "notes": "202",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "material.status",
@@ -1575,7 +1751,9 @@
       "query": [
         "protocol"
       ],
-      "notes": ":targetId = materialRequestId"
+      "notes": ":targetId = materialRequestId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "material.upload.status",
@@ -1593,7 +1771,9 @@
       "query": [
         "protocol"
       ],
-      "notes": ":uploadId = artifactId"
+      "notes": ":uploadId = artifactId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "material.upload.chunk",
@@ -1609,7 +1789,9 @@
       "request": "sdk2-ext-v1#MaterialUploadChunkRequest",
       "response": "sdk2-ext-v1#MaterialUploadStatus",
       "query": [],
-      "notes": ":uploadId = artifactId"
+      "notes": ":uploadId = artifactId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "cache.capabilities",
@@ -1625,7 +1807,9 @@
       "request": null,
       "response": "sdk2-cache-v1#CapabilitiesResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "cache.binding.open",
@@ -1641,7 +1825,12 @@
       "request": "sdk2-cache-v1#OpenRequest",
       "response": "sdk2-cache-v1#OpenResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "binding",
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "cache.binding.get",
@@ -1659,7 +1848,11 @@
       "query": [
         "protocol"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "cache.binding.renew",
@@ -1675,7 +1868,17 @@
       "request": "sdk2-cache-v1#RenewRequest",
       "response": "sdk2-cache-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "binding",
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "cache.binding.rebind",
@@ -1691,7 +1894,17 @@
       "request": "sdk2-cache-v1#RebindRequest",
       "response": "sdk2-cache-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "binding",
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "cache.binding.rotate",
@@ -1707,7 +1920,17 @@
       "request": "sdk2-cache-v1#RotateRequest",
       "response": "sdk2-cache-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "binding",
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "cache.binding.close",
@@ -1723,7 +1946,17 @@
       "request": "sdk2-cache-v1#CloseRequest",
       "response": "sdk2-cache-v1#MutationReceipt",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "binding",
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "cache.operation.query",
@@ -1745,7 +1978,9 @@
         "requestId",
         "bindingId"
       ],
-      "notes": "operation ∈ open | renew | rebind | rotate | close"
+      "notes": "operation ∈ open | renew | rebind | rotate | close",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "cache.diagnostics",
@@ -1765,7 +2000,9 @@
         "after",
         "limit"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "cache.core.diagnostics",
@@ -1785,7 +2022,9 @@
         "limit",
         "after"
       ],
-      "notes": "protocol = sdk2-cache-core-v1"
+      "notes": "protocol = sdk2-cache-core-v1",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.capabilities",
@@ -1803,7 +2042,9 @@
       "query": [
         "contract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.binding.create",
@@ -1819,7 +2060,9 @@
       "request": "terminal-services-v1#BindingRequest",
       "response": "terminal-services-v1#BindingResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.executor.events.observe",
@@ -1839,7 +2082,9 @@
         "sessionContract",
         "connectionId"
       ],
-      "notes": ":id = executorId;Last-Event-ID = Sequence 游标"
+      "notes": ":id = executorId;Last-Event-ID = Sequence 游标",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.output.batch",
@@ -1855,7 +2100,9 @@
       "request": "terminal-services-v1#OutputBatchRequest",
       "response": "terminal-services-v1#OutputStatus",
       "query": [],
-      "notes": ":id = executorId"
+      "notes": ":id = executorId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.execution.state",
@@ -1877,7 +2124,9 @@
         "requestDigest",
         "connectionId"
       ],
-      "notes": ":id = executorId;:targetId = operationId"
+      "notes": ":id = executorId;:targetId = operationId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.output.observe",
@@ -1899,7 +2148,9 @@
         "requestDigest",
         "afterSeq"
       ],
-      "notes": "输出水位以 afterSeq 续订,不接受 Last-Event-ID"
+      "notes": "输出水位以 afterSeq 续订,不接受 Last-Event-ID",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.output.status",
@@ -1920,7 +2171,9 @@
         "operationId",
         "requestDigest"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.configuration.read",
@@ -1941,7 +2194,12 @@
         "contract",
         "sessionContract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "configuration",
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "terminal.configuration.commit",
@@ -1959,7 +2217,17 @@
       "request": "terminal-services-v1#ConfigurationRequest",
       "response": "terminal-services-v1#ConfigurationCommitResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "configuration",
+        "revision"
+      ],
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "integer"
+      }
     },
     {
       "name": "terminal.memory.read",
@@ -1980,7 +2248,12 @@
         "contract",
         "sessionContract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": [
+        "memory",
+        "revision"
+      ],
+      "expectedRevision": null
     },
     {
       "name": "terminal.memory.command",
@@ -1998,7 +2271,14 @@
       "request": "terminal-services-v1#MemoryCommandRequest",
       "response": "terminal-services-v1#MemoryReceiptResponse",
       "query": [],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": {
+        "path": [
+          "expectedRevision"
+        ],
+        "kind": "sequence"
+      }
     },
     {
       "name": "terminal.memory.receipt",
@@ -2020,7 +2300,9 @@
         "sessionContract",
         "requestId"
       ],
-      "notes": ":targetId = operationId"
+      "notes": ":targetId = operationId",
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.observation.resources",
@@ -2039,7 +2321,9 @@
         "contract",
         "sessionContract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.observation.correlations",
@@ -2059,7 +2343,9 @@
         "sessionContract",
         "toolCallId"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.profile.catalog",
@@ -2078,7 +2364,9 @@
         "contract",
         "sessionContract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     },
     {
       "name": "terminal.profile.usage",
@@ -2097,7 +2385,9 @@
         "contract",
         "sessionContract"
       ],
-      "notes": null
+      "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
     }
   ],
   "capabilities": [

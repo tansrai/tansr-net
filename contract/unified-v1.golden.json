@@ -1,6 +1,6 @@
 {
   "description": "unified-v1 结构金样(UAPI-01 阶段三):Manifest / Capabilities / CapabilityClosure / FacadeError / UnifiedError / EventEnvelope / RequestHeaders / ResponseHeaders 的正向与负向向量;只断言结构与标量保真,不代表鉴权或跨请求语义。依据 RFC-UAPI-1 v1.0-rc 会签稿与方案 §0 D7(统一码 19、tansr-event-envelope 协商头、票据段 ticketId)、§0 D18(事件包络 wire 定形 7 键 { contract, eventId, domain, type, cursorSet, terminalStatus, raw };EventEnvelope 正例与服务端 event-envelope.ts 真实产物同形)。CapabilityClosure 正例 = closure.ts computeClosure 真实产物(测试重算比对);Manifest 正例按路径引用仓内 api-manifest.json(valueFile)。负向向量两形:内联 value,或 base(某正例 name)+ patch(RFC 6902 子集 add / replace / remove,按序施于 base 深拷贝)——后者让\"错在哪一位\"一目了然并控制体积。",
-  "schemaSha256": "a2449bc121b5183e50b0c2432d29042446659ec8b32b355af7f204c6cb684a8e",
+  "schemaSha256": "fd07962916f7662ecc69c3f8c8d2b79aa5b99f542cbfd310a50f56777e51f117",
   "closureSources": {
     "full": {
       "installed": {
@@ -191,6 +191,10 @@
                 "observed": "2026-09-30",
                 "drift": false
               }
+            ],
+            "requestIdPath": [
+              "request",
+              "requestId"
             ]
           },
           {
@@ -257,6 +261,7 @@
                 "drift": false
               }
             ],
+            "requestIdPath": null,
             "sessionManifestRevision": 9,
             "sessionManifestSha256": "6e1876edc476322e2fc3613958f5b44700bb80ea23550fa794f5729220674f3e"
           }
@@ -276,7 +281,9 @@
             "request": null,
             "response": null,
             "query": [],
-            "notes": "会话级能力闭合围栏(方案 §3.6 / RFC-UAPI-1 §1.4):{ contract, closureId, authorizationRevision, domains, operations } + 响应头 tansr-closure-id;写操作可携 tansr-closure-id 作前置(412 closure_stale)"
+            "notes": "会话级能力闭合围栏(方案 §3.6 / RFC-UAPI-1 §1.4):{ contract, closureId, authorizationRevision, domains, operations } + 响应头 tansr-closure-id;写操作可携 tansr-closure-id 作前置(412 closure_stale)",
+            "etagPath": null,
+            "expectedRevision": null
           },
           {
             "name": "session.message.send",
@@ -292,7 +299,9 @@
             "request": "agent-session-v1#MessagesBodySchema",
             "response": null,
             "query": [],
-            "notes": "202 { sessionId, accepted: true };事件经 session.events.observe"
+            "notes": "202 { sessionId, accepted: true };事件经 session.events.observe",
+            "etagPath": null,
+            "expectedRevision": null
           },
           {
             "name": "session.events.observe",
@@ -310,7 +319,9 @@
             "query": [
               "exclude"
             ],
-            "notes": "Last-Event-ID 续订;帧 = KernelEvent(golden kernel-event.schema.json)+ 控制帧 CONTROL_FRAME"
+            "notes": "Last-Event-ID 续订;帧 = KernelEvent(golden kernel-event.schema.json)+ 控制帧 CONTROL_FRAME",
+            "etagPath": null,
+            "expectedRevision": null
           },
           {
             "name": "terminal.memory.receipt",
@@ -332,7 +343,9 @@
               "sessionContract",
               "requestId"
             ],
-            "notes": ":targetId = operationId"
+            "notes": ":targetId = operationId",
+            "etagPath": null,
+            "expectedRevision": null
           },
           {
             "name": "archive.ack.rebase",
@@ -348,7 +361,9 @@
             "request": "sdk2-archive-recovery-v1#AckRebaseRequest",
             "response": "sdk2-archive-recovery-v1#AckRebaseReceipt",
             "query": [],
-            "notes": null
+            "notes": null,
+            "etagPath": null,
+            "expectedRevision": null
           }
         ],
         "capabilities": [
@@ -568,7 +583,7 @@
       "expect": "valid",
       "value": {
         "contract": "unified-v1",
-        "closureId": "3644b2daa415a4093334291091b31f495ff7317d8fe3e4276e5d650189832dfa",
+        "closureId": "fc9a7b7a38e67ef3bcf0165be04290102628d1fa344b9e4775edad987b609399",
         "authorizationRevision": "7",
         "domains": {
           "session": {
@@ -629,6 +644,7 @@
           "session.input.capabilities": "enabled",
           "session.input.submit": "enabled",
           "session.input.status": "enabled",
+          "approval.credential.submit": "enabled",
           "execution.initialize": "enabled",
           "execution.capabilities": "enabled",
           "execution.boundary": "enabled",
@@ -683,7 +699,7 @@
           "terminal.profile.usage": "enabled"
         }
       },
-      "note": "closure.ts computeClosure(全装配 / idle / 全能力源)= 76 条全 enabled"
+      "note": "closure.ts computeClosure(全装配 / idle / 全能力源)= 77 条全 enabled"
     },
     {
       "name": "closure-partial-mixed",
@@ -691,7 +707,7 @@
       "expect": "valid",
       "value": {
         "contract": "unified-v1",
-        "closureId": "1d6dcf8d9996b60e4367660f8e0aa509003cab7568334c19cf3777b9ba1376f4",
+        "closureId": "97f747b6cee3ddccee68b6c74592e239ea86c4637c857e92c0064a5383cffd9d",
         "authorizationRevision": null,
         "domains": {
           "session": {
@@ -752,6 +768,7 @@
           "session.input.capabilities": "unavailable",
           "session.input.submit": "unavailable",
           "session.input.status": "unavailable",
+          "approval.credential.submit": "enabled",
           "execution.initialize": "unavailable",
           "execution.capabilities": "unavailable",
           "execution.boundary": "unavailable",
@@ -1146,7 +1163,7 @@
         "contract": "unified-v1",
         "traceId": "5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d",
         "requestId": "cfg-42",
-        "code": "conflict",
+        "code": "precondition_failed",
         "status": 412,
         "retryAction": "refresh",
         "message": "If-Match does not match the current configuration revision",
@@ -1156,10 +1173,11 @@
           "domainCode": "revision_conflict",
           "domainStatus": 409,
           "domainRetryAction": "refresh",
+          "reason": "if_match_stale",
           "header": "if-match"
         }
       },
-      "note": "RFC §2.2 / §2.3 构造"
+      "note": "RFC §1.2 / §2.2 / §2.3;U7-HDR request-headers.ts 真实形(携 If-Match 时域版本冲突改出 412 precondition_failed / refresh,原码留 domainCode,reason if_match_stale;revision 7 由 RFC 构造的 conflict/412 改口)"
     },
     {
       "name": "unified-error-deadline-expired",
@@ -1174,10 +1192,30 @@
         "retryAction": "none",
         "message": "request deadline has passed",
         "detail": {
+          "reason": "deadline_exceeded",
           "header": "deadline"
         }
       },
-      "note": "RFC §2.2 / §2.3 构造"
+      "note": "RFC §1.2 / §2.2 / §2.3;U7-HDR request-headers.ts 真实形(408 invalid_request / none,reason deadline_exceeded;revision 7 补 reason)"
+    },
+    {
+      "name": "unified-error-idempotency-key-reused",
+      "definition": "UnifiedError",
+      "expect": "valid",
+      "value": {
+        "contract": "unified-v1",
+        "traceId": "5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d",
+        "requestId": "idem-7",
+        "code": "conflict",
+        "status": 409,
+        "retryAction": "none",
+        "message": "Idempotency-Key was already used with a different request body",
+        "detail": {
+          "reason": "idempotency_key_reused",
+          "header": "idempotency-key"
+        }
+      },
+      "note": "RFC §1.2;U7-HDR request-headers.ts 真实形(同键异义 409 conflict / none;revision 7 登记 reason;三头拒绝按 UnifiedError 校验,不扩 FacadeCode)"
     },
     {
       "name": "unified-error-outside-closure",
@@ -1703,6 +1741,53 @@
       "note": "POST 不能是 read"
     },
     {
+      "name": "manifest-operation-read-with-expected-revision",
+      "definition": "Manifest",
+      "expect": "invalid",
+      "base": "manifest-runtime-view",
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/operations/3/expectedRevision",
+          "value": {
+            "path": [
+              "expectedRevision"
+            ],
+            "kind": "sequence"
+          }
+        }
+      ],
+      "note": "revision 7:If-Match 仅写操作,read 操作 expectedRevision 恒 null"
+    },
+    {
+      "name": "manifest-operation-etag-path-empty",
+      "definition": "Manifest",
+      "expect": "invalid",
+      "base": "manifest-runtime-view",
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/operations/3/etagPath",
+          "value": []
+        }
+      ],
+      "note": "revision 7:KeyPath 至少一级键,缺席用 null 不用空数组"
+    },
+    {
+      "name": "manifest-family-request-id-path-string",
+      "definition": "Manifest",
+      "expect": "invalid",
+      "base": "manifest-runtime-view",
+      "patch": [
+        {
+          "op": "replace",
+          "path": "/families/0/requestIdPath",
+          "value": "request.requestId"
+        }
+      ],
+      "note": "revision 7:requestIdPath 为键路径数组,不收点分字符串"
+    },
+    {
       "name": "manifest-discovery-operation-with-family",
       "definition": "Manifest",
       "expect": "invalid",
@@ -2083,7 +2168,7 @@
           "path": "/operations/session.message.send"
         }
       ],
-      "note": "缺一条操作(须恒全覆盖 76 条)"
+      "note": "缺一条操作(须恒全覆盖 77 条)"
     },
     {
       "name": "closure-discovery-read-operation",
@@ -2556,7 +2641,7 @@
           "value": "none"
         }
       ],
-      "note": "precondition_failed 恒 rediscover"
+      "note": "precondition_failed 恒 rediscover(围栏)或 refresh(If-Match;revision 7),none 不许"
     },
     {
       "name": "unified-error-not-canonical-replay",

@@ -3,7 +3,7 @@
   "$id": "https://tansr.com/contracts/unified-v1/2026-10-01.draft",
   "title": "Tansr Unified API Contract unified-v1 — 门面自有形、统一信封与统一头(schema 草案 drafted;依据 RFC-UAPI-1 v1.0-rc 会签稿与方案 §0 D7)",
   "description": "定义 unified-v1 的公共层:统一 manifest(GET /api/manifest)、部署级能力视图(GET /api/capabilities)、会话级能力闭合围栏(GET /api/sessions/:id/capabilities)、门面自有错误信封、阶段三域错误统一信封、统一事件包络与请求 / 响应头词表。事实源:doc/rfc/RFC-UAPI-1-统一信封与canonical单模块.md(§1 信封与头、§1.4 围栏、§1.5 事件包络、§2 错误矩阵、§3 字段消歧)与开发方案 §3.2 / §3.5 / §3.6。不改任何现有合同族的字段与 wire 字节;领域 payload 由各族子合同约束。HTTP 处理器按具名定义校验,不按根 anyOf。",
-  "$comment": "与既有合同族同律:全部对象 additionalProperties:false(RequestHeaders / ResponseHeaders 校验的是统一头词表的投影);Id / Sequence / Digest 逐字复制自 terminal-services-v1。围栏 operations 采显式属性 + required(76 条恒全覆盖、无未知操作名,便于代码生成出固定键类型),不用 propertyNames 枚举。身份字段(applicationScopeId / endUserId / authorizationRevision)恒由服务端派生,任何请求形不含身份字段(RFC-SDK2-1 §9.1;方案 §2.3)。",
+  "$comment": "与既有合同族同律:全部对象 additionalProperties:false(RequestHeaders / ResponseHeaders 校验的是统一头词表的投影);Id / Sequence / Digest 逐字复制自 terminal-services-v1。围栏 operations 采显式属性 + required(77 条恒全覆盖、无未知操作名,便于代码生成出固定键类型),不用 propertyNames 枚举。身份字段(applicationScopeId / endUserId / authorizationRevision)恒由服务端派生,任何请求形不含身份字段(RFC-SDK2-1 §9.1;方案 §2.3)。",
   "anyOf": [
     {
       "$ref": "#/definitions/Manifest"
@@ -135,6 +135,17 @@
       "pattern": "^[\\x21-\\x7E]{1,128}$",
       "description": "客户端幂等键(Idempotency-Key 头 / 各域体内 request.requestId;RFC §1.2:ASCII 1–128)。"
     },
+    "KeyPath": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "pattern": "^[A-Za-z][A-Za-z0-9]*$",
+        "maxLength": 64
+      },
+      "minItems": 1,
+      "maxItems": 8,
+      "description": "JSON 体内键路径(自根起逐级对象键;revision 7:ManifestFamily.requestIdPath / ManifestOperation.etagPath / expectedRevision.path)。"
+    },
     "UnifiedCode": {
       "type": "string",
       "enum": [
@@ -172,7 +183,7 @@
         "precondition_failed",
         "upstream_unavailable"
       ],
-      "description": "门面自有码 8(facade.ts ApiFacadeErrorCode;方案 §3.2 第 2 条 + upstream_unavailable;手册 §16.5 门面自有码表)。"
+      "description": "门面自有码 8(facade.ts ApiFacadeErrorCode;方案 §3.2 第 2 条 + upstream_unavailable;手册 §16.5 门面自有码表)。/api 请求侧三头拒绝(request-headers.ts)不属本词表:其信封携 requestId / detail.domainCode,形同域错误,按 UnifiedError 校验(revision 7 落定,不扩 8 → 12)。"
     },
     "RetryAction": {
       "type": "string",
@@ -244,6 +255,7 @@
         "session.input.capabilities",
         "session.input.submit",
         "session.input.status",
+        "approval.credential.submit",
         "execution.initialize",
         "execution.capabilities",
         "execution.boundary",
@@ -297,7 +309,7 @@
         "terminal.profile.catalog",
         "terminal.profile.usage"
       ],
-      "description": "围栏操作名 76 = manifest 操作目录去 4 条部署级发现读(discovery.* 与 session.capabilities);事实源 closure.ts CLOSURE_OPERATIONS,目录序。"
+      "description": "围栏操作名 77 = manifest 操作目录去 4 条部署级发现读(discovery.* 与 session.capabilities);事实源 closure.ts CLOSURE_OPERATIONS,目录序。"
     },
     "OperationName": {
       "type": "string",
@@ -320,9 +332,9 @@
     },
     "LegacyPathTemplate": {
       "type": "string",
-      "pattern": "^/v[23](/(:[A-Za-z]+|[A-Za-z0-9._~-]+|\\*\\*))+$",
+      "pattern": "^/v[123](/(:[A-Za-z]+|[A-Za-z0-9._~-]+|\\*\\*))+$",
       "maxLength": 256,
-      "description": "内部适配路径模板(/v2、/v3/*;用户拍板 D3:保留为内部入口一个版本周期)。"
+      "description": "内部适配路径模板(/v2、/v3/*;用户拍板 D3:保留为内部入口一个版本周期)。/v1 仅 approval.credential.submit 的 /v1/approvals/:id/credential(T-K11 审批回执,计划 §四 32;generate-manifest.mjs validateOperations 单点放行)。"
     },
     "SchemaRef": {
       "type": "string",
@@ -535,6 +547,17 @@
             "$ref": "#/definitions/ClientLock"
           }
         },
+        "requestIdPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/KeyPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "体内客户端幂等键位(RFC §1.2 / §3:Idempotency-Key 头映射到域 requestId 的键路径;sdk2 / recovery / cache 族 request.requestId,terminal 三面顶层 requestId);null = 该族体内无此位(agent-session-v1 以墓碑窗去重、archive-sync-v1 请求形未登记、门面自有 / 无 /api 操作的族)。revision 7 加法字段(U7-HDR 三头接线事实源并入 manifest;generate-manifest.mjs FAMILY_REQUEST_ID_PATHS)。"
+        },
         "sessionManifestRevision": {
           "type": "integer",
           "minimum": 1,
@@ -555,10 +578,11 @@
         "generated",
         "legacyEntries",
         "apiEntries",
-        "clients"
+        "clients",
+        "requestIdPath"
       ],
       "additionalProperties": false,
-      "description": "合同族登记项(方案 §3.5:id / domains / status / rfc / source / sha256 / golden / generated / legacyEntries / apiEntries / clients;generate-manifest.mjs FAMILIES → computeFacts)。"
+      "description": "合同族登记项(方案 §3.5:id / domains / status / rfc / source / sha256 / golden / generated / legacyEntries / apiEntries / clients;revision 7 起 + requestIdPath;generate-manifest.mjs FAMILIES → computeFacts)。"
     },
     "ManifestOperation": {
       "type": "object",
@@ -672,6 +696,46 @@
               "type": "null"
             }
           ]
+        },
+        "etagPath": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/KeyPath"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "2xx JSON 响应体内资源版本的键路径(门面据此派生强校验器 ETag: \"<revision>\";RFC §1.2);null = 该操作的响应不是有版本资源的表示,不伪造 ETag。revision 7 加法字段(generate-manifest.mjs VERSIONED_RESOURCES;request-headers.ts 只读 manifest)。"
+        },
+        "expectedRevision": {
+          "anyOf": [
+            {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "$ref": "#/definitions/KeyPath"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "sequence",
+                    "integer"
+                  ],
+                  "description": "sequence = 十进制序列字符串(sdk2 / cache / 记忆 revision);integer = 非负安全整数(终端配置 revision)。"
+                }
+              },
+              "required": [
+                "path",
+                "kind"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "写请求体内 expectedRevision 的键路径与类型(If-Match: \"<revision>\" 映射目标;体内缺席填入、在场且不等 → 412 precondition_failed;RFC §1.2);null = 该操作不接受 If-Match(出现即 400 if_match_not_applicable)。只允许登记在 kind: write 操作上。revision 7 加法字段。"
         }
       },
       "required": [
@@ -688,7 +752,9 @@
         "request",
         "response",
         "query",
-        "notes"
+        "notes",
+        "etagPath",
+        "expectedRevision"
       ],
       "additionalProperties": false,
       "allOf": [
@@ -775,9 +841,28 @@
               }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "read",
+                  "stream"
+                ]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "expectedRevision": {
+                "type": "null"
+              }
+            }
+          }
         }
       ],
-      "description": "操作目录项(方案 §3.5 manifest v2;generate-manifest.mjs operation()):门面自有操作 family / legacyPath 恒 null;kind 由 method / sse 推导。"
+      "description": "操作目录项(方案 §3.5 manifest v2;generate-manifest.mjs operation()):门面自有操作 family / legacyPath 恒 null;kind 由 method / sse 推导;revision 7 起 + etagPath / expectedRevision(If-Match 仅写操作 → 读 / 流操作 expectedRevision 恒 null)。"
     },
     "ManifestCapability": {
       "type": "object",
@@ -1435,6 +1520,9 @@
             "session.input.status": {
               "$ref": "#/definitions/OperationState"
             },
+            "approval.credential.submit": {
+              "$ref": "#/definitions/OperationState"
+            },
             "execution.initialize": {
               "$ref": "#/definitions/OperationState"
             },
@@ -1617,6 +1705,7 @@
             "session.input.capabilities",
             "session.input.submit",
             "session.input.status",
+            "approval.credential.submit",
             "execution.initialize",
             "execution.capabilities",
             "execution.boundary",
@@ -1671,7 +1760,7 @@
             "terminal.profile.usage"
           ],
           "additionalProperties": false,
-          "description": "76 条操作 → 三态(closure.ts CLOSURE_OPERATIONS 目录序;显式属性 + required 保证恒全覆盖、无未知操作名)。"
+          "description": "77 条操作 → 三态(closure.ts CLOSURE_OPERATIONS 目录序;显式属性 + required 保证恒全覆盖、无未知操作名)。"
         }
       },
       "required": [
@@ -2096,14 +2185,35 @@
           "type": "string",
           "enum": [
             "not_installed",
-            "outside_closure"
-          ]
+            "outside_closure",
+            "idempotency_key_invalid",
+            "idempotency_key_not_applicable",
+            "idempotency_key_reused",
+            "idempotency_key_mismatch",
+            "receipt_not_retained",
+            "receipt_window_full",
+            "if_match_invalid",
+            "if_match_not_applicable",
+            "if_match_body_mismatch",
+            "if_match_stale",
+            "deadline_invalid",
+            "deadline_exceeded",
+            "header_body_limit",
+            "header_body_not_canonical",
+            "header_processing_failed"
+          ],
+          "description": "机器可读细因。not_installed / outside_closure 为围栏与装配(RFC §1.4);其余 15 项为 /api 请求侧三头接线(RFC §1.2;方案 §0 D27 零新码,request-headers.ts;revision 7 登记):Idempotency-Key 形 / 适用 / 同键异义 / 体内 requestId 不等 / 原回执未保留 / 回执窗全在飞,If-Match 形 / 适用 / 体内 expectedRevision 不等 / 域版本陈旧(412 refresh),deadline 形 / 已过期(408),三头体处理超帽(413)/ 重编失败 / 处理异常。"
         },
         "header": {
           "type": "string",
           "pattern": "^[a-z][a-z0-9-]*$",
           "maxLength": 64,
           "description": "触发该错误的请求头名(Idempotency-Key / If-Match / deadline / tansr-*;RFC §1.2)。"
+        },
+        "limitBytes": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "header_body_limit 的体帽(字节;RFC §1.2 三头体处理上限)。"
         },
         "closureId": {
           "$ref": "#/definitions/Digest"
@@ -2551,7 +2661,8 @@
             "properties": {
               "retryAction": {
                 "enum": [
-                  "rediscover"
+                  "rediscover",
+                  "refresh"
                 ]
               }
             }
@@ -2576,7 +2687,7 @@
           }
         }
       ],
-      "description": "阶段三域错误统一信封(RFC-UAPI-1 v1.0-rc §2.2 / §2.3;方案 §0 D7、§4 第 2 条):code 取 19 统一码(17 四族映射码 + precondition_failed + not_canonical),HTTP 取该码缺省(表首值)或 RFC 表列备选;原族码 / 状态 / 动作保留于 detail;result_unknown 恒只许 query-status / rebind(不得换键重放);precondition_failed 恒 412 / rediscover;not_canonical 恒 400 / none(严格 canonical 入口拒收)。"
+      "description": "阶段三域错误统一信封(RFC-UAPI-1 v1.0-rc §2.2 / §2.3;方案 §0 D7、§4 第 2 条):code 取 19 统一码(17 四族映射码 + precondition_failed + not_canonical),HTTP 取该码缺省(表首值)或 RFC 表列备选;原族码 / 状态 / 动作保留于 detail;result_unknown 恒只许 query-status / rebind(不得换键重放);precondition_failed 恒 412,retryAction 为 rediscover(围栏陈旧 closure_stale)或 refresh(If-Match 资源版本陈旧 if_match_stale / if_match_body_mismatch,revision 7;RFC §1.2);not_canonical 恒 400 / none(严格 canonical 入口拒收)。/api 请求侧三头拒绝(request-headers.ts:invalid_request / conflict / precondition_failed / payload_too_large / result_unknown / internal_error,携 requestId = Idempotency-Key 或 null)按本定义校验,不扩 FacadeCode(U7-HDR 报告 §8.2 建议;revision 7 落定)。"
     },
     "CursorSet": {
       "type": "object",
