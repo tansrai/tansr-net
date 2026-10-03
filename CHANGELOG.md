@@ -17,7 +17,7 @@
 | 旧（族码主位） | 新（统一码主位） |
 | --- | --- |
 | `catch (TansrHttpException e) when (e.Code == "session_ended")` | `catch (UnifiedApiException e) when (e.Code == UnifiedErrorCode.Gone && e.Detail.DomainCode == "session_ended")` |
-| `e.DomainCode` / `e.DomainStatus` / `e.DomainRetryAction` 作主读 | `e.Code` / `e.StatusCode` / `e.RetryAction` 主读；族事实 `e.Detail.DomainCode` / `e.Detail.DomainStatus` / `e.Detail.DomainRetryAction`（旧属性保留为桥接，无族事实时回落统一值） |
+| `e.DomainCode` / `e.DomainStatus` / `e.DomainRetryAction` 作主读 | `e.Code` / `e.StatusCode` / `e.RetryAction` 主读；族事实 `e.Detail.DomainCode` / `e.Detail.DomainStatus` / `e.Detail.DomainRetryAction`（无族事实为 null）。旧属性保留为**只读桥接并已标 `[Obsolete]`**（编译告警 CS0618；无族事实时回落统一值，1.0 前移除）；族直通形的族事实即 `Code` / `StatusCode` / `RetryAction` |
 | `e.Code == "precondition_failed"` ⇒ 重发现 | `e.RetryAction == UnifiedRetryAction.Rediscover`（`RequiresRediscovery`）或 `Refresh`（`RequiresRefresh`，If-Match 陈旧） |
 | 按族词 `backoff` 自行重发 | `UnifiedRetry.Advice(e).Replayable` 为真时 `UnifiedRetry.RetrySameRequestAsync(client, op, sameOptions, e)` 单次重放；`result_unknown` / `commit_unknown` 永不重放 |
 | `CacheContinuityException.Code == "binding_rotated"` | `Code == UnifiedErrorCode.StaleGeneration && DomainCode == "binding_rotated"`；`Unified` 保存原统一异常 |
@@ -27,10 +27,12 @@
 
 ### 三头与通用调用入口
 
-- `TansrClient.CallAsync(ApiOperation, ApiCallOptions)`：任意非流式 manifest 操作的通用 `/api` 入口，路径只出自 `ApiRoutes`；`Idempotency-Key` / `If-Match` / `deadline` 先按操作事实本地校验再发出（`invalid_idempotency_key`、`invalid_if_match`、`if_match_not_applicable`、`invalid_deadline`、`deadline_exceeded`），`ApiCallResult.ETag` 只接受强校验子。
-- `UnifiedRetry.RetrySameRequestAsync`：同键同体仅重放一次，默认 30 s 等待预算，deadline 不延长（`not_retryable` / `retry_key_missing` / `retry_after_exceeds_budget` / `deadline_exceeded`）。
+- `TansrClient.CallAsync(ApiOperation, ApiCallOptions)`：任意非流式 manifest 操作的通用 `/api` 入口，路径只出自 `ApiRoutes`；`Idempotency-Key` / `If-Match` / `deadline` 先按操作事实本地校验再发出（`invalid_idempotency_key`、`invalid_if_match`、`if_match_not_applicable`、`invalid_deadline`、`deadline_exceeded`），`ApiCallResult.ETag` 只接受强校验子。`ApiCallOptions.ClosureId` 仅会话内写操作（`kind == write` 且路径以 `/api/sessions/:id/` 起）可携，其它操作本地 `closure_id_not_applicable` 零请求（facade 对其它操作答 400 `invalid_request`）。
+- `UnifiedRetry.RetrySameRequestAsync`：同键同体仅重放一次，默认 30 s 等待预算，deadline 不延长（`not_retryable` / `retry_key_missing` / `retry_after_exceeds_budget` / `deadline_exceeded`）。`UnifiedRetry.IdempotencyKeyOf(operation, options)`：头优先，否则只读所属族 `requestIdPath` 所指体内位（SDK2 四族 `request.requestId`、terminal 三族 `requestId`；`agent-session-v1` / `archive-sync-v1` 等无此位的族仅认头）。
+- 示例 `examples/Shared/FamilyFacts`：示例流程需要族事实时的读法（统一信封取 `Detail.*`，族直通形取 wire 值），`TurnInputEditor` / `NativeToolHost` / `ExampleSessionControls` 不再触碰弃用桥接。
+- 生成器 `scripts/generate-api-routes.mjs`：`method` / `kind` 词表改取 schema 枚举并校验 `allOf` 共约束（GET ⇒ read|stream、其它 ⇒ write、discovery ⇒ family null、族须已声明）、`OperationName` / `FamilyId` / `Digest` 形制；新增 `--validate <file>`（仅结构校验，不比锁不写文件）；`scripts/test-ci.ps1` 增 `api-routes-check` / `api-routes-tests` 两步。
 - `TansrClient.GetCapabilitiesAsync()` / `GetCapabilityClosureAsync(sessionId)` 与 `UnifiedCapabilities` / `UnifiedCapabilityClosure` 严格解码器：禁 URL 导航字段，`closureId` 本地复推；围栏外操作的 `capability_unavailable` 原码上浮，无任何降级。
 
 ### 测试
 
-- 金样 165 向量逐条归账（消费 140 / 生成器校验对象 23 / 明示不消费 1）；`closure-partial-mixed` 驱动 77 围栏操作的能力交集重放；19 码 × 绑定状态 × retryAction 对照 schema `allOf`；三头发出、本地拒绝、重放、ETag 回传、409 / 408 / 412 解码。
+- 金样 165 向量逐条归账（重放 141 / 生成器校验 12 / 明示不消费 12，每项带理由；`scripts/generate-api-routes.test.mjs` 对 12 个生成器校验项施同形变异于仓内产物逐一证伪，并反向核对 C# 分账表）；`closure-partial-mixed` 驱动 77 围栏操作的能力交集重放（`tansr-closure-id` 只在会话内写操作上携带）；19 码 × 绑定状态 × retryAction 对照 schema `allOf`；三头发出、本地拒绝、重放、ETag 回传、409 / 408 / 412 解码；弃用桥接的反射断言。
