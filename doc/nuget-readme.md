@@ -1,6 +1,6 @@
 # Tansr .NET SDK
 
-原生 C# 客户端，用于将 .NET 服务和 Windows 应用接入独立部署的 Tansr Serve。当前包版本为 `0.1.0.2`；显式预览 API 和能力仍须与所连接 Serve 的合同及能力发现结果匹配。
+原生 C# 客户端，用于将 .NET 服务和 Windows 应用接入独立部署的 Tansr Serve。当前包版本为 `0.2.0`；显式预览 API 和能力仍须与所连接 Serve 的合同及能力发现结果匹配。
 
 ## 选择与安装
 
@@ -13,10 +13,10 @@
 
 ```powershell
 # 只需连接 Serve 的 .NET 应用
-dotnet add YourApp.csproj package Tansr.Sdk --version 0.1.0.2
+dotnet add YourApp.csproj package Tansr.Sdk --version 0.2.0
 
 # 需要 Windows 本机能力的应用
-dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.1.0.2
+dotnet add YourApp.csproj package Tansr.Sdk.Windows --version 0.2.0
 ```
 
 本版实际消费验证范围为 Windows x64，包括 .NET Framework 4.8、现代 .NET 控制台、WPF self-contained 和核心控制台 Native AOT。TFM 不等同于所有 Windows 版本或 CPU 架构均已实测；不承诺 WPF Native AOT。SDK 是库，不携带完整 .NET 运行时；由应用选择系统运行时或自包含发布。Windows 适配使用 SQLite 原生依赖，不能当成纯托管单文件分发。
