@@ -5,13 +5,15 @@ using Microsoft.Data.Sqlite;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
 using Tansr.Sdk.Terminal;
+using Tansr.Sdk.Windows.Security;
 
 namespace Tansr.Sdk.Windows.Storage;
 
-/// <summary>原 Node 设备记忆 publication SQLite 格式。只搬运不透明 UTF-8 正文；记忆决策与删除语义由 Serve 负责。</summary>
-public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDisposable
+/// <summary>设备记忆 publication SQLite 介质，支持原 Node 明文格式和显式本地加密格式。只搬运不透明 UTF-8 正文；记忆决策与删除语义由 Serve 负责。</summary>
+public sealed partial class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDisposable
 {
     public const string Format = "terminal-memory-publication-sqlite-v1";
+    public const string EncryptedFormat = MemoryPublicationBodyCipher.Format;
     public const int MaximumBodyBytes = 4194304;
     public const int MaximumChunkBytes = 12288;
     public const int MaximumTransfers = 1048576;
@@ -25,6 +27,8 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
         "CREATE TABLE publication (id INTEGER PRIMARY KEY CHECK(id=1), etag TEXT NOT NULL, body BLOB NOT NULL) STRICT",
         "CREATE TABLE transfers (id TEXT PRIMARY KEY, owner TEXT NOT NULL, request TEXT NOT NULL, status TEXT NOT NULL, received INTEGER NOT NULL, body BLOB, etag TEXT) STRICT",
     };
+    private const string EncryptionSchema = "CREATE TABLE encryption (id INTEGER PRIMARY KEY CHECK(id=1), key_check BLOB NOT NULL) STRICT";
+    private readonly MemoryPublicationBodyCipher? _cipher;
     private static readonly object OwnersGate = new();
     private static readonly Dictionary<string, OpenOwner> Owners = new(StringComparer.OrdinalIgnoreCase);
     private readonly object _gate = new();
@@ -36,10 +40,12 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
     private bool _busy, _poisoned, _uncertain, _committed, _closed, _dbClosed, _fileClosed, _parentClosed;
 
     private SqliteMemoryPublicationStore(SqliteConnection connection, StorageFileIdentity parent, StorageFileIdentity file,
-        SqliteMemoryPublicationOptions options, OpenOwner owner, string metadata)
-    { _connection = connection; _parent = parent; _file = file; _options = options; _owner = owner; _metadata = metadata; }
+        SqliteMemoryPublicationOptions options, OpenOwner owner, string metadata, MemoryPublicationBodyCipher? cipher)
+    { _connection = connection; _parent = parent; _file = file; _options = options; _owner = owner; _metadata = metadata; _cipher = cipher; }
 
     public bool AtomicDurablePublication => true;
+    /// <summary>正文加密能力；路径、身份、请求及回执元数据保持可见且通过 AAD 认证。</summary>
+    public bool EncryptedBody => _cipher != null;
     public JsonElement Identity => _options.Identity.Clone();
 
     public static Task<SqliteMemoryPublicationStore> OpenAsync(SqliteMemoryPublicationOptions options, CancellationToken cancellationToken = default)
@@ -61,9 +67,11 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
             MaxStagingBytes = options.MaxStagingBytes,
             MaxPages = options.MaxPages,
             ReadContext = options.ReadContext,
+            KeyProvider = options.KeyProvider,
             AuthorizeRecovery = options.AuthorizeRecovery,
         };
-        var owner = new OpenOwner { Signature = Signature(fixedOptions) }; OpenOwner? maintenance = null;
+        string? keyId = fixedOptions.KeyProvider == null ? null : MemoryPublicationBodyCipher.ReadKeyId(fixedOptions.KeyProvider);
+        var owner = new OpenOwner { Signature = Signature(fixedOptions, keyId) }; OpenOwner? maintenance = null;
         lock (OwnersGate)
         {
             if (Owners.TryGetValue(path, out var prior))
@@ -108,9 +116,10 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                 using var sidecar = StorageFileIdentity.Open(path + suffix, false);
             }
             file = StorageFileIdentity.Open(path, false, fixedOptions.Mode == StorageOpenMode.Create); CheckOpening();
-            string metadata = Metadata(fixedOptions, parent, file);
+            string metadata = Metadata(fixedOptions, parent, file, keyId);
+            var cipher = fixedOptions.KeyProvider == null ? null : new MemoryPublicationBodyCipher(fixedOptions.KeyProvider, keyId!, metadata);
             connection = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = path, Mode = SqliteOpenMode.ReadWrite, Pooling = false, DefaultTimeout = 1 }.ToString()); connection.Open();
-            store = new SqliteMemoryPublicationStore(connection, parent, file, fixedOptions, owner, metadata);
+            store = new SqliteMemoryPublicationStore(connection, parent, file, fixedOptions, owner, metadata, cipher);
             if (fixedOptions.Mode == StorageOpenMode.Reopen)
             {
                 Require((string?)store.Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == metadata, "identity_mismatch");
@@ -126,6 +135,7 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                 {
                     foreach (string sql in Schema) store.Exec(sql);
                     store.Exec("INSERT INTO metadata VALUES(1,$json)", ("$json", metadata));
+                    if (cipher != null) { store.Exec(EncryptionSchema); store.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.Seal("key-check", Array.Empty<byte>()))); }
                 }
                 store.CheckFixed(); store.Audit();
             }, CheckOpening);
@@ -196,7 +206,10 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                 {
                     var capacity = Capacity(); int length = fixedRequest.GetProperty("byteLength").GetInt32();
                     Need(capacity.StoredTransfers < _options.MaxTransfers && capacity.StagingBytes + length <= _options.MaxStagingBytes, "capacity_exceeded");
-                    Exec("INSERT INTO transfers VALUES($id,$owner,$request,'staging',0,zeroblob($length),NULL)", ("$id", transferId), ("$owner", ownerCanonical), ("$request", Text(fixedRequest)), ("$length", length));
+                    if (_cipher == null)
+                        Exec("INSERT INTO transfers VALUES($id,$owner,$request,'staging',0,zeroblob($length),NULL)", ("$id", transferId), ("$owner", ownerCanonical), ("$request", Text(fixedRequest)), ("$length", length));
+                    else Exec("INSERT INTO transfers VALUES($id,$owner,$request,'staging',0,$body,NULL)", ("$id", transferId), ("$owner", ownerCanonical), ("$request", Text(fixedRequest)),
+                        ("$body", EncodeTransfer(ownerCanonical, fixedRequest, "staging", 0, new byte[length], null)));
                 }, check);
             }
             else
@@ -211,7 +224,7 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                     else
                     {
                         Need(offset == stage.Received, "request_conflict"); byte[] updated = (byte[])stage.Body!.Clone(); Buffer.BlockCopy(bytes, 0, updated, offset, bytes.Length);
-                        Transaction(() => Exec("UPDATE transfers SET body=$body,received=$received WHERE id=$id", ("$body", updated), ("$received", offset + bytes.Length), ("$id", transferId)), check);
+                        Transaction(() => Exec("UPDATE transfers SET body=$body,received=$received WHERE id=$id", ("$body", EncodeTransfer(stage.Owner, stage.Request, "staging", offset + bytes.Length, updated, null)), ("$received", offset + bytes.Length), ("$id", transferId)), check);
                     }
                 }
                 else if (stage.Status == "staging")
@@ -221,11 +234,11 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                     string? expected = stage.Request.GetProperty("expectedEtag").GetString(); string sha256 = String(stage.Request, "sha256");
                     Transaction(() =>
                     {
-                        if (Publication()?.Etag != expected) Exec("UPDATE transfers SET status='conflict',body=NULL WHERE id=$id", ("$id", transferId));
+                        if (Publication()?.Etag != expected) Exec("UPDATE transfers SET status='conflict',body=$body WHERE id=$id", ("$body", EncodeTransfer(stage.Owner, stage.Request, "conflict", stage.Received, null, null)), ("$id", transferId));
                         else
                         {
-                            Exec("INSERT INTO publication VALUES(1,$etag,$body) ON CONFLICT(id) DO UPDATE SET etag=excluded.etag,body=excluded.body", ("$etag", sha256), ("$body", stage.Body!));
-                            Exec("UPDATE transfers SET status='committed',body=NULL,etag=$etag WHERE id=$id", ("$etag", sha256), ("$id", transferId));
+                            Exec("INSERT INTO publication VALUES(1,$etag,$body) ON CONFLICT(id) DO UPDATE SET etag=excluded.etag,body=excluded.body", ("$etag", sha256), ("$body", EncodePublication(sha256, stage.Body!)));
+                            Exec("UPDATE transfers SET status='committed',body=$body,etag=$etag WHERE id=$id", ("$body", EncodeTransfer(stage.Owner, stage.Request, "committed", stage.Received, null, sha256)), ("$etag", sha256), ("$id", transferId));
                         }
                     }, check);
                 }
@@ -265,7 +278,7 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
         }
     }
 
-    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, Action? prepare = null)
+    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, Action? prepare = null, Action? verifyResult = null)
     {
         lock (_gate)
         {
@@ -279,9 +292,17 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
                 {
                     Require(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested();
                     var current = Scope(_options.ReadContext, _options.Identity); Require(!_poisoned, "reentrant");
-                    Require(Equal(scope, current), "context_changed"); CheckFixed(); cancellationToken.ThrowIfCancellationRequested();
+                    Require(Equal(scope, current), "context_changed"); CheckFixed();
+                    if (_cipher != null)
+                    {
+                        // Key providers are host callbacks too. Recheck authority after the final key read.
+                        Require(!_poisoned, "reentrant");
+                        current = Scope(_options.ReadContext, _options.Identity); Require(!_poisoned, "reentrant");
+                        Require(Equal(scope, current), "context_changed"); _parent.Check(); _file.Check();
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
                 }
-                Check(); var result = work(Check); Check(); return result;
+                Check(); var result = work(Check); Check(); verifyResult?.Invoke(); return result;
             }
             catch (Exception error)
             {
@@ -309,11 +330,18 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
     private void CheckFixed()
     {
         _parent.Check(); _file.Check();
-        Need(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == Schema.Length);
+        var schema = _cipher == null ? Schema : Schema.Concat(new[] { EncryptionSchema }).ToArray();
+        Need(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == schema.Length);
         Need(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND (length(CAST(sql AS BLOB))>4096 OR length(CAST(name AS BLOB))>128)") == 0);
         using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' LIMIT 4")) using (var reader = command.ExecuteReader())
-        { var found = new HashSet<string>(StringComparer.Ordinal); while (reader.Read()) { Need(!reader.IsDBNull(0) && Schema.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); } Need(found.Count == Schema.Length); }
+        { var found = new HashSet<string>(StringComparer.Ordinal); while (reader.Read()) { Need(!reader.IsDBNull(0) && schema.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); } Need(found.Count == schema.Length); }
         Need(Number("SELECT count(*) FROM metadata") == 1 && (string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == _metadata);
+        if (_cipher != null)
+        {
+            Need(Number("SELECT count(*) FROM encryption") == 1);
+            var keyCheck = Scalar("SELECT key_check FROM encryption WHERE id=1 AND length(key_check)=28") as byte[];
+            Need(keyCheck != null); _cipher.Open("key-check", keyCheck!);
+        }
     }
 
     private void Audit()
@@ -325,15 +353,17 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
 
     private PublicationRow? Publication()
     {
-        Need(Number("SELECT count(*) FROM publication") <= 1 && Number("SELECT count(*) FROM publication WHERE id<>1 OR length(body)>4194304 OR length(etag)>256") == 0);
+        Need(Number("SELECT count(*) FROM publication") <= 1 && Number("SELECT count(*) FROM publication WHERE id<>1 OR length(body)>$maximum OR length(etag)>256", ("$maximum", MaximumEncodedBodyBytes)) == 0);
         using var command = Command("SELECT etag,body FROM publication WHERE id=1"); using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
-        string etag = reader.GetString(0); byte[] body = (byte[])reader.GetValue(1); Need(WireJson.Sha256(body) == etag); return new PublicationRow(etag, body);
+        string etag = reader.GetString(0); byte[] body = (byte[])reader.GetValue(1);
+        if (_cipher != null) body = _cipher.Open(PublicationContext(etag), body);
+        Need(WireJson.Sha256(body) == etag); return new PublicationRow(etag, body);
     }
 
     private TransferRow? Stage(string id)
     {
-        Need(Number("SELECT count(*) FROM transfers WHERE id=$id AND (length(request)>4096 OR length(owner)>8192 OR length(body)>4194304 OR length(etag)>256)", ("$id", id)) == 0);
+        Need(Number("SELECT count(*) FROM transfers WHERE id=$id AND (length(request)>4096 OR length(owner)>8192 OR length(body)>$maximum OR length(etag)>256)", ("$id", id), ("$maximum", MaximumEncodedBodyBytes)) == 0);
         using var command = Command("SELECT owner,request,status,received,body,etag FROM transfers WHERE id=$id", ("$id", id)); using var reader = command.ExecuteReader();
         if (!reader.Read()) return null;
         string owner = reader.GetString(0); var ownerValue = Owner(owner); Need(SameSubject(ownerValue.GetProperty("scope"), _options.Identity.GetProperty("scope")));
@@ -341,16 +371,33 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
         Need(String(request, "action") == "begin" && String(request, "transferId") == id && new[] { "sourceId", "sourceGeneration", "domainKey" }.All(name => String(request, name) == String(_options.Identity, name)));
         string status = reader.GetString(2); long received = reader.GetInt64(3); byte[]? body = reader.IsDBNull(4) ? null : (byte[])reader.GetValue(4); string? etag = reader.IsDBNull(5) ? null : reader.GetString(5);
         Need(new[] { "staging", "committed", "conflict" }.Contains(status) && received >= 0 && received <= request.GetProperty("byteLength").GetInt32());
+        if (_cipher != null)
+        {
+            Need(body != null); body = _cipher.Open(TransferContext(owner, request, status, received, etag), body!);
+            if (status != "staging") { Need(body.Length == 0); body = null; }
+        }
         Need(status == "staging" ? body != null && body.Length == request.GetProperty("byteLength").GetInt32() && etag == null : body == null && (status == "committed" ? received == request.GetProperty("byteLength").GetInt32() && etag == String(request, "sha256") : etag == null));
         return new TransferRow(owner, request, status, checked((int)received), body, etag);
     }
 
     private SqliteMemoryPublicationCapacity Capacity()
     {
-        long count = Number("SELECT count(*) FROM transfers"), bytes = Number("SELECT COALESCE(SUM(length(body)),0) FROM transfers");
-        Need(count <= _options.MaxTransfers && bytes <= _options.MaxStagingBytes);
+        long count = Number("SELECT count(*) FROM transfers"), bytes = Number("SELECT COALESCE(SUM(length(body)-$overhead),0) FROM transfers WHERE status='staging'", ("$overhead", _cipher == null ? 0 : MemoryPublicationBodyCipher.Overhead));
+        Need(count <= _options.MaxTransfers && bytes >= 0 && bytes <= _options.MaxStagingBytes);
         return new SqliteMemoryPublicationCapacity(_options.MaxTransfers, count, _options.MaxStagingBytes, bytes, _options.MaxPages, Number("PRAGMA page_count"), Number("PRAGMA freelist_count"));
     }
+
+    private int MaximumEncodedBodyBytes => MaximumBodyBytes + (_cipher == null ? 0 : MemoryPublicationBodyCipher.Overhead);
+    private static string PublicationContext(string etag) => Text(Object(writer =>
+    { writer.WriteString("row", "publication"); writer.WriteString("etag", etag); }));
+    private static string TransferContext(string owner, JsonElement request, string status, long received, string? etag) => Text(Object(writer =>
+    {
+        writer.WriteString("row", "transfer"); writer.WriteString("owner", owner); Property(writer, "request", request);
+        writer.WriteString("status", status); writer.WriteNumber("received", received); writer.WriteString("etag", etag);
+    }));
+    private byte[] EncodePublication(string etag, byte[] body) => _cipher == null ? body : _cipher.Seal(PublicationContext(etag), body);
+    private object EncodeTransfer(string owner, JsonElement request, string status, int received, byte[]? body, string? etag)
+        => _cipher == null ? (object?)body ?? DBNull.Value : _cipher.Seal(TransferContext(owner, request, status, received, etag), body ?? Array.Empty<byte>());
 
     private static JsonElement Response(JsonElement request, Action<Utf8JsonWriter> write)
     {
@@ -398,17 +445,21 @@ public sealed class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDis
     private object? Scalar(string sql, params (string Name, object Value)[] args) { using var command = Command(sql, args); return command.ExecuteScalar(); }
     private long Number(string sql, params (string Name, object Value)[] args) => Convert.ToInt64(Scalar(sql, args), CultureInfo.InvariantCulture);
     private void Exec(string sql, params (string Name, object Value)[] args) { using var command = Command(sql, args); command.ExecuteNonQuery(); }
-    private static string Metadata(SqliteMemoryPublicationOptions options, StorageFileIdentity parent, StorageFileIdentity file) => Text(Object(writer =>
+    private static string Metadata(SqliteMemoryPublicationOptions options, StorageFileIdentity parent, StorageFileIdentity file, string? keyId) => Text(Object(writer =>
     {
-        writer.WriteString("format", Format); Property(writer, "identity", options.Identity);
+        writer.WriteString("format", keyId == null ? Format : EncryptedFormat);
+        if (keyId != null) writer.WriteString("keyId", keyId);
+        Property(writer, "identity", options.Identity);
         writer.WriteStartObject("limits"); writer.WriteNumber("maxTransfers", options.MaxTransfers); writer.WriteNumber("maxStagingBytes", options.MaxStagingBytes); writer.WriteEndObject();
         writer.WriteNumber("maxPages", options.MaxPages); writer.WriteNumber("pageSize", 4096);
         writer.WriteStartObject("physical"); writer.WriteStartObject("directory"); writer.WriteString("dev", parent.Device); writer.WriteString("ino", parent.Inode); writer.WriteEndObject();
         writer.WriteStartObject("file"); writer.WriteString("dev", file.Device); writer.WriteString("ino", file.Inode); writer.WriteEndObject(); writer.WriteEndObject();
     }));
-    private static string Signature(SqliteMemoryPublicationOptions options) => Text(Object(writer =>
+    private static string Signature(SqliteMemoryPublicationOptions options, string? keyId) => Text(Object(writer =>
     {
-        writer.WriteString("format", Format); Property(writer, "identity", options.Identity);
+        writer.WriteString("format", keyId == null ? Format : EncryptedFormat);
+        if (keyId != null) writer.WriteString("keyId", keyId);
+        Property(writer, "identity", options.Identity);
         writer.WriteStartObject("limits"); writer.WriteNumber("maxTransfers", options.MaxTransfers); writer.WriteNumber("maxStagingBytes", options.MaxStagingBytes); writer.WriteEndObject(); writer.WriteNumber("maxPages", options.MaxPages);
     }));
     private sealed class OpenOwner

@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 using Tansr.Sdk.Storage;
@@ -51,6 +52,60 @@ internal sealed class StorageFileIdentity : IDisposable
         catch { handle.Dispose(); throw; }
     }
 
+    /// <summary>Pin a closed migration file while allowing read-only SQLite verification and its final rename.</summary>
+    internal static StorageFileIdentity OpenReadOnly(string path)
+    {
+        var handle = CreateFile(path, 0x80000000u, 5, IntPtr.Zero, 3, 0x00200000u, IntPtr.Zero);
+        if (handle.IsInvalid) { handle.Dispose(); throw new StorageException("storage_error"); }
+        try { return new StorageFileIdentity(path, false, handle); }
+        catch { handle.Dispose(); throw; }
+    }
+
+    internal byte[] Digest()
+    {
+        using var view = new SafeFileHandle(_handle.DangerousGetHandle(), false);
+        using var stream = new FileStream(view, FileAccess.Read);
+        stream.Position = 0;
+        using var sha = SHA256.Create(); return sha.ComputeHash(stream);
+    }
+
+    /// <summary>Rename a closed, verified file without replacing a target or permitting source-path substitution.</summary>
+    internal static void MoveNew(string source, string destination, string device, string inode, byte[] digest)
+    {
+        source = FullPath(source); destination = FullPath(destination);
+        if (!string.Equals(Path.GetDirectoryName(source), Path.GetDirectoryName(destination), StringComparison.OrdinalIgnoreCase))
+            throw new StorageException("invalid_input");
+        // DELETE access is acquired only after SQLite and its non-DELETE-sharing identity handles close.
+        var handle = CreateFile(source, 0x80010000u, 1, IntPtr.Zero, 3, 0x00200000u, IntPtr.Zero);
+        if (handle.IsInvalid) { handle.Dispose(); throw new StorageException("storage_error"); }
+        StorageFileIdentity file;
+        try { file = new StorageFileIdentity(source, false, handle); }
+        catch { handle.Dispose(); throw; }
+        using (file)
+        {
+            if (file.Device != device || file.Inode != inode) throw new StorageException("identity_mismatch");
+            // Only read sharing: the verification guard stays open and no writer can change authenticated bytes.
+            using (var view = new SafeFileHandle(handle.DangerousGetHandle(), false))
+            using (var stream = new FileStream(view, FileAccess.Read))
+            using (var sha = SHA256.Create())
+                if (!sha.ComputeHash(stream).SequenceEqual(digest)) throw new StorageException("integrity_mismatch");
+            byte[] name = Encoding.Unicode.GetBytes(destination);
+            int rootOffset = IntPtr.Size == 8 ? 8 : 4;
+            int lengthOffset = rootOffset + IntPtr.Size, nameOffset = lengthOffset + 4;
+            int size = checked(nameOffset + name.Length + 2);
+            IntPtr info = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.Copy(new byte[size], 0, info, size); // ReplaceIfExists = FALSE, RootDirectory = NULL.
+                Marshal.WriteInt32(info, lengthOffset, name.Length);
+                Marshal.Copy(name, 0, IntPtr.Add(info, nameOffset), name.Length);
+                // FILE_RENAME_INFO / FileRenameInfo. An existing destination is an error, never replaced.
+                if (!SetFileInformationByHandle(handle, 3, info, (uint)size)) throw new StorageException("storage_error");
+            }
+            finally { Marshal.FreeHGlobal(info); }
+        }
+    }
+
     internal void Check()
     {
         var original = Read(_handle, _directory);
@@ -94,6 +149,9 @@ internal sealed class StorageFileIdentity : IDisposable
 
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "CreateFileW")]
     private static extern SafeFileHandle CreateFile(string path, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int informationClass, IntPtr information, uint size);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation info);

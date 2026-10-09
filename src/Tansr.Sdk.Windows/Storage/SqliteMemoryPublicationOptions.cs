@@ -12,6 +12,8 @@ public sealed class SqliteMemoryPublicationOptions
     /// <summary>原 Node identity：scope（applicationScopeId/endUserId）、sourceId、sourceGeneration、domainKey。</summary>
     public JsonElement Identity { get; set; }
     public Func<JsonElement> ReadContext { get; set; } = null!;
+    /// <summary>显式启用 AES-256-GCM 正文加密。重开须使用原 ID/密钥；不迁移明文库、不自动轮换或回退。</summary>
+    public IArchiveKeyProvider? KeyProvider { get; set; }
     /// <summary>必须显式规划；终态回执永久保留，不能通过重开提高上限或复用 transferId。</summary>
     public int MaxTransfers { get; set; }
     public int MaxStagingBytes { get; set; } = 8388608;

@@ -8,7 +8,48 @@ Serve/kernel 继续决定何时提取、选取、固化、更新和删除记忆�
 
 本地 `SqliteMemoryPublicationStore` 沿用 Node 的 `terminal-memory-publication-sqlite-v1` 格式：`metadata`、`publication`、`transfers` 三表，WAL/FULL 事务，`head/read/begin/chunk/commit/query` 六动作。阶段正文完整预留，最终 publication 的 CAS 与 transfer 终态在同一事务中落下。它是专用 publication 介质，不是 Archive/历史/材料响应箱；不能通过将旧档案数据库重命名来迁移。
 
-当前介质为明文，需使用受限用户目录；没有暗含的 DPAPI、正文加密、清账、回收或容量扩展。既有加密档案能力保持原样，但不代表这个新介质已经加密。Create 不覆盖已有文件；Reopen 按原身份、格式、容量及正文摘要复核，不把损坏、撤权或缺失文件视为空库重建。
+不提供 `KeyProvider` 时仍显式选择原明文格式，需使用受限用户目录；原 Node 明文互操作保持。设置 `SqliteMemoryPublicationOptions.KeyProvider` 可选择独立的 `terminal-memory-publication-encrypted-net-sqlite-v1` 格式。该格式不承诺与 Node 或其他生态的加密数据库直接互开；Serve wire、六动作与原回执保持相同。`EncryptedBody` 表示此实例是否启用正文加密，不代替 `AtomicDurablePublication`。
+
+加密复用 `IArchiveKeyProvider` 的 32 字节独立密钥副本与固定 `KeyId`；可直接注入自定义密钥来源，或使用 `CurrentUserDpapiArchiveKeyProvider.Create/Open`。每次操作短暂读钥并清零副本，同 ID 在实例存续期间换钥明确失败。publication 和 staging 正文在传给 SQLite 前完成 AES-256-GCM 加密；DB、WAL/rollback journal 不收到正文。每个密文为 12 字节随机 nonce、16 字节 tag 与正文。终态 transfer 不保留旧正文，只保存认证空正文的 28 字节见证。额外 `encryption` 表保存认证空正文 key-check，空库也会核对原密钥。
+
+AAD 绑定格式、KeyId、完整介质 identity、物理文件身份和固定容量，以及 publication etag 或 transfer 的完整 owner/request/status/received/etag。身份、请求、摘要、状态、长度及路径相关元数据仍可见；这不是整个 SQLite 文件加密。逻辑 staging 配额按明文字节计算，物理 `MaxPages` 仍覆盖密文开销，终态见证仍受原 `MaxTransfers` 限制。
+
+Create 不覆盖已有文件；Reopen 按原身份、格式、容量、密钥及正文认证复核，不把损坏、撤权或缺失文件视为空库重建。错钥、篡改、截断或错 AAD 拒绝返回正文；缺钥、KeyId 改变、运行中换钥和密钥回调后的主体/授权变化均明确失败。已经 COMMIT 后发生钥/身份失败仍返回 `reconciliation_required`，重开后查询原 transferId，不重建新请求。
+
+可信宿主公开接线示例（identity、readCurrentScope 和路径必须来自现有可信配置）：
+
+```csharp
+var key = CurrentUserDpapiArchiveKeyProvider.Open(keyPath, "memory-key");
+using var store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
+{
+    EnablePreview = true,
+    Path = publicationPath,
+    Mode = StorageOpenMode.Reopen,
+    Identity = identity,
+    ReadContext = readCurrentScope,
+    MaxTransfers = 4096,
+    MaxStagingBytes = 8388608,
+    MaxPages = 8192,
+    KeyProvider = key,
+});
+var tool = new WindowsMemoryPublicationHost(store, enablePreview: true).CreateTool();
+// Register tool with the existing WindowsExecutorBackend and stop execution before closing store.
+```
+
+首次初始化必须另行显式 `Create` 密钥与 Store，失败时保留残片并处理真实错误，不用“文件存在/打开失败”猜测可覆盖或换钥。现有示例 JSON 配置尚未增加密钥字段；直接采用该配置仍使用明文，不能声称示例已默认加密。上方公开 API 是本次已验证的加密入口。
+
+**显式迁移与换钥**：已提供 `source.CopyToEncryptedAsync(destinationPath, stagingPath, newKeyProvider, cancellationToken)`。它只从已打开并完整审计通过的源复制到新加密库，支持明文 v1 → 加密与旧钥 → 新钥。身份、容量上限、所有 transferId/owner/请求/终态/游标及 publication 均原样保留；新物理身份与新 KeyId 重新进入 AAD，不改 Serve wire、绑定或请求号。
+
+`stagingPath` 和 `destinationPath` 必须是同目录内两个不同的新路径，不能等于源路径，也不能已有库或 sidecar。先停止业务写入，再在源实例保持打开的期间执行：
+
+```csharp
+await source.CopyToEncryptedAsync(newPublicationPath, migrationStagingPath, newKeyProvider);
+// Success: close the old source and explicitly reopen newPublicationPath with the same identity/limits and newKeyProvider.
+```
+
+复制在暂存库单事务中完成；逐项重新解密比较后完整审计，关闭 SQLite、确认 sidecar 已排清后，持禁止写入的文件句柄重新以不可变只读模式逐项认证及比对；保持该保护直至核对文件身份和 SHA256，最后以 Windows 句柄重命名且禁止覆盖目标。目标路径只在校验完成后出现；原源未写入，当前源实例和宿主配置不会自动切换。认证、容量、取消或目标竞争失败时保留源、已有目标及具名暂存文件，不自动清库。失败重试应保留原暂存证据并指定另一新暂存路径；不能对残片调用 Create 或换请求号求通。若发布已完成后的最终授权检查失败，返回 `reconciliation_required`；恢复原授权后按已知目标路径、原身份和新钥显式 Reopen/查询对账，不重复覆盖。
+
+原地轮换和自动迁移仍被拒绝：向旧明文库传钥、向加密库漏钥/换 KeyId、传入未知格式不会暗迁或降明文。新路径已成功后也保留原源供宿主按恢复策略处理。迁移入口不执行跨进程业务接管或物理断电承诺；完整 Serve、安装物及 JSON Demo 的加密配置接线仍须按原 PST 卡统一验收。
 
 ## 两端可信装配
 
@@ -36,6 +77,12 @@ Serve 的 `restoreMemoryPublicationBinding` 与 `reconcileObservation` 是可信
 
 The Serve/kernel runtime owns memory extraction, selection, consolidation and deletion. The Windows client executes the existing reserved MemoryPublication profile and stores its publication using the original Node-compatible three-table SQLite format. This is separate from archive/history storage and remains an explicit preview.
 
-Configure the trusted Serve factory with `platform.memoryPublicationFor`. The ordinary CLI serve command does not enable this automatically. Source identity, deletion generations and provenance must come from trusted application records. Client configuration is not authorization. The current publication store is plaintext, uses explicit fixed capacity, retains terminal transfer receipts and does not silently migrate or clear old data.
+Configure the trusted Serve factory with `platform.memoryPublicationFor`. The ordinary CLI serve command does not enable this automatically. Source identity, deletion generations and provenance must come from trusted application records. Client configuration is not authorization. Without `KeyProvider`, the store retains the original plaintext format and Node interoperability. Explicit `KeyProvider` selects the local `terminal-memory-publication-encrypted-net-sqlite-v1` format using the existing 32-byte `IArchiveKeyProvider` contract, including the Windows CurrentUser DPAPI provider. It encrypts publication and staging bodies before SQLite sees them. Nonces and GCM tags add 28 bytes per body; terminal receipts keep an authenticated empty body, not the former content. Logical staging capacity excludes that overhead; the physical page limit still includes it.
+
+AAD binds the fixed storage identity, format, key ID, physical identity and limits, plus publication etag or all transfer request/owner/status/cursor/etag metadata. Those metadata remain visible; this is body encryption, not full-database encryption. `EncryptedBody` reports the actual instance choice. Keys are never stored in the database or logs. Wrong or unavailable keys, tampering, truncation and unknown formats fail without returning plaintext or recreating the source. Host authority is checked again after key callbacks. A key failure after COMMIT remains `reconciliation_required`; reopen with the original key and reconcile the original transfer.
+
+The public C# example above is the encrypted integration path. Existing example JSON configuration still opens plaintext stores and has no key setting. `source.CopyToEncryptedAsync(destinationPath, stagingPath, newKeyProvider)` explicitly copies a verified plaintext or encrypted source to a new encrypted file, including every publication, original transfer, terminal receipt and partial cursor. Identity and capacity limits stay fixed; physical identity and key ID are rebound in AAD. Both output paths must be new and in the same directory. Stop business writers first. The staging transaction is decrypted and compared before commit, then closed and checked for unresolved sidecars. A file guard denies writes continuously while an immutable read-only SQLite connection authenticates and compares every fact again, through the final SHA256 and file-identity checks and no-replace handle rename. The source remains unchanged; switching host configuration is explicit.
+
+Failure preserves the source, any existing target and named staging file. Preserve that evidence and retry with a new staging path. If the final authority check fails after publication, the result is `reconciliation_required`: reopen the known destination with its original identity and new key, and reconcile; never overwrite it. In-place rotation and automatic format upgrades remain unsupported. Supplying a key to legacy media never silently migrates it, and missing keys never downgrade encrypted media. Encrypted database files are not claimed to interoperate with another ecosystem's private file format. Full Serve, package, CLR4 runtime and Demo consumption remain separate acceptance work.
 
 Keep the device executor running until the server has settled its memory work. Unknown outcomes require original-operation reconciliation. A new connection does not inherit write authority over old transfers; recovery authorization permits read-only queries and server maintenance remains a trusted host responsibility. See the development record for actual tested behavior and remaining requirements.

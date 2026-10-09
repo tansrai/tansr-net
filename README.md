@@ -55,7 +55,7 @@ SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 W
 
 终端分块输出、同会话配置／记忆管理和 ACK 恢复已有显式候选消费入口；参见[终端服务预览接入](doc/terminal-services.md)。预览与稳定协议、管理命令与完整记忆本地化、代码实现与正式发行分别记录。
 
-设备自动记忆可通过 `SqliteMemoryPublicationStore` 和 `WindowsMemoryPublicationHost` 接入原执行管道，也可显式注入实现相同存储接口的第三方介质；三种示例共用[设备记忆配置入口](examples/Shared/device-memory.md)。Serve 负责提取、检索和删除，客户端持久化原 Node 兼容的 publication 介质。可信 Serve 宿主须配置 `memoryPublicationFor`，本地 Serve 可用显式的受信 `--host-module` 装配；默认 CLI 启动不自动启用。参见[身份、容量与恢复边界](doc/device-memory.md)。
+设备自动记忆可通过 `SqliteMemoryPublicationStore` 和 `WindowsMemoryPublicationHost` 接入原执行管道，也可显式注入实现相同存储接口的第三方介质；三种示例共用[设备记忆配置入口](examples/Shared/device-memory.md)。Serve 负责提取、检索和删除，客户端持久化 publication；无钥保留原 Node 兼容明文格式，显式 `KeyProvider` 可启用正文加密（格式及迁移边界见下述文档）。可信 Serve 宿主须配置 `memoryPublicationFor`，本地 Serve 可用显式的受信 `--host-module` 装配；默认 CLI 启动不自动启用。参见[身份、容量与恢复边界](doc/device-memory.md)。
 
 - [WPF](examples/WpfAssistant/README.md)：现代 Windows UI。
 - [WinForms](examples/WinFormsAssistant/README.md)：.NET Framework 4.8。
@@ -102,7 +102,7 @@ Windows 测试需要真实发布的原生 MCP 候选及锁定版本的原 CLI �
 
 Tansr provides a native C# client for Tansr Serve. The core package targets .NET Standard 2.0 and .NET 10; the Windows adapter targets .NET Framework 4.8 and modern Windows .NET. Serve owns the agent runtime, context, memory decisions and authorization. The client provides transport, local execution, durable storage and presentation. Electron keeps its existing embedded Node SDK.
 
-The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `WindowsMemoryPublicationHost` through the existing execution pipeline, or a caller-supplied implementation of the storage interface. The trusted Serve host must install `memoryPublicationFor`; local Serve supports explicit trusted `--host-module` assembly, while the default CLI launcher does not enable it automatically. The examples share explicit configuration for source identity, separate control/device credentials, storage creation or reopening, and capacity. See [device memory](doc/device-memory.md) for recovery and lifecycle boundaries.
+Explicit `SqliteMemoryPublicationOptions.KeyProvider` enables authenticated publication and staging body encryption; omitted keys retain the original plaintext format. The explicit device-memory preview uses `SqliteMemoryPublicationStore` and `WindowsMemoryPublicationHost` through the existing execution pipeline, or a caller-supplied implementation of the storage interface. The trusted Serve host must install `memoryPublicationFor`; local Serve supports explicit trusted `--host-module` assembly, while the default CLI launcher does not enable it automatically. The examples share explicit configuration for source identity, separate control/device credentials, storage creation or reopening, and capacity. See [device memory](doc/device-memory.md) for recovery and lifecycle boundaries.
 
 Use `await session.ReadApplicationPromptAsync(ct)` to explicitly observe the applied application prompt policy and source. Check `IsKnown` before reading `Policy` and `Source`; missing, invalid or non-live observations remain unknown. Existing metadata methods keep their default requests unchanged. `sdk` denotes the trusted developer/Serve host segment, not a client-side override. This observation never supplies prompt text or write authority. The desktop examples expose a prompt-source button and the console exposes `/prompt`.
 
