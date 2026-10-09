@@ -579,6 +579,7 @@ try {
             bindingRequestId = ('native-ui-memory-' + $hostName); allowedTools = @('SearchMemory', 'Read', 'List', 'Write', 'Edit', 'Task')
             workspace = @{ path = $memoryWorkspace; id = 'native-ui-workspace'; revision = '1'; allWritersCooperate = $true }
             journal = @{ path = (Join-Path $memoryRoot 'executor.sqlite'); mode = 'create'; compactCompletedReceipts = $true }
+            encryption = @{ provider = 'dpapi-current-user'; path = (Join-Path $memoryRoot 'memory.key'); keyId = 'native-ui-memory'; mode = 'create' }
             publication = @{ path = (Join-Path $memoryRoot 'memory.sqlite'); mode = 'create'; identity = $memoryIdentity.deviceIdentity; maxTransfers = 64; maxStagingBytes = 8388608; maxPages = 32768 }
         }
         [IO.File]::WriteAllText($deviceConfiguration, ($device | ConvertTo-Json -Depth 20), (New-Object Text.UTF8Encoding($false)))

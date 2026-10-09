@@ -5,6 +5,8 @@ using Tansr.Sdk.Client;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Hosting;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Storage;
+using Tansr.Sdk.Windows.Security;
 using Tansr.Sdk.Terminal;
 using Tansr.Sdk.Windows.Execution;
 using Tansr.Sdk.Windows.Hosting;
@@ -97,12 +99,27 @@ internal sealed class NativeTerminalDeviceHost
             }
             if (journalPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("terminal_journal_must_be_outside_workspace");
+            IArchiveKeyProvider? keyProvider = null;
+            if (config.TryGetProperty("encryption", out var encryption))
+            {
+                if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("terminal_device_explicit_encryption_required");
+                string keyPath = Absolute(encryption, "path");
+                if (string.Equals(keyPath, journalPath, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(keyPath, Absolute(config, "trustedScopeFile"), StringComparison.OrdinalIgnoreCase) ||
+                    keyPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                    config.TryGetProperty("publication", out var publicationConfig) && string.Equals(keyPath, Absolute(publicationConfig, "path"), StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("terminal_device_key_path_must_be_separate");
+                keyProvider = Text(encryption, "mode") == "create" ? CurrentUserDpapiArchiveKeyProvider.Create(keyPath, Text(encryption, "keyId")) :
+                    Text(encryption, "mode") == "reopen" ? CurrentUserDpapiArchiveKeyProvider.Open(keyPath, Text(encryption, "keyId")) :
+                    throw new InvalidOperationException("terminal_device_explicit_key_mode_required");
+            }
+            if (config.TryGetProperty("publication", out _) && keyProvider == null) throw new InvalidOperationException("terminal_memory_encryption_required");
             workspace = new WindowsWorkspace(workPath, new WindowsWorkspaceOptions { AllWritersCooperate = work.TryGetProperty("allWritersCooperate", out var cooperate) && cooperate.GetBoolean() });
             var scope = authority.ReadScope(); var executorId = Text(config, "executorId"); var workspaceId = Text(work, "id");
             journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
             {
                 Path = journalPath, Mode = Text(log, "mode") == "create" ? StorageOpenMode.Create : Text(log, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_device_open_mode_required"),
-                CompactCompletedReceipts = compactCompletedReceipts,
+                CompactCompletedReceipts = compactCompletedReceipts, KeyProvider = keyProvider,
                 ExecutorId = executorId, ApplicationScopeId = Text(scope, "applicationScopeId"), EndUserId = Text(scope, "endUserId"), ReadContext = authority.ReadScope,
             }, ct).ConfigureAwait(false);
             var allowed = config.GetProperty("allowedTools").EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
@@ -117,10 +134,10 @@ internal sealed class NativeTerminalDeviceHost
                 publication = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
                 {
                     EnablePreview = true, Path = memoryPath, Mode = Text(memory, "mode") == "create" ? StorageOpenMode.Create : Text(memory, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_memory_open_mode_required"),
-                    Identity = memory.GetProperty("identity").Clone(), ReadContext = authority.ReadScope,
+                    Identity = memory.GetProperty("identity").Clone(), ReadContext = authority.ReadScope, KeyProvider = keyProvider,
                     MaxTransfers = memory.GetProperty("maxTransfers").GetInt32(), MaxStagingBytes = memory.GetProperty("maxStagingBytes").GetInt32(), MaxPages = memory.GetProperty("maxPages").GetInt32(),
                 }, ct).ConfigureAwait(false);
-                memoryTool = new WindowsMemoryPublicationHost(publication, enablePreview: true).CreateTool();
+                memoryTool = new WindowsMemoryPublicationHost(publication, enablePreview: true, requireEncryption: true).CreateTool();
             }
             JsonElement? interpreter = null; Func<JsonElement, WindowsWorkspace, WindowsProcessRequest>? process = null;
             if (config.TryGetProperty("shell", out var shell))

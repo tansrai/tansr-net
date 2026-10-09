@@ -25,10 +25,20 @@ internal sealed class NativeMemoryDeviceConfiguration
         var publication = value.GetProperty("publication"); PublicationPath = AbsolutePath(publication, "path"); PublicationMode = Mode(publication);
         PublicationIdentity = publication.GetProperty("identity").Clone();
         MaxTransfers = Positive(publication, "maxTransfers"); MaxStagingBytes = Positive(publication, "maxStagingBytes"); MaxPages = Positive(publication, "maxPages");
+        var encryption = value.GetProperty("encryption");
+        if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("device_memory_explicit_encryption_required");
+        KeyPath = AbsolutePath(encryption, "path"); KeyId = Text(encryption, "keyId"); KeyMode = Mode(encryption);
+        if (KeyPath.StartsWith(WorkspacePath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("device_memory_key_must_be_outside_workspace");
+        if (new[] { JournalPath, PublicationPath, ScopeFile }.Any(path => string.Equals(path, KeyPath, StringComparison.OrdinalIgnoreCase)))
+            throw new InvalidOperationException("device_memory_paths_must_be_distinct");
         if (string.Equals(JournalPath, PublicationPath, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(ScopeFile, PublicationPath, StringComparison.OrdinalIgnoreCase) || string.Equals(ScopeFile, JournalPath, StringComparison.OrdinalIgnoreCase))
             throw new InvalidOperationException("device_memory_paths_must_be_distinct");
     }
+    internal string KeyPath { get; }
+    internal string KeyId { get; }
+    internal string KeyMode { get; }
     internal Uri Endpoint { get; }
     internal bool AllowHttp { get; }
     internal string SessionId { get; }

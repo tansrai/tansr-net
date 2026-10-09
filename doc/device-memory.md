@@ -32,11 +32,11 @@ using var store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryP
     MaxPages = 8192,
     KeyProvider = key,
 });
-var tool = new WindowsMemoryPublicationHost(store, enablePreview: true).CreateTool();
+var tool = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true).CreateTool();
 // Register tool with the existing WindowsExecutorBackend and stop execution before closing store.
 ```
 
-首次初始化必须另行显式 `Create` 密钥与 Store，失败时保留残片并处理真实错误，不用“文件存在/打开失败”猜测可覆盖或换钥。现有示例 JSON 配置尚未增加密钥字段；直接采用该配置仍使用明文，不能声称示例已默认加密。上方公开 API 是本次已验证的加密入口。
+首次初始化必须另行显式 `Create` 密钥与 Store，失败时保留残片并处理真实错误，不用“文件存在/打开失败”猜测可覆盖或换钥。示例 JSON 现在必须显式提供 encryption 配置，双库与离线读取共享原 DPAPI key；旧明文路径须先分别显式迁移，不能自动升级或换钥。
 
 **显式迁移与换钥**：已提供 `source.CopyToEncryptedAsync(destinationPath, stagingPath, newKeyProvider, cancellationToken)`。它只从已打开并完整审计通过的源复制到新加密库，支持明文 v1 → 加密与旧钥 → 新钥。身份、容量上限、所有 transferId/owner/请求/终态/游标及 publication 均原样保留；新物理身份与新 KeyId 重新进入 AAD，不改 Serve wire、绑定或请求号。
 
@@ -49,7 +49,7 @@ await source.CopyToEncryptedAsync(newPublicationPath, migrationStagingPath, newK
 
 复制在暂存库单事务中完成；逐项重新解密比较后完整审计，关闭 SQLite、确认 sidecar 已排清后，持禁止写入的文件句柄重新以不可变只读模式逐项认证及比对；保持该保护直至核对文件身份和 SHA256，最后以 Windows 句柄重命名且禁止覆盖目标。目标路径只在校验完成后出现；原源未写入，当前源实例和宿主配置不会自动切换。认证、容量、取消或目标竞争失败时保留源、已有目标及具名暂存文件，不自动清库。失败重试应保留原暂存证据并指定另一新暂存路径；不能对残片调用 Create 或换请求号求通。若发布已完成后的最终授权检查失败，返回 `reconciliation_required`；恢复原授权后按已知目标路径、原身份和新钥显式 Reopen/查询对账，不重复覆盖。
 
-原地轮换和自动迁移仍被拒绝：向旧明文库传钥、向加密库漏钥/换 KeyId、传入未知格式不会暗迁或降明文。新路径已成功后也保留原源供宿主按恢复策略处理。迁移入口不执行跨进程业务接管或物理断电承诺；完整 Serve、安装物及 JSON Demo 的加密配置接线仍须按原 PST 卡统一验收。
+原地轮换和自动迁移仍被拒绝：向旧明文库传钥、向加密库漏钥/换 KeyId、传入未知格式不会暗迁或降明文。新路径已成功后也保留原源供宿主按恢复策略处理。迁移入口不执行跨进程业务接管或物理断电承诺；完整 Serve、安装物及原生 UI 运行仍须按原 PST 卡统一验收；JSON Demo 已显式接入 DPAPI 双库加密。
 
 ## 两端可信装配
 
@@ -81,8 +81,35 @@ Configure the trusted Serve factory with `platform.memoryPublicationFor`. The or
 
 AAD binds the fixed storage identity, format, key ID, physical identity and limits, plus publication etag or all transfer request/owner/status/cursor/etag metadata. Those metadata remain visible; this is body encryption, not full-database encryption. `EncryptedBody` reports the actual instance choice. Keys are never stored in the database or logs. Wrong or unavailable keys, tampering, truncation and unknown formats fail without returning plaintext or recreating the source. Host authority is checked again after key callbacks. A key failure after COMMIT remains `reconciliation_required`; reopen with the original key and reconcile the original transfer.
 
-The public C# example above is the encrypted integration path. Existing example JSON configuration still opens plaintext stores and has no key setting. `source.CopyToEncryptedAsync(destinationPath, stagingPath, newKeyProvider)` explicitly copies a verified plaintext or encrypted source to a new encrypted file, including every publication, original transfer, terminal receipt and partial cursor. Identity and capacity limits stay fixed; physical identity and key ID are rebound in AAD. Both output paths must be new and in the same directory. Stop business writers first. The staging transaction is decrypted and compared before commit, then closed and checked for unresolved sidecars. A file guard denies writes continuously while an immutable read-only SQLite connection authenticates and compares every fact again, through the final SHA256 and file-identity checks and no-replace handle rename. The source remains unchanged; switching host configuration is explicit.
+The public C# example above is the encrypted integration path. The example JSON now requires an explicit DPAPI encryption configuration for both the publication store and its execution journal. `source.CopyToEncryptedAsync(destinationPath, stagingPath, newKeyProvider)` explicitly copies a verified plaintext or encrypted source to a new encrypted file, including every publication, original transfer, terminal receipt and partial cursor. Identity and capacity limits stay fixed; physical identity and key ID are rebound in AAD. Both output paths must be new and in the same directory. Stop business writers first. The staging transaction is decrypted and compared before commit, then closed and checked for unresolved sidecars. A file guard denies writes continuously while an immutable read-only SQLite connection authenticates and compares every fact again, through the final SHA256 and file-identity checks and no-replace handle rename. The source remains unchanged; switching host configuration is explicit.
 
 Failure preserves the source, any existing target and named staging file. Preserve that evidence and retry with a new staging path. If the final authority check fails after publication, the result is `reconciliation_required`: reopen the known destination with its original identity and new key, and reconcile; never overwrite it. In-place rotation and automatic format upgrades remain unsupported. Supplying a key to legacy media never silently migrates it, and missing keys never downgrade encrypted media. Encrypted database files are not claimed to interoperate with another ecosystem's private file format. Full Serve, package, CLR4 runtime and Demo consumption remain separate acceptance work.
 
 Keep the device executor running until the server has settled its memory work. Unknown outcomes require original-operation reconciliation. A new connection does not inherit write authority over old transfers; recovery authorization permits read-only queries and server maintenance remains a trusted host responsibility. See the development record for actual tested behavior and remaining requirements.
+
+## 执行 journal 与双库准入 / Execution journal and host admission
+
+`SqliteExecutorJournalOptions.KeyProvider` 显式选择 `sdk2-execution-encrypted-net-sqlite-v1`，同时选 `CompactCompletedReceipts` 则使用独立 `sdk2-execution-encrypted-net-sqlite-compact-v1`。原两种明文格式及旧构造保持可用，不在原路径隐式升级。完整 canonical operation 和 receipt（包括 chunk 参数、read 返回、工具正文）在 SQLite 接收前 AES-256-GCM 加密；格式/密钥 ID/原身份/容量/物理文件身份与记录种类、operationId 纳入 AAD。数据库、WAL 和回滚日志不接收这些明文。operationId、记录数量、长度及固定元数据仍可见；不声称整文件加密。
+
+密文以规范 Base64 存在原 TEXT 列，密文编码长度计入 `MaxStoredBytes`，物理页仍受 `MaxPages` 限制。每个 pending 保留足够存放原最大 receipt 的编码空间；compact 只在终态事务内释放未用预留，永久保留 operation 和完整 receipt。Pending/unknown、原 digest、canonical 及 ACK 时点不变。
+
+`new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true)` 要求实际 store 提供 `IEncryptedMemoryPublicationStore.EncryptedBody`；所创建工具把要求交给实际 `WindowsExecutorBackend`。原 `ExecutionHost` 在注册、认领或写 journal 前，通过可选 `IExecutionJournalRequirements` 校验真正注入的 `IExecutorJournal` 是否具备 `IEncryptedExecutorJournal.EncryptedAtRest`。无加密能力即 `ENOTSUP`；无法用另一个未参与执行的加密 journal 代签。自定义适配器和 backend 包装器必须如实提供并转发这些本地保证，不添加任何 wire 字段。
+
+```csharp
+using var journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
+{
+    Path = executionJournalPath, Mode = StorageOpenMode.Reopen,
+    ApplicationScopeId = applicationScopeId, EndUserId = endUserId, ExecutorId = executorId,
+    ReadContext = readCurrentScope, KeyProvider = key, CompactCompletedReceipts = true,
+});
+var memoryHost = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true);
+// Register memoryHost.CreateTool() in the original WindowsExecutorBackend and inject this journal into ExecutionHost.
+```
+
+停执行后可对 journal 调用同形 `CopyToEncryptedAsync(destinationPath, stagingPath, keyProvider)`。显式新路径迁移/换钥保留原源字节、身份、容量、compact 选择及全部 Pending/unknown/终态事实，最终认证比对与禁止覆盖发布沿用 publication 的路径设施；不改 source/binding。加密编码超出原配额时拒绝迁移并保源，不提高配额或删回执。迁移后宿主显式更换路径与钥。双库分别迁移，不承诺跨库原子切换；两份成功回执齐备前保留原路径并停止执行。JSON 配置见 [Demo](../examples/Shared/device-memory.md)，在线及离线读取均显式使用原 DPAPI key 文件，不因缺钥重建。
+
+The journal encrypts the entire canonical operation and receipt before SQLite receives either, including publication chunk parameters and read results. Its explicit encrypted formats preserve the original plaintext and compact formats. AAD binds fixed metadata, physical identity, record kind and operation ID; operation IDs and metadata remain visible. Base64 ciphertext and the full encoded receipt reservation count toward the existing byte quota. Compact completion releases only unused reservation, retaining every permanent operation/receipt and the original pending/unknown semantics.
+
+`requireEncryption: true` verifies both the publication store and the actual journal injected into the original ExecutionHost before registration or claim. Custom adapters and backend wrappers must truthfully implement/forward the optional local capability interfaces. No protocol, canonical digest or ACK behavior changes. The demo's explicit DPAPI key configuration is passed through both memory-only and combined terminal hosts; offline memory reads reopen that same key.
+
+`journal.CopyToEncryptedAsync(destinationPath, stagingPath, keyProvider)` copies to new paths and supports explicit rotation while preserving original bytes and all facts. Both paths must be new and share a directory. Stop execution first. Quota, key, cancellation or path failures preserve the source and any named staging file. Post-publication failure remains `reconciliation_required`; reopen the known target and reconcile without overwriting it. Publication and journal migration are separate operations, not a distributed transaction. Switch the stopped host only after both verified copies exist. Local tests and cross-target builds do not substitute for real Serve, CLR4/UI, operating-system or release evidence.

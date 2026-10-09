@@ -4,14 +4,23 @@ using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
+using Tansr.Sdk.Windows.Security;
 
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>默认兼容原 sdk2-execution-sqlite-v1，可显式选择独立紧凑介质。首次耐久占用才授予执行，重开、超时和断线均不重新授予。</summary>
-public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
+public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncryptedExecutorJournal, IDisposable
 {
     public const string Format = "sdk2-execution-sqlite-v1";
     public const string CompactFormat = "sdk2-execution-sqlite-compact-v1";
+    public const string EncryptedFormat = "sdk2-execution-encrypted-net-sqlite-v1";
+    public const string EncryptedCompactFormat = "sdk2-execution-encrypted-net-sqlite-compact-v1";
+    private const string EncryptionSchema = "CREATE TABLE encryption (id INTEGER PRIMARY KEY CHECK(id=1), key_check BLOB NOT NULL) STRICT";
+    private readonly MemoryPublicationBodyCipher? _cipher;
+    private readonly SqliteExecutorJournalOptions _options;
+    public bool EncryptedAtRest => _cipher != null;
+    private int StoredOperationMaximum => EncodedLength(MaximumOperationBytes);
+    private int StoredReceiptReserve => EncodedLength(ReceiptReserve);
     private const int MaximumOperationBytes = 1048576;
     private const int ReceiptReserve = 262144;
     private static readonly string[] Schema =
@@ -29,12 +38,13 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     private readonly long _maximumBytes;
     private readonly bool _compactCompletedReceipts;
     private readonly Func<JsonElement> _readContext;
-    private bool _busy, _poisoned, _uncertain, _closed;
+    private bool _busy, _poisoned, _uncertain, _committed, _closed;
     private (long Bytes, int Count)? _known;
 
     private SqliteExecutorJournal(SqliteConnection connection, StorageFileIdentity parent, StorageFileIdentity file,
-        SqliteExecutorJournalOptions options, string metadata)
+        SqliteExecutorJournalOptions options, string metadata, MemoryPublicationBodyCipher? cipher)
     {
+        _options = options; _cipher = cipher;
         _connection = connection; _parent = parent; _file = file; _metadata = metadata;
         _application = options.ApplicationScopeId; _user = options.EndUserId; _executor = options.ExecutorId;
         _maximumOperations = options.MaxOperations; _maximumBytes = options.MaxStoredBytes; _readContext = options.ReadContext;
@@ -52,6 +62,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
             Path = StorageFileIdentity.FullPath(options.Path),
             Mode = options.Mode,
             CompactCompletedReceipts = options.CompactCompletedReceipts,
+            KeyProvider = options.KeyProvider,
             ApplicationScopeId = options.ApplicationScopeId,
             EndUserId = options.EndUserId,
             ExecutorId = options.ExecutorId,
@@ -76,7 +87,9 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                     using var guard = StorageFileIdentity.Open(fixedOptions.Path + suffix, false);
                 }
             file = StorageFileIdentity.Open(fixedOptions.Path, false, fixedOptions.Mode == StorageOpenMode.Create);
-            var metadata = BuildMetadata(fixedOptions, parent, file);
+            var keyId = fixedOptions.KeyProvider == null ? null : MemoryPublicationBodyCipher.ReadKeyId(fixedOptions.KeyProvider);
+            var metadata = BuildMetadata(fixedOptions, parent, file, keyId);
+            var cipher = fixedOptions.KeyProvider == null ? null : new MemoryPublicationBodyCipher(fixedOptions.KeyProvider, keyId!, metadata);
             connection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
                 DataSource = fixedOptions.Path,
@@ -85,7 +98,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                 DefaultTimeout = 1,
             }.ToString());
             connection.Open();
-            var journal = new SqliteExecutorJournal(connection, parent, file, fixedOptions, metadata);
+            var journal = new SqliteExecutorJournal(connection, parent, file, fixedOptions, metadata, cipher);
             journal.Exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
             if (fixedOptions.Mode == StorageOpenMode.Create)
             {
@@ -94,6 +107,11 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                 journal.Transaction(() =>
                 {
                     foreach (var sql in Schema) journal.Exec(sql);
+                    if (cipher != null)
+                    {
+                        journal.Exec(EncryptionSchema);
+                        journal.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.Seal("key-check", Array.Empty<byte>())));
+                    }
                     journal.Exec("INSERT INTO metadata VALUES (1,$value)", ("$value", metadata));
                     journal.Exec("INSERT INTO state VALUES (1,$bytes,0)", ("$bytes", Bytes(metadata) + 128));
                 }, () => Require(Same(originalScope, ReadScope(fixedOptions.ReadContext, fixedOptions.ApplicationScopeId, fixedOptions.EndUserId)), "context_changed"), false);
@@ -131,9 +149,10 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         }
         Transaction(() =>
         {
-            var state = State(); long added = Bytes(id) + Bytes(text) + ReceiptReserve;
+            var encoded = Encode("operation", id, text);
+            var state = State(); long added = Bytes(id) + Bytes(encoded) + StoredReceiptReserve;
             Require(state.Count < _maximumOperations && state.Bytes + added <= _maximumBytes, "capacity_exceeded");
-            Exec("INSERT INTO operations VALUES ($id,$operation,NULL,zeroblob($reserve))", ("$id", id), ("$operation", text), ("$reserve", ReceiptReserve));
+            Exec("INSERT INTO operations VALUES ($id,$operation,NULL,zeroblob($reserve))", ("$id", id), ("$operation", encoded), ("$reserve", StoredReceiptReserve));
             Exec("UPDATE state SET logical_bytes=$bytes,operation_count=$count WHERE id=1", ("$bytes", state.Bytes + added), ("$count", state.Count + 1));
         }, check);
         return ExecutorJournalClaim.Claimed();
@@ -152,12 +171,13 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                 Require(row.Value.Receipt == text && ValidTerminalReserve(text, row.Value.Reserved), "receipt_mismatch");
                 return null;
             }
-            Require(row.Value.Reserved == ReceiptReserve);
+            Require(row.Value.Reserved == StoredReceiptReserve);
             Transaction(() =>
             {
-                int unused = ReceiptReserve - Bytes(text);
+                var encoded = Encode("receipt", id, text);
+                int unused = StoredReceiptReserve - Bytes(encoded);
                 Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE id=$id",
-                    ("$receipt", text), ("$reserve", _compactCompletedReceipts ? 0 : unused), ("$id", id));
+                    ("$receipt", encoded), ("$reserve", _compactCompletedReceipts ? 0 : unused), ("$id", id));
                 if (_compactCompletedReceipts)
                 {
                     // 与唯一终态同事务释放未用预留；不删除操作锚、不降低条数、也不重新授予未知结果。
@@ -174,7 +194,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     {
         var op = ValidateOperation(operation); var row = Row(op.GetProperty("operationId").GetString()!);
         Require(row != null && row.Value.Operation == Canonical(op), "receipt_mismatch");
-        if (row!.Value.Receipt == null) { Require(row.Value.Reserved == ReceiptReserve); return null; }
+        if (row!.Value.Receipt == null) { Require(row.Value.Reserved == StoredReceiptReserve); return null; }
         return ValidateStoredReceipt(row.Value, op);
     }, cancellationToken));
 
@@ -182,11 +202,11 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     {
         if (afterOperationId != null) WireJson.ValidateNamed("Id", StringValue(afterOperationId));
         var output = new List<JsonElement>(); int bytes = 0;
-        using var command = Command("SELECT id,CASE WHEN length(CAST(operation AS BLOB))<=1048576 THEN operation ELSE NULL END FROM operations WHERE id>$after ORDER BY id LIMIT 128", ("$after", afterOperationId ?? ""));
+        using var command = Command("SELECT id,CASE WHEN length(CAST(operation AS BLOB))<=$maximum THEN operation ELSE NULL END FROM operations WHERE id>$after ORDER BY id LIMIT 128", ("$after", afterOperationId ?? ""), ("$maximum", StoredOperationMaximum));
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            Require(!reader.IsDBNull(1)); var text = reader.GetString(1);
+            Require(!reader.IsDBNull(1)); var text = Decode("operation", reader.GetString(0), reader.GetString(1), MaximumOperationBytes);
             if (bytes + Bytes(text) > 2 * MaximumOperationBytes) break;
             var op = ValidateOperation(Stored(text, "ExecutionOperation", MaximumOperationBytes));
             Require(reader.GetString(0) == op.GetProperty("operationId").GetString());
@@ -216,7 +236,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
             if (_busy) { _poisoned = true; throw new StorageException("reentrant"); }
             if (_closed) throw new StorageException("closed");
             if (_uncertain) throw new StorageException("reconciliation_required");
-            _busy = true; _poisoned = false;
+            _busy = true; _poisoned = false; _committed = false;
             try
             {
                 var scope = ReadScope(_readContext, _application, _user);
@@ -225,11 +245,18 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
                     Require(!_poisoned, "reentrant");
                     Require(Same(scope, ReadScope(_readContext, _application, _user)), "context_changed");
                     Require(!_poisoned, "reentrant"); CheckFixed();
+                    Require(Same(scope, ReadScope(_readContext, _application, _user)), "context_changed");
+                    Require(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested();
                 }
                 Check(); if (_known.HasValue) Require(State() == _known.Value);
                 var result = action(scope, Check); Check(); return result;
             }
-            catch (SqliteException) { throw new StorageException("storage_error"); }
+            catch (Exception error)
+            {
+                if (_committed) { _uncertain = true; throw new StorageException("reconciliation_required"); }
+                if (error is SqliteException) throw new StorageException("storage_error");
+                throw;
+            }
             finally { _busy = false; }
         }
     }
@@ -240,7 +267,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         try
         {
             Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false;
-            if (refreshState) _known = State();
+            if (refreshState) { _committed = true; _known = State(); }
             committing = false;
         }
         catch
@@ -257,18 +284,20 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         CheckFixed(); var state = State();
         Require(Convert.ToInt64(Scalar("SELECT count(*) FROM metadata"), CultureInfo.InvariantCulture) == 1 &&
             Convert.ToInt64(Scalar("SELECT count(*) FROM state"), CultureInfo.InvariantCulture) == 1);
-        Require(Convert.ToInt64(Scalar("SELECT count(*) FROM operations WHERE length(CAST(id AS BLOB))>128 OR length(CAST(operation AS BLOB))>1048576 OR length(CAST(receipt AS BLOB))>262144 OR length(reserve)>262144"), CultureInfo.InvariantCulture) == 0);
+        Require(Convert.ToInt64(Scalar("SELECT count(*) FROM operations WHERE length(CAST(id AS BLOB))>128 OR length(CAST(operation AS BLOB))>$operation OR length(CAST(receipt AS BLOB))>$receipt OR length(reserve)>$receipt", ("$operation", StoredOperationMaximum), ("$receipt", StoredReceiptReserve)), CultureInfo.InvariantCulture) == 0);
         using var command = Command("SELECT id,operation,receipt,length(reserve) FROM operations");
         using var reader = command.ExecuteReader(); int count = 0; long account = Bytes(_metadata) + 128;
         while (reader.Read())
         {
             var id = reader.GetString(0); var text = reader.GetString(1); var receipt = reader.IsDBNull(2) ? null : reader.GetString(2); int reserved = reader.GetInt32(3);
-            Require(Bytes(id) <= 128 && Bytes(text) <= MaximumOperationBytes && reserved >= 0 && reserved <= ReceiptReserve);
+            Require(Bytes(id) <= 128 && Bytes(text) <= StoredOperationMaximum && reserved >= 0 && reserved <= StoredReceiptReserve);
+            account += Bytes(id) + Bytes(text) + (receipt == null ? 0 : Bytes(receipt)) + reserved;
+            text = Decode("operation", id, text, MaximumOperationBytes);
+            if (receipt != null) receipt = Decode("receipt", id, receipt, ReceiptReserve);
             var op = ValidateOperation(Stored(text, "ExecutionOperation", MaximumOperationBytes));
             Require(id == op.GetProperty("operationId").GetString());
-            if (receipt == null) Require(reserved == ReceiptReserve);
+            if (receipt == null) Require(reserved == StoredReceiptReserve);
             else ValidateStoredReceipt((text, receipt, reserved), op);
-            account += Bytes(id) + Bytes(text) + (receipt == null ? 0 : Bytes(receipt)) + reserved;
             Require(++count <= _maximumOperations && account <= _maximumBytes);
         }
         Require(count == state.Count && account == state.Bytes); _known = state;
@@ -277,14 +306,20 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     private void CheckFixed()
     {
         _parent.Check(); _file.Check();
-        using var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 4");
+        using var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 5");
         using (var reader = command.ExecuteReader())
         {
             var found = new HashSet<string>(StringComparer.Ordinal);
-            while (reader.Read()) { Require(!reader.IsDBNull(0)); var sql = reader.GetString(0); Require(Schema.Contains(sql)); found.Add(sql); }
-            Require(found.Count == Schema.Length);
+            while (reader.Read()) { Require(!reader.IsDBNull(0)); var sql = reader.GetString(0); Require(Schema.Contains(sql) || _cipher != null && sql == EncryptionSchema); found.Add(sql); }
+            Require(found.Count == Schema.Length + (_cipher == null ? 0 : 1));
         }
         Require((string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == _metadata, "identity_mismatch");
+        if (_cipher != null)
+        {
+            Require(Convert.ToInt64(Scalar("SELECT count(*) FROM encryption"), CultureInfo.InvariantCulture) == 1);
+            var check = Scalar("SELECT key_check FROM encryption WHERE id=1 AND length(key_check)=28") as byte[];
+            Require(check != null); _cipher.Open("key-check", check!);
+        }
     }
 
     private (long Bytes, int Count) State()
@@ -296,11 +331,11 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
 
     private (string Operation, string? Receipt, int Reserved)? Row(string id)
     {
-        using var command = Command("SELECT CASE WHEN length(CAST(operation AS BLOB))<=1048576 THEN operation END, CASE WHEN length(CAST(receipt AS BLOB))<=262144 THEN receipt END, length(reserve), receipt IS NOT NULL FROM operations WHERE id=$id", ("$id", id));
+        using var command = Command("SELECT CASE WHEN length(CAST(operation AS BLOB))<=$operation THEN operation END, CASE WHEN length(CAST(receipt AS BLOB))<=$receipt THEN receipt END, length(reserve), receipt IS NOT NULL FROM operations WHERE id=$id", ("$id", id), ("$operation", StoredOperationMaximum), ("$receipt", StoredReceiptReserve));
         using var reader = command.ExecuteReader(); if (!reader.Read()) return null;
         Require(!reader.IsDBNull(0) && (!reader.GetBoolean(3) || !reader.IsDBNull(1)));
-        var reserved = reader.GetInt32(2); Require(reserved >= 0 && reserved <= ReceiptReserve);
-        return (reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reserved);
+        var reserved = reader.GetInt32(2); Require(reserved >= 0 && reserved <= StoredReceiptReserve);
+        return (Decode("operation", id, reader.GetString(0), MaximumOperationBytes), reader.IsDBNull(1) ? null : Decode("receipt", id, reader.GetString(1), ReceiptReserve), reserved);
     }
 
     private JsonElement ValidateOperation(JsonElement input)
@@ -383,10 +418,32 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
     }
 
     private bool ValidTerminalReserve(string receipt, int reserved) =>
-        _compactCompletedReceipts ? reserved == 0 : Bytes(receipt) + reserved == ReceiptReserve;
+        _compactCompletedReceipts ? reserved == 0 : EncodedLength(Bytes(receipt)) + reserved == StoredReceiptReserve;
 
-    private static ExecutorJournalClaim Pending((string Operation, string? Receipt, int Reserved) row)
-    { Require(row.Reserved == ReceiptReserve); return ExecutorJournalClaim.Pending(); }
+    private ExecutorJournalClaim Pending((string Operation, string? Receipt, int Reserved) row)
+    { Require(row.Reserved == StoredReceiptReserve); return ExecutorJournalClaim.Pending(); }
+
+    private int EncodedLength(int bytes) => _cipher == null ? bytes : checked((bytes + MemoryPublicationBodyCipher.Overhead + 2) / 3 * 4);
+    private string Encode(string kind, string id, string plaintext)
+    {
+        if (_cipher == null) return plaintext;
+        var bytes = Encoding.UTF8.GetBytes(plaintext);
+        try { return Convert.ToBase64String(_cipher.Seal(kind + "\0" + id, bytes)); }
+        finally { ArchiveSecurityJson.Clear(bytes); }
+    }
+    private string Decode(string kind, string id, string encoded, int maximum)
+    {
+        if (_cipher == null) return encoded;
+        Require(Bytes(encoded) <= EncodedLength(maximum));
+        byte[] ciphertext;
+        try { ciphertext = Convert.FromBase64String(encoded); }
+        catch (FormatException) { throw new StorageException("integrity_mismatch"); }
+        Require(Convert.ToBase64String(ciphertext) == encoded && ciphertext.Length <= maximum + MemoryPublicationBodyCipher.Overhead);
+        var plaintext = _cipher.Open(kind + "\0" + id, ciphertext);
+        try { return new UTF8Encoding(false, true).GetString(plaintext); }
+        catch (DecoderFallbackException) { throw new StorageException("integrity_mismatch"); }
+        finally { ArchiveSecurityJson.Clear(plaintext); }
+    }
 
     private SqliteCommand Command(string sql, params (string Name, object Value)[] parameters)
     {
@@ -394,7 +451,7 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         foreach (var (name, value) in parameters) command.Parameters.AddWithValue(name, value); return command;
     }
     private void Exec(string sql, params (string Name, object Value)[] parameters) { using var command = Command(sql, parameters); command.ExecuteNonQuery(); }
-    private object? Scalar(string sql) { using var command = Command(sql); return command.ExecuteScalar(); }
+    private object? Scalar(string sql, params (string Name, object Value)[] parameters) { using var command = Command(sql, parameters); return command.ExecuteScalar(); }
     private static int Bytes(string text) => Encoding.UTF8.GetByteCount(text);
     private static string Canonical(JsonElement value) => WireJson.CanonicalString(value, MaximumOperationBytes);
     private static bool Same(JsonElement a, JsonElement b) => Canonical(a) == Canonical(b);
@@ -421,9 +478,10 @@ public sealed class SqliteExecutorJournal : IExecutorJournal, IDisposable
         Require(scope.GetProperty("applicationScopeId").GetString() == application && scope.GetProperty("endUserId").GetString() == user, "identity_mismatch");
         return scope;
     }
-    private static string BuildMetadata(SqliteExecutorJournalOptions options, StorageFileIdentity parent, StorageFileIdentity file) => Canonical(Object(writer =>
+    private static string BuildMetadata(SqliteExecutorJournalOptions options, StorageFileIdentity parent, StorageFileIdentity file, string? keyId) => Canonical(Object(writer =>
     {
-        writer.WriteString("format", options.CompactCompletedReceipts ? CompactFormat : Format);
+        writer.WriteString("format", keyId == null ? options.CompactCompletedReceipts ? CompactFormat : Format : options.CompactCompletedReceipts ? EncryptedCompactFormat : EncryptedFormat);
+        if (keyId != null) writer.WriteString("keyId", keyId);
         writer.WriteStartObject("identity"); writer.WriteStartObject("scope"); writer.WriteString("applicationScopeId", options.ApplicationScopeId); writer.WriteString("endUserId", options.EndUserId); writer.WriteEndObject(); writer.WriteString("executorId", options.ExecutorId); writer.WriteEndObject();
         writer.WriteStartObject("limits"); writer.WriteNumber("maxOperations", options.MaxOperations); writer.WriteNumber("maxStoredBytes", options.MaxStoredBytes); writer.WriteEndObject();
         writer.WriteNumber("maxPages", options.MaxPages); writer.WriteNumber("pageSize", 4096);

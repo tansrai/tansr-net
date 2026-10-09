@@ -57,6 +57,7 @@ public sealed class ExecutionHost : IDisposable
         _observationClient = observationClient ?? throw new ArgumentNullException(nameof(observationClient));
         _backend = backend ?? throw new ArgumentNullException(nameof(backend));
         _journal = journal ?? throw new ArgumentNullException(nameof(journal));
+        if (backend is IExecutionJournalRequirements requirements) requirements.ValidateJournal(_journal);
         _authorize = authorize ?? throw new ArgumentNullException(nameof(authorize));
         _idleDelay = idleDelay ?? throw new ArgumentNullException(nameof(idleDelay));
         _notificationFactory = options?.NotificationSourceFactory;

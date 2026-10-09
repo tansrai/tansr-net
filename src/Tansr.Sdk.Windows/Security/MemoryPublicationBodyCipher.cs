@@ -4,7 +4,7 @@ using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Windows.Security;
 
-/// <summary>Local publication codec. Keys and authenticated plaintext never enter SQLite.</summary>
+/// <summary>Local authenticated storage codec shared by publication and execution journals. Keys and authenticated plaintext never enter SQLite.</summary>
 internal sealed class MemoryPublicationBodyCipher
 {
     internal const string Format = "terminal-memory-publication-encrypted-net-sqlite-v1";

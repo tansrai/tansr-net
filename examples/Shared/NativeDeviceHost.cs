@@ -54,6 +54,7 @@ internal sealed class NativeDeviceHost
             journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
             {
                 Path = journalOptions.Path, Mode = journalOptions.Mode, ExecutorId = journalOptions.ExecutorId,
+                KeyProvider = journalOptions.KeyProvider, CompactCompletedReceipts = journalOptions.CompactCompletedReceipts,
                 MaxOperations = journalOptions.MaxOperations, MaxStoredBytes = journalOptions.MaxStoredBytes, MaxPages = journalOptions.MaxPages,
                 ApplicationScopeId = scope.GetProperty("applicationScopeId").GetString()!,
                 EndUserId = scope.GetProperty("endUserId").GetString()!, ReadContext = readTrustedScope,

@@ -87,6 +87,8 @@ public sealed class NativeOfflineStorageReaderTests
         });
         byte[] original = Encoding.UTF8.GetBytes(WireJson.CanonicalString(state));
         var options = fixture.Options(); options.Identity = identity;
+        string memoryKeyPath = Path.Combine(directory, "memory.key");
+        options.KeyProvider = CurrentUserDpapiArchiveKeyProvider.Create(memoryKeyPath, "memory-key");
         using (var store = await SqliteMemoryPublicationStore.OpenAsync(options))
         {
             JsonElement Request(string action, object extra)
@@ -107,6 +109,7 @@ public sealed class NativeOfflineStorageReaderTests
         Write(configPath, new
         {
             format = "tansr-example-device-memory-v1",
+            encryption = new { provider = "dpapi-current-user", path = memoryKeyPath, keyId = "memory-key", mode = "reopen" },
             enablePreview = true,
             serveUrl = "http://127.0.0.1:1",
             sessionId = "session",
@@ -115,7 +118,7 @@ public sealed class NativeOfflineStorageReaderTests
             controllerTokenEnvironment = "UNUSED_NO_TOKEN",
             deviceTokenEnvironment = "UNUSED_NO_TOKEN",
             offlineAuthorityFile = authorityPath,
-            workspace = new { path = directory, id = "workspace", revision = "1" },
+            workspace = new { path = Path.Combine(directory, "workspace"), id = "workspace", revision = "1" },
             journal = new { path = Path.Combine(directory, "unused-journal.sqlite"), mode = "reopen", maxOperations = 64, maxStoredBytes = 1048576, maxPages = 8192 },
             publication = new { path = fixture.Path, mode = "reopen", identity, maxTransfers = fixture.MaxTransfers, maxStagingBytes = 8388608, maxPages = 8192 }
         });

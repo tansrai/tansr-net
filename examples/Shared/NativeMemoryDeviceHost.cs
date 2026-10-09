@@ -3,6 +3,7 @@ using Tansr.Sdk.Client;
 #if WINDOWS || NETFRAMEWORK
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Windows.Hosting;
+using Tansr.Sdk.Windows.Security;
 using Tansr.Sdk.Windows.Storage;
 #endif
 
@@ -35,20 +36,24 @@ internal sealed class NativeMemoryDeviceHost
         TansrClient? executor = null; SqliteMemoryPublicationStore? store = null; NativeDeviceHost? device = null;
         try
         {
+            var key = configuration.KeyMode == "create"
+                ? CurrentUserDpapiArchiveKeyProvider.Create(configuration.KeyPath, configuration.KeyId)
+                : CurrentUserDpapiArchiveKeyProvider.Open(configuration.KeyPath, configuration.KeyId);
             executor = CreateClient(configuration, authority, configuration.DeviceTokenEnvironment);
             store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
             {
                 EnablePreview = true, Path = configuration.PublicationPath, Mode = OpenMode(configuration.PublicationMode),
-                Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope,
+                Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope, KeyProvider = key,
                 MaxTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages,
             }, ct).ConfigureAwait(false);
-            var publication = new WindowsMemoryPublicationHost(store, enablePreview: true);
+            var publication = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true);
             var tool = publication.CreateTool();
             device = await NativeDeviceHost.StartAsync(controller, executor, configuration.SessionId, authority.ReadScope,
                 configuration.WorkspacePath, configuration.WorkspaceId, configuration.WorkspaceRevision,
                 new SqliteExecutorJournalOptions
                 {
                     Path = configuration.JournalPath, Mode = OpenMode(configuration.JournalMode), ExecutorId = configuration.ExecutorId,
+                    KeyProvider = key, CompactCompletedReceipts = true,
                     MaxOperations = configuration.JournalMaxOperations, MaxStoredBytes = configuration.JournalMaxStoredBytes, MaxPages = configuration.JournalMaxPages,
                 }, (operation, token) =>
                 {

@@ -19,7 +19,8 @@ public sealed class NativeMemoryDeviceConfigurationTests
             ["trustedScopeFile"] = Path.Combine(root, "scope.json"),
             ["controllerTokenEnvironment"] = "FIXTURE_CONTROLLER",
             ["deviceTokenEnvironment"] = "FIXTURE_DEVICE",
-            ["workspace"] = new JsonObject { ["path"] = root, ["id"] = "workspace", ["revision"] = "1" },
+            ["encryption"] = new JsonObject { ["provider"] = "dpapi-current-user", ["path"] = Path.Combine(root, "memory.key"), ["keyId"] = "memory-key", ["mode"] = "reopen" },
+            ["workspace"] = new JsonObject { ["path"] = Path.Combine(root, "workspace"), ["id"] = "workspace", ["revision"] = "1" },
             ["journal"] = new JsonObject { ["path"] = Path.Combine(root, "execution.sqlite"), ["mode"] = "create", ["maxOperations"] = 4096, ["maxStoredBytes"] = 67108864, ["maxPages"] = 32768 },
             ["publication"] = new JsonObject
             {
@@ -56,11 +57,19 @@ public sealed class NativeMemoryDeviceConfigurationTests
     [InlineData("relative-path")]
     [InlineData("secret-instead-of-environment-name")]
     [InlineData("zero-capacity")]
+    [InlineData("plaintext-provider")]
+    [InlineData("key-path-alias")]
+    [InlineData("auto-key-mode")]
+    [InlineData("key-in-workspace")]
     public void AmbiguousOrUnsafeHostConfigurationFailsBeforeOpeningStorage(string scenario)
     {
         var input = Configuration();
         switch (scenario)
         {
+            case "key-in-workspace": input["encryption"]!["path"] = Path.Combine(input["workspace"]!["path"]!.GetValue<string>(), "key.json"); break;
+            case "plaintext-provider": input["encryption"]!["provider"] = "none"; break;
+            case "key-path-alias": input["encryption"]!["path"] = input["journal"]!["path"]!.DeepClone(); break;
+            case "auto-key-mode": input["encryption"]!["mode"] = "auto"; break;
             case "preview": input["enablePreview"] = false; break;
             case "mode": input["publication"]!["mode"] = "auto"; break;
             case "credential-url": input["serveUrl"] = "https://user:secret@serve.example"; break;

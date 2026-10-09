@@ -10,7 +10,7 @@ using Tansr.Sdk.Windows.Security;
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>设备记忆 publication SQLite 介质，支持原 Node 明文格式和显式本地加密格式。只搬运不透明 UTF-8 正文；记忆决策与删除语义由 Serve 负责。</summary>
-public sealed partial class SqliteMemoryPublicationStore : IMemoryPublicationStore, IDisposable
+public sealed partial class SqliteMemoryPublicationStore : IMemoryPublicationStore, IEncryptedMemoryPublicationStore, IDisposable
 {
     public const string Format = "terminal-memory-publication-sqlite-v1";
     public const string EncryptedFormat = MemoryPublicationBodyCipher.Format;

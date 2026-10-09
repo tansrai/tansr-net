@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Execution;
 
@@ -27,6 +28,12 @@ public interface IExecutionBackend
 
     /// <summary>实际 I/O 前必须调用 guard，返回符合 ResourceResult 的原结构。</summary>
     Task<JsonElement> ExecuteAsync(JsonElement operation, Func<CancellationToken, Task> guard, CancellationToken cancellationToken);
+}
+
+/// <summary>可选的本地装配准入；ExecutionHost 在注册或持久化任何请求前检查实际注入的 journal。</summary>
+public interface IExecutionJournalRequirements
+{
+    void ValidateJournal(IExecutorJournal journal);
 }
 
 /// <summary>只有后端能确认未发生副作用时，才可报告明确拒绝。</summary>

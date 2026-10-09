@@ -12,6 +12,12 @@ public interface IExecutorJournal
     Task CloseAsync();
 }
 
+/// <summary>可选介质保证；全 operation/receipt（包括工具参数及结果）在持久化前已加密。</summary>
+public interface IEncryptedExecutorJournal
+{
+    bool EncryptedAtRest { get; }
+}
+
 public enum ExecutorJournalClaimStatus { Claimed, Pending, Completed }
 
 public sealed class ExecutorJournalClaim

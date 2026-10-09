@@ -23,6 +23,12 @@ public interface IMemoryPublicationStore
     Task CloseAsync(CancellationToken cancellationToken = default);
 }
 
+/// <summary>可选的 publication 正文加密保证；不涵盖外层执行 journal。</summary>
+public interface IEncryptedMemoryPublicationStore
+{
+    bool EncryptedBody { get; }
+}
+
 /// <summary>已确认事务前拒绝/回滚，不可用来表示提交未知或不确定的传输失败。</summary>
 public class MemoryPublicationRejectedException : Exception
 {

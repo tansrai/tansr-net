@@ -16,14 +16,22 @@ public sealed class WindowsMemoryPublicationHost
 {
     private readonly IMemoryPublicationStore store;
     private readonly JsonElement identity;
+    private readonly bool requireEncryption;
 
     public WindowsMemoryPublicationHost(SqliteMemoryPublicationStore store, bool enablePreview = false)
         : this((IMemoryPublicationStore)store, enablePreview) { }
 
     public WindowsMemoryPublicationHost(IMemoryPublicationStore store, bool enablePreview = false)
+        : this(store, enablePreview, false) { }
+
+    /// <summary>加密模式同时要求专用正文介质与实际 ExecutionHost 的 journal 加密；旧构造保持显式兼容。</summary>
+    public WindowsMemoryPublicationHost(IMemoryPublicationStore store, bool enablePreview, bool requireEncryption)
     {
         if (store == null) throw new ArgumentNullException(nameof(store));
         if (!enablePreview || !store.AtomicDurablePublication) throw new ExecutionRejectedException("ENOTSUP");
+        if (requireEncryption && (!(store is IEncryptedMemoryPublicationStore encrypted) || !encrypted.EncryptedBody))
+            throw new ExecutionRejectedException("ENOTSUP");
+        this.requireEncryption = requireEncryption;
         this.store = store;
         identity = WireJson.DecodeControl(WireJson.EncodeControl(store.Identity, 32768), 32768);
         if (identity.ValueKind != JsonValueKind.Object || identity.EnumerateObject().Count() != 4 ||
@@ -46,7 +54,8 @@ public sealed class WindowsMemoryPublicationHost
 
     /// <summary>只登记固定保留工具，不替代应用能力协商、执行器绑定或每次本地授权。</summary>
     public WindowsBusinessTool CreateTool() => new(TerminalCandidateContract.MemoryPublicationToolName,
-        TerminalCandidateContract.MemoryPublicationToolDefinitionSha256, InvokeAsync);
+        TerminalCandidateContract.MemoryPublicationToolDefinitionSha256, InvokeAsync)
+    { RequireEncryptedJournal = requireEncryption };
 
     private async Task<JsonElement> InvokeAsync(JsonElement input, WindowsBusinessToolContext context, CancellationToken ct)
     {

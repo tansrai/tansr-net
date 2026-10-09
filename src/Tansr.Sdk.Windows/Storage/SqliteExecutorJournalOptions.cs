@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Windows.Storage;
 
@@ -10,6 +11,8 @@ public sealed class SqliteExecutorJournalOptions
     public StorageOpenMode Mode { get; set; }
     /// <summary>显式选择独立紧凑介质；终态释放未用预留但永久保留原键和完整回执。重开时须保持原选择；默认兼容原 v1，不迁移旧库。</summary>
     public bool CompactCompletedReceipts { get; set; }
+    /// <summary>显式 AES-256-GCM 全 operation/receipt 加密；新格式、新路径，不隐式升级原库。重开必须提供原密钥。</summary>
+    public IArchiveKeyProvider? KeyProvider { get; set; }
     public string ApplicationScopeId { get; set; } = "";
     public string EndUserId { get; set; } = "";
     public string ExecutorId { get; set; } = "";

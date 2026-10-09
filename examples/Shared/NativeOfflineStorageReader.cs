@@ -82,6 +82,7 @@ internal static class NativeOfflineStorageReader
         {
             EnablePreview = true, Path = configuration.PublicationPath, Mode = StorageOpenMode.Reopen,
             Identity = configuration.PublicationIdentity, ReadContext = () => { Check(); return permission.ReadScope(); },
+            KeyProvider = CurrentUserDpapiArchiveKeyProvider.Open(configuration.KeyPath, configuration.KeyId),
             MaxTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages
         }, ct).ConfigureAwait(false);
         var body = await store.ReadPublicationAsync(ct).ConfigureAwait(false);

@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Tansr.Sdk.Execution;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Storage;
 using Tansr.Sdk.Windows.Execution;
 
 namespace Tansr.Sdk.Windows.Hosting;
@@ -29,6 +30,7 @@ public sealed class WindowsBusinessTool
         Invoke = (_, _) => throw new InvalidOperationException("此工具必须由受信执行上下文调用。");
     }
     public string Name { get; }
+    internal bool RequireEncryptedJournal { get; set; }
     public string DefinitionDigest { get; }
     public Func<JsonElement, CancellationToken, Task<JsonElement>> Invoke { get; }
     internal Func<JsonElement, WindowsBusinessToolContext, CancellationToken, Task<JsonElement>>? ContextualInvoke { get; }
@@ -54,7 +56,7 @@ public sealed class WindowsExecutionOutputFailure
 }
 
 /// <summary>将既有SDK2资源调用映射到真实Windows后端；生命周期、账本及本地批准由ExecutionHost统一负责。</summary>
-public sealed class WindowsExecutorBackend : IExecutionBackend
+public sealed class WindowsExecutorBackend : IExecutionBackend, IExecutionJournalRequirements
 {
     private readonly Dictionary<string, WindowsExecutorWorkspace> _workspaces;
     private readonly Dictionary<string, WindowsBusinessTool> _tools;
@@ -110,6 +112,13 @@ public sealed class WindowsExecutorBackend : IExecutionBackend
     }
 
     public JsonElement Registration { get; }
+
+    public void ValidateJournal(IExecutorJournal journal)
+    {
+        if (_tools.Values.Any(tool => tool.RequireEncryptedJournal) &&
+            (!(journal is IEncryptedExecutorJournal encrypted) || !encrypted.EncryptedAtRest))
+            throw new ExecutionRejectedException("ENOTSUP");
+    }
 
     // Framework应用未带supportedOS manifest时Environment.OSVersion会报告兼容版本。
     // 库自己探测真实内核，不能迫使每个消费应用修改manifest才能在Windows10+使用。

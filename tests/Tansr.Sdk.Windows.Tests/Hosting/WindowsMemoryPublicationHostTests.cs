@@ -21,6 +21,53 @@ public sealed class WindowsMemoryPublicationHostTests
     private static readonly TimeSpan Deadline = TimeSpan.FromSeconds(10);
 
     [Fact]
+    public async Task RequiredEncryptionRejectsPlainPublicationAndActualPlainExecutionJournalBeforeRegistration()
+    {
+        using var f = new Fixture();
+        using (var plainStore = await f.Open())
+            Assert.Equal("ENOTSUP", Assert.Throws<ExecutionRejectedException>(() => new WindowsMemoryPublicationHost(plainStore, true, true)).Code);
+        using var store = await f.OpenEncrypted();
+        var backend = f.Backend(new WindowsMemoryPublicationHost(store, true, true));
+        using var plain = await SqliteExecutorJournal.OpenAsync(f.JournalOptions());
+        var client = new Client(Operation(Request("head")));
+        Assert.Equal("ENOTSUP", Assert.Throws<ExecutionRejectedException>(() => new ExecutionHost(client, backend, plain, (_, _) => Task.CompletedTask)).Code);
+        Assert.Equal(0, client.Registrations); Assert.Empty(await plain.OperationsAsync());
+        var options = f.JournalOptions(); options.Path += ".encrypted"; options.KeyProvider = new Storage.EncryptedExecutorJournalTests.Key();
+        using var encrypted = await SqliteExecutorJournal.OpenAsync(options);
+        using var host = new ExecutionHost(client, backend, encrypted, (_, _) => Task.CompletedTask);
+        var running = host.RunAsync(); var receipt = await client.Receipts.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+        Assert.Equal("completed", receipt.GetProperty("status").GetString());
+        await host.StopAsync(); await running;
+        Assert.Equal(1, client.Registrations); Assert.Single(await encrypted.OperationsAsync());
+    }
+
+    [Fact]
+    public async Task EncryptedPublicationPipelineKeepsChunkAndReadBodiesOutOfBothDatabasesAndReplaysOriginalReceipts()
+    {
+        using var f = new Fixture(); using var store = await f.OpenEncrypted();
+        var backend = f.Backend(new WindowsMemoryPublicationHost(store, true, true));
+        var options = f.JournalOptions(); options.KeyProvider = new Storage.EncryptedExecutorJournalTests.Key();
+        var original = new List<JsonElement>();
+        using (var journal = await SqliteExecutorJournal.OpenAsync(options))
+        {
+            foreach (string action in new[] { "begin", "chunk", "commit", "read", "query" })
+            {
+                var operation = Operation(Request(action, transfer: action == "read" ? null : "transfer"), id: "encrypted-" + action); original.Add(operation);
+                var client = new Client(operation);
+                using var host = new ExecutionHost(client, backend, journal, (_, _) => Task.CompletedTask);
+                var running = host.RunAsync();
+                var receipt = await client.Receipts.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+                Assert.Equal("completed", receipt.GetProperty("status").GetString());
+                await host.StopAsync(); await running; f.Probe();
+            }
+        }
+        options.Mode = StorageOpenMode.Reopen;
+        using var reopened = await SqliteExecutorJournal.OpenAsync(options);
+        foreach (var operation in original) Assert.Equal(ExecutorJournalClaimStatus.Completed, (await reopened.ClaimAsync(operation)).Status);
+        Assert.Equal(Body, await store.ReadPublicationAsync());
+    }
+
+    [Fact]
     public async Task InjectedDurablePublicationStoreUsesOriginalOwnerAndIsNotClosedByTheToolAdapter()
     {
         using var f = new Fixture(); using var sqlite = await f.Open(); var adapter = new PublicationAdapter(sqlite);
@@ -324,9 +371,28 @@ public sealed class WindowsMemoryPublicationHostTests
             ReadContext = () => Scope(),
             MaxTransfers = 32,
         });
+        internal Task<SqliteMemoryPublicationStore> OpenEncrypted() => SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
+        {
+            EnablePreview = true,
+            Path = Path.Combine(directory, "publication-encrypted.sqlite"),
+            Mode = StorageOpenMode.Create,
+            Identity = Element(new { scope = new { applicationScopeId = "app", endUserId = "user" }, sourceId = "source", sourceGeneration = "1", domainKey = "device" }),
+            ReadContext = () => Scope(),
+            MaxTransfers = 32,
+            KeyProvider = new Storage.EncryptedExecutorJournalTests.Key(),
+        });
         internal WindowsExecutorBackend Backend(WindowsMemoryPublicationHost host) => new("executor", [new WindowsExecutorWorkspace("workspace", "1", Workspace)], [host.CreateTool()]);
         internal SqliteExecutorJournalOptions JournalOptions() => new()
         { Path = Path.Combine(directory, "journal.sqlite"), Mode = StorageOpenMode.Create, ApplicationScopeId = "app", EndUserId = "user", ExecutorId = "executor", ReadContext = () => Scope() };
+        internal void Probe()
+        {
+            foreach (string path in Directory.GetFiles(directory))
+            {
+                using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var bytes = new MemoryStream(); file.CopyTo(bytes); var text = Encoding.UTF8.GetString(bytes.ToArray());
+                Assert.DoesNotContain(Convert.ToBase64String(Body), text); Assert.DoesNotContain("合成设备记忆", text);
+            }
+        }
         public void Dispose() { Workspace.Dispose(); Directory.Delete(directory, true); }
     }
     private sealed class Counted(IExecutionBackend inner) : IExecutionBackend
@@ -344,8 +410,12 @@ public sealed class WindowsMemoryPublicationHostTests
         internal Client(JsonElement operation) { original = operation.Clone(); Enqueue(operation); }
         internal void Enqueue(JsonElement operation) => operations.Writer.TryWrite(operation);
         public JsonElement ReadScope() => Scope();
-        public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken ct) => Task.FromResult(Element(new
-        { protocol = "sdk2-ext-v1", executorId = "executor", connectionId = "connection", connectionRevision = "1", expiresAt = "2099-01-01T00:00:00.000Z", heartbeatAfterMs = 30000 }));
+        internal int Registrations;
+        public Task<JsonElement> RegisterAsync(JsonElement registration, CancellationToken ct)
+        {
+            Registrations++; return Task.FromResult(Element(new
+            { protocol = "sdk2-ext-v1", executorId = "executor", connectionId = "connection", connectionRevision = "1", expiresAt = "2099-01-01T00:00:00.000Z", heartbeatAfterMs = 30000 }));
+        }
         public Task<JsonElement> HeartbeatAsync(JsonElement connection, CancellationToken ct) => Task.FromResult(connection);
         public async Task<JsonElement> PollAsync(JsonElement connection, CancellationToken ct) => Element(new
         { protocol = "sdk2-ext-v1", executorId = "executor", connectionId = "connection", operations = new[] { await operations.Reader.ReadAsync(ct) } });

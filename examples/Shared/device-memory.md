@@ -28,6 +28,12 @@ Serve 当前设备记忆链使用默认 SDK1 会话与 `/v2` 的 execution 扩�
     "id": "受信工作区ID",
     "revision": "1"
   },
+  "encryption": {
+    "provider": "dpapi-current-user",
+    "path": "C:\\TansrHost\\keys\\memory.key",
+    "keyId": "memory-key",
+    "mode": "create"
+  },
   "journal": {
     "path": "C:\\TansrHost\\state\\execution.sqlite",
     "mode": "create",
@@ -51,7 +57,7 @@ Serve 当前设备记忆链使用默认 SDK1 会话与 `/v2` 的 execution 扩�
 }
 ```
 
-这是结构示例，中文占位符不能直接当真实身份或 digest 使用。使用规范绝对路径，父目录由宿主预先建立并管理访问权限。SQLite 不覆盖已有文件：首次显式 `create`；随后使用同一文件、原身份及原容量显式 `reopen`。不按文件存在性自动选择模式，不删旧库，不另建来源掩盖未知结果。配置与存储分开，不复用路径。
+这是结构示例，中文占位符不能直接当真实身份或 digest 使用。使用规范绝对路径，父目录由宿主预先建立并管理访问权限。Demo 同时启用 publication 正文和完整 execution journal 加密（compact 终态保留）。`encryption` 为必填的显式 CurrentUser DPAPI 供钥配置；key 文件必须与配置、身份、两份数据库分离且放在受限目录，不能存于工具可访问工作区。首次钥模式 `create`，原钥重开 `reopen`，不按存在性猜测、不自动换钥。旧明文库须先用 SDK 的两个 `CopyToEncryptedAsync` 分别迁至新路径并保留原件，不能直接加字段原地启动。SQLite 不覆盖已有文件：首次显式 `create`；随后使用同一文件、原身份及原容量显式 `reopen`。不按文件存在性自动选择模式，不删旧库，不另建来源掩盖未知结果。配置与存储分开，不复用路径。
 
 publication `identity` 的 `domainKey` 由 Serve 对 `MemoryIdentity` 去掉 `sourceGeneration` 后按原 canonical JSON 计算；不是工作区路径、sessionId 或客户端随机键。示例直接使用可信来源提供的值，不自行猜来源。generation 改变也不能绕过原物理域键。
 
@@ -84,3 +90,9 @@ This is a real native Windows consumer of the existing execution protocol. It co
 The production `tansr serve` command does **not** yet wire `memoryPublicationFor`. Deploy a trusted Serve host using `createAgentSessionFactory` and `startServer`, with authenticated controller/device roles, durable stores and the actual client-managed memory identity. A local JSON file is host configuration, not server authorization. Provision its scope, source generation and domain key through trusted application administration; never infer them from model output or an unverified JWT. Keep token values out of the file and logs.
 
 Start the native host against an existing SDK1 session, wait for Ready, and only then initiate memory reads or model work from the controller. Keep polling alive while Serve finishes memory operations. `/stop`, Ctrl+C or the native Stop action wait for local cleanup only; they do not close the remote session or prove remote memory is drained, durable or consumed. No timeout or empty poll is treated as a drain receipt. Reopen the original stores explicitly after restart; unknown outcomes and new connection owners require the original reconciliation/maintenance procedure, never automatic replay or a replacement database.
+
+## Encryption configuration (English)
+
+The memory-only demo requires the explicit `encryption` block above. The combined terminal-device demo also requires this block whenever `publication` is configured; terminal-only legacy configurations remain valid. Both databases receive the same explicitly selected CurrentUser DPAPI key provider, and the memory host requires an encrypted publication store and the actual encrypted execution journal. Keep the key outside the tool workspace. `create` never overwrites a key or database; `reopen` requires their original identity, capacity, format and key. Offline reads always reopen the original key, regardless of an old configuration's create mode.
+
+Plaintext SDK formats remain supported. Migrate existing publication and journal files to separate new paths using each store's `CopyToEncryptedAsync`, verify both outcomes, then switch configuration while execution is stopped. Retain originals and failed staging files for reconciliation. Missing/corrupt keys never trigger fresh keys or empty databases. These are local storage guarantees, not proof of server drain, cloud durability, native UI acceptance or a release.
