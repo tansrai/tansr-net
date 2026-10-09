@@ -96,3 +96,13 @@ Start the native host against an existing SDK1 session, wait for Ready, and only
 The memory-only demo requires the explicit `encryption` block above. The combined terminal-device demo also requires this block whenever `publication` is configured; terminal-only legacy configurations remain valid. Both databases receive the same explicitly selected CurrentUser DPAPI key provider, and the memory host requires an encrypted publication store and the actual encrypted execution journal. Keep the key outside the tool workspace. `create` never overwrites a key or database; `reopen` requires their original identity, capacity, format and key. Offline reads always reopen the original key, regardless of an old configuration's create mode.
 
 Plaintext SDK formats remain supported. Migrate existing publication and journal files to separate new paths using each store's `CopyToEncryptedAsync`, verify both outcomes, then switch configuration while execution is stopped. Retain originals and failed staging files for reconciliation. Missing/corrupt keys never trigger fresh keys or empty databases. These are local storage guarantees, not proof of server drain, cloud durability, native UI acceptance or a release.
+
+## 原键失回与实际消费
+
+控制端必须在首次提交前保存 `MemoryOperation.Request` 和 `Scope`，失回后用 `RestoreMemoryOperation` 与 `QueryMemoryAsync` 查询原键。`receipt: null` 单独表示未知，不能重建新操作。仅在原响应明确是受理前 `busy` 且 `domainRetryAction=backoff`、原键查询仍无回执时，调用方可按原合同有界重投相同请求；不得改 requestId、operationId、正文或修订来求成功。Demo 不自动执行这类管理重试，也不自行认领旧 owner。
+
+撤权后设备可能因原 poll/续租被拒而进入 Failed，并以非零退出；此时仍等待本机执行和句柄收尾。不得把这次退出写成一次正常完成的记忆命令，也不要向已退出进程继续发送 `/stop`。数据库与密钥保持原路径，下一次启动由可信宿主恢复授权后显式选择 `reopen`。
+
+独立的 `scripts/packed-memory-integration.mjs` 用封存公开包 Host 驱动真实 Console 设备进程。其专用测试检查 DPAPI 双库、实际 publication 正文及 journal 中的 Base64 副本、原键失回、进程重开、撤权、错主体和资源关闭。完整工程验收、其它 UI/运行时、平台环境与发布仍单独记录。
+
+The controller retains the original memory request and scope before sending. A lost response is reconciled with `RestoreMemoryOperation` and `QueryMemoryAsync`; a missing receipt alone never grants replay. Only an explicit pre-admission busy/backoff refusal plus an absent original receipt permits a bounded attempt of exactly the same request. Revocation may stop the device with a nonzero exit; preserve its original databases and reconcile instead of reporting business success. The sealed-package integration gate exercises actual Console processes and Windows DPAPI/SQLite. It does not certify other native UIs, runtimes, operating systems or a release.

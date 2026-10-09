@@ -1,6 +1,6 @@
 # Serve 源码 HTTP/SSE 联验
 
-这些回环监听均导入指定的 CLI 源码。SDK1 传输回归采用原 `FakeAgentFactory` 的受控子类；高阶链通过公开 Serve 工厂，使用真实平台装配、kernel 查询循环、设备执行、档案介质和 HTTP/SSE，仅把上游平台与模型替换为确定性合成响应。所有运行零真实平台凭据、零付费采样。
+本节所述原工装的回环监听导入指定的 CLI 源码；下文独立封存包工装不消费活动源码。SDK1 传输回归采用原 `FakeAgentFactory` 的受控子类；高阶链通过公开 Serve 工厂，使用真实平台装配、kernel 查询循环、设备执行、档案介质和 HTTP/SSE，仅把上游平台与模型替换为确定性合成响应。所有运行零真实平台凭据、零付费采样。
 
 先由统一工程门编译 Release，再单独运行：
 
@@ -33,3 +33,19 @@ node scripts/serve-integration.mjs
 候选分支还通过公开 TerminalSessionControl 检查配置修改/重放及记忆 pin/原键查询。原 ACK 的真实成功 HTTP 响应被夹具丢弃后，重开原密文存储并查询原键；跨用户检查直接到目标 ACK 查询。另一独立的明文 source 数据库显式采用新恢复 DDL，以真实提交屏障制造旧 ACK 409，再验证 rebase 成功丢响应、重开、同键重放及跨用户拒绝；原密文档案没有迁移或降级。主场景严格固定 4 次合成模型请求；受信后台记忆请求须匹配 `meta.purpose`、精确工具集合和任务标记，单独有界计数，并返回原指令允许的无写结束。
 
 测试会继续接收第二轮档案；如果该步暴露原修订冲突，保留原 ACK 并使联验失败，不能以延时、改键重投或绕开产品协调器遮掩。传输测试不能证明真实外部模型、跨进程 Serve 冷恢复或完整 SDK 行为等价。端口和子进程退出时收口，工程卡与完整验收项仍须统一审阅。
+
+## 独立的封存包加密记忆链
+
+`ServeEncryptedMemoryPublicationTests` 使用独立的 `PstMemoryPublication` 类过滤器，不纳入上面的源码快照子集计数。先构建 IntegrationTests 和 `ConsoleAssistant` 的 Release/net10.0-windows，再运行：
+
+```powershell
+node scripts/packed-memory-integration.mjs '<共享封存Host清单.json>' '<新的证据目录>'
+```
+
+清单固定公开 Serve/SDK/API-client 三个 tgz 的路径及 SHA256、已安装公共包 Host 的路径和 SHA256。Host 由本批统一准备，返回原 scope/publicationIdentity/执行器 ID，并提供仅供合成验收的认证控制。脚本不导入活动 CLI 源码，也不建立替代执行服务。每项独占一个随机回环 Host 和系统临时根，顺序消费；保留 TRX、候选文件哈希、命令/退出码及清理回执，配置里的合成令牌随临时根删除。
+
+三项分别覆盖真实 Console 设备进程的 DPAPI 双库、原 pin HTTP 200 失回与原键查询、进程重开、撤权/错 scope 及句柄释放；真实 chunk 已写入 SQLite 后丢返回形成 unknown；在相同提交点取消设备并关闭，保留未送回的原 unknown，再按原冻结执行 API 补投/查询。两条故障用例只包装公开 Store 接口注入失回，不制造 Serve operation/receipt，不改密文或直接写数据库。数据库及活跃 sidecar 同时扫描合成正文和真实 chunk Base64。
+
+初始化阶段的明确 `busy`/`backoff` 不算失回。测试先查询原键，无回执且原错误明确未受理时，才在截止内重投完全相同的 requestId/operationId/body；任何 unknown、其它错误或单独的空查询均不触发重放。设备重启得到新连接不等于旧 transfer 写权恢复；本组只证明冷重开和原事实保全，不伪造维护授权。
+
+这是 Windows 真实 DPAPI/SQLite、公开包 HTTP 和 Console 进程链；不是物理掉电、跨平台数据库互开、CLR4/WPF/WinForms 实机或完整生态验收。历史源码 extraction/recall 测试仍独立保留。

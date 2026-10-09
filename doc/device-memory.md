@@ -113,3 +113,11 @@ The journal encrypts the entire canonical operation and receipt before SQLite re
 `requireEncryption: true` verifies both the publication store and the actual journal injected into the original ExecutionHost before registration or claim. Custom adapters and backend wrappers must truthfully implement/forward the optional local capability interfaces. No protocol, canonical digest or ACK behavior changes. The demo's explicit DPAPI key configuration is passed through both memory-only and combined terminal hosts; offline memory reads reopen that same key.
 
 `journal.CopyToEncryptedAsync(destinationPath, stagingPath, keyProvider)` copies to new paths and supports explicit rotation while preserving original bytes and all facts. Both paths must be new and share a directory. Stop execution first. Quota, key, cancellation or path failures preserve the source and any named staging file. Post-publication failure remains `reconciliation_required`; reopen the known target and reconcile without overwriting it. Publication and journal migration are separate operations, not a distributed transaction. Switch the stopped host only after both verified copies exist. Local tests and cross-target builds do not substitute for real Serve, CLR4/UI, operating-system or release evidence.
+
+## 封存包实链入口 / Sealed-package consumer
+
+`tests/Tansr.Sdk.IntegrationTests/ServeEncryptedMemoryPublicationTests.cs` 与 `scripts/packed-memory-integration.mjs` 提供专用原协议实链：共享封存 Serve 包产生实际 operation，Windows Console/公开宿主执行，publication 与实际 execution journal 均使用 CurrentUser DPAPI 供钥。正文和其 chunk Base64 的磁盘探针同时涵盖两库及活跃 sidecar。查询保持原请求身份，显式进程重开保留原完整终态；故障注入落在真实 chunk COMMIT 之后，unknown 与在飞停止仍保原键，异体/新 owner 写入被拒。
+
+此入口不依赖私有 kernel idle 钩子、不更改冻结协议、不复用活动 CLI 源码；目标测试用独立系统临时根并记录清理。它补充此前 extraction/recall 与存储迁移的测试，不替代其它平台、CLR4/UI、物理掉电或整版发布验收。执行步骤见 [集成测试说明](../tests/Tansr.Sdk.IntegrationTests/README.md)。
+
+The dedicated packed-host consumer drives real Serve operations into the original Windows device host and encrypted SQLite stores. It covers actual Console restart, original-key response loss, committed-chunk uncertainty, in-flight stop, authorization rejection and handle release. Fault wrappers preserve the existing Store and execution contracts. This Windows chain is additional evidence; it does not certify other platforms, native UI variants, power-loss behavior or a release.
