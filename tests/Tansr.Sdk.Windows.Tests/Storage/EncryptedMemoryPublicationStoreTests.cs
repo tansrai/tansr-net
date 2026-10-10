@@ -50,6 +50,43 @@ public sealed class EncryptedMemoryPublicationStoreTests
         Assert.All(key.Copies, copy => Assert.All(copy, value => Assert.Equal(0, value)));
     }
 
+    [Fact]
+    public async Task ActivePublicationWalAndTemporaryInventoryNeverContainsBodyOrRawKey()
+    {
+        using var fixture = new Fixture(); var key = new Key();
+        const string plaintext = "PST-B8-live-publication-private-body";
+        byte[] body = Encoding.UTF8.GetBytes(plaintext);
+        var seen = new HashSet<string>(StringComparer.Ordinal); int scans = 0;
+        void Probe()
+        {
+            scans++;
+            foreach (string path in Directory.GetFiles(fixture.Directory))
+            {
+                using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                using var contents = new MemoryStream(); file.CopyTo(contents); byte[] bytes = contents.ToArray();
+                seen.Add(path); string text = Encoding.UTF8.GetString(bytes);
+                Assert.DoesNotContain(plaintext, text); Assert.DoesNotContain(Convert.ToBase64String(body), text);
+                Assert.False(bytes.AsSpan().IndexOf(key.Value) >= 0, "raw encryption key reached media");
+                Assert.DoesNotContain(Convert.ToBase64String(key.Value), text);
+                Assert.DoesNotContain(Convert.ToHexString(key.Value), text, StringComparison.OrdinalIgnoreCase);
+            }
+        }
+        key.OnRead = Probe;
+        using (var store = await SqliteMemoryPublicationStore.OpenAsync(Options(fixture, key)))
+        {
+            await fixture.Stage(store, "active-inventory", body); Probe();
+            await fixture.Run(store, "commit", new { transferId = "active-inventory" }); Probe();
+            Assert.Equal(body, await store.ReadPublicationAsync());
+            Assert.Contains(seen, path => path.EndsWith("-wal", StringComparison.Ordinal));
+            // The original exclusive SQLite connection keeps its WAL index in memory.
+            Assert.DoesNotContain(seen, path => path.EndsWith("-shm", StringComparison.Ordinal));
+            Assert.True(scans > 5);
+        }
+        Probe();
+        Assert.DoesNotContain(Directory.GetFiles(fixture.Directory), path => path.EndsWith("-wal", StringComparison.Ordinal) || path.EndsWith("-shm", StringComparison.Ordinal));
+        Assert.All(key.Copies, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+    }
+
     [Theory]
     [InlineData("wrong-key")]
     [InlineData("wrong-id")]

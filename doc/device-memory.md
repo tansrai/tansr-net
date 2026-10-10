@@ -121,3 +121,28 @@ The journal encrypts the entire canonical operation and receipt before SQLite re
 此入口不依赖私有 kernel idle 钩子、不更改冻结协议、不复用活动 CLI 源码；目标测试用独立系统临时根并记录清理。它补充此前 extraction/recall 与存储迁移的测试，不替代其它平台、CLR4/UI、物理掉电或整版发布验收。执行步骤见 [集成测试说明](../tests/Tansr.Sdk.IntegrationTests/README.md)。
 
 The dedicated packed-host consumer drives real Serve operations into the original Windows device host and encrypted SQLite stores. It covers actual Console restart, original-key response loss, committed-chunk uncertainty, in-flight stop, authorization rejection and handle release. Fault wrappers preserve the existing Store and execution contracts. This Windows chain is additional evidence; it does not certify other platforms, native UI variants, power-loss behavior or a release.
+
+
+## B8 公开加密消费与介质库存 / Public encrypted consumption and media inventory
+
+原 `tests/PackageConsumer/Program.cs` 现在保留明文兼容消费，并另用显式 CurrentUser DPAPI
+配置实际 publication 与 execution journal；`net48`（CLR4）和 `net10.0-windows` 都已通过
+本地独立 NuGet 包消费。两库在关闭重开后保持原正文、完整终态和 pending；缺钥重开拒绝且
+原库不变。DLL 与本批两个 nupkg 的对应公开资产逐字相等。该消费没有启动 Serve；真实
+Console/Serve 的正常、失回、重开、撤权和在飞停止沿 B5/B6 原同代码证据分别保留。
+
+原加密测试新增两个在开全目录库存探针：从密钥回调直到真实提交后扫描主库和 WAL，
+正文、Base64、raw/hex/Base64 密钥均无落盘，返回的密钥副本继续清零。原 SQLite 使用
+EXCLUSIVE 锁，WAL index 在内存中，未生成 SHM；关闭后 WAL/SHM 均不存在。原 42 项
+认证/迁移测试首轮通过；两项库存测试最初误要求 SHM，修正工装后 2/2，通过证据按
+44 个唯一用例结算。公开 CLR4 探针首次用了逐 offset 的 LINQ Skip/Take，触发原 90 秒
+工装上限；改成数组直接扫描后两目标均通过，不调整限时、不改存储产品。
+
+The original package consumer now exercises an explicit DPAPI-encrypted publication store and
+execution journal in addition to legacy plaintext compatibility. Independent local net48/CLR4
+and net10.0-windows package runs preserve original bytes, terminal receipts and pending facts
+after reopen, and reject missing-key downgrade without rewriting media. Active-file tests scan
+actual database/WAL files for body and raw/encoded key probes; exclusive SQLite uses an in-memory
+WAL index, and owned sidecars disappear on close. This local package evidence complements the
+separately retained real Serve/Console tests; it is not a release, other-platform or physical
+power-loss claim. Evidence: `archive/PST-PLAN-20261009/dev-20261010-b8/ios-net`.

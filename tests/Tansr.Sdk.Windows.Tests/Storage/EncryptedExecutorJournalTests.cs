@@ -39,6 +39,26 @@ public sealed class EncryptedExecutorJournalTests
         Assert.All(f.Key.Copies, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
     }
 
+    [Fact]
+    public async Task ActiveWalAndTemporaryInventoryNeverContainsOperationReceiptOrRawKey()
+    {
+        using var fixture = new Fixture();
+        fixture.Key.OnRead = fixture.Probe;
+        var operation = Operation("active-inventory", true);
+        using (var journal = await SqliteExecutorJournal.OpenAsync(fixture.Options()))
+        {
+            await journal.ClaimAsync(operation); fixture.Probe();
+            await journal.CompleteAsync(operation, Receipt(operation)); fixture.Probe();
+            Assert.Contains(fixture.Seen, path => path.EndsWith("-wal", StringComparison.Ordinal));
+            // The original exclusive SQLite connection keeps its WAL index in memory.
+            Assert.DoesNotContain(fixture.Seen, path => path.EndsWith("-shm", StringComparison.Ordinal));
+            Assert.True(fixture.Scans > 5);
+        }
+        fixture.Probe();
+        Assert.DoesNotContain(System.IO.Directory.GetFiles(fixture.Directory), path => path.EndsWith("-wal", StringComparison.Ordinal) || path.EndsWith("-shm", StringComparison.Ordinal));
+        Assert.All(fixture.Key.Copies, bytes => Assert.All(bytes, value => Assert.Equal(0, value)));
+    }
+
     [Theory]
     [InlineData("wrong-key")]
     [InlineData("wrong-id")]
@@ -170,13 +190,20 @@ public sealed class EncryptedExecutorJournalTests
         { Path = Path, Mode = StorageOpenMode.Create, ApplicationScopeId = "app", EndUserId = "user", ExecutorId = "executor", ReadContext = Scope, KeyProvider = Key };
         internal void Sql(string sql)
         { using var connection = new SqliteConnection("Data Source=" + Path + ";Pooling=False"); connection.Open(); using var command = connection.CreateCommand(); command.CommandText = sql; command.ExecuteNonQuery(); }
+        internal HashSet<string> Seen { get; } = new(StringComparer.Ordinal);
+        internal int Scans { get; private set; }
         internal void Probe()
         {
+            Scans++;
             foreach (var path in System.IO.Directory.GetFiles(Directory))
             {
                 using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
                 using var bytes = new MemoryStream(); file.CopyTo(bytes); var text = Encoding.UTF8.GetString(bytes.ToArray());
+                Seen.Add(path);
                 Assert.DoesNotContain(Secret, text); Assert.DoesNotContain(Convert.ToBase64String(Encoding.UTF8.GetBytes(Secret)), text);
+                Assert.False(bytes.ToArray().AsSpan().IndexOf(Key.Value) >= 0, "raw encryption key reached media");
+                Assert.DoesNotContain(Convert.ToBase64String(Key.Value), text);
+                Assert.DoesNotContain(Convert.ToHexString(Key.Value), text, StringComparison.OrdinalIgnoreCase);
             }
         }
         public void Dispose() => System.IO.Directory.Delete(Directory, true);
