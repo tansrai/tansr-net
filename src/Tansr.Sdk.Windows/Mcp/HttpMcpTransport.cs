@@ -12,6 +12,7 @@ internal sealed class HttpMcpTransport : IMcpTransport
     private readonly Dictionary<string, string> _headers;
     private readonly Func<Uri, string, CancellationToken, Task>? _authorize;
     private readonly HttpClient _http;
+    private readonly SemaphoreSlim _sendGate = new(1, 1);
     private readonly int _maximumBytes;
     private readonly CancellationTokenSource _stop = new();
     private readonly object _gate = new();
@@ -128,8 +129,16 @@ internal sealed class HttpMcpTransport : IMcpTransport
     private async Task SendCoreAsync(JsonElement message, CancellationToken cancellationToken)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _stop.Token);
-        using var response = await PostAsync(message, linked.Token).ConfigureAwait(false);
-        if (response.StatusCode != HttpStatusCode.Accepted) throw new McpException("notification_not_accepted");
+        // Framework queues a request on a particular busy connection rather than
+        // waiting for any free slot. Keep concurrent replies out of an SSE queue
+        // by assigning the single reserved connection to one short send at a time.
+        await _sendGate.WaitAsync(linked.Token).ConfigureAwait(false);
+        try
+        {
+            using var response = await PostAsync(message, linked.Token).ConfigureAwait(false);
+            if (response.StatusCode != HttpStatusCode.Accepted) throw new McpException("notification_not_accepted");
+        }
+        finally { _sendGate.Release(); }
     }
 
     private async Task<HttpResponseMessage> PostAsync(JsonElement message, CancellationToken cancellationToken)

@@ -104,6 +104,29 @@ internal static class FrameworkMcpProbe
         }
         Console.WriteLine("PASS reverse-reserved-connection");
     }
+    private static async Task ReverseQueuedClose()
+    {
+        using (var server = new Server("reverse-close"))
+        {
+            ServicePointManager.FindServicePoint(server.Endpoint).ConnectionLimit = 2;
+            var client = await McpClient.ConnectHttpAsync(server.Options(), new McpClientOptions { MaximumPendingRequests = 2 });
+            try
+            {
+                var first = client.RequestAsync("tools/call", null, TimeSpan.FromSeconds(10));
+                var second = client.RequestAsync("tools/call", null, TimeSpan.FromSeconds(10));
+                await Within(server.Headers.Task, 3000, "Both forward SSE requests did not arrive.");
+                server.ReleasePings.TrySetResult(true);
+                await Within(server.BothPingsWritten.Task, 3000, "Both reverse pings were not written.");
+                await Within(server.FirstReply.Task, 3000, "The reserved reply did not arrive.");
+                await Within(client.CloseAsync(), 4000, "Close did not cancel reserved and waiting replies.");
+                await Within(Task.WhenAll(ExpectCancellation(first), ExpectCancellation(second)), 3000, "Forward requests did not cancel.");
+                Require(client.State == McpConnectionState.Closed, "Client did not close.");
+                Require(server.Calls == 2 && server.Replies == 1 && server.Deletes == 1, "Unexpected queued close flow or replay.");
+            }
+            finally { Console.WriteLine(server.Diagnostics()); server.Stop(); try { Within(client.CloseAsync(), 4000, "Cleanup").GetAwaiter().GetResult(); } catch { } }
+        }
+        Console.WriteLine("PASS reverse-close-queued");
+    }
     private static async Task<bool> Scenario(string name, Func<Task> run)
     {
         var elapsed = System.Diagnostics.Stopwatch.StartNew();
@@ -118,8 +141,9 @@ internal static class FrameworkMcpProbe
         if (!await Scenario("deadline-json", () => BodyCancellation("deadline-json"))) failures++;
         if (!await Scenario("close-sse", () => BodyCancellation("close-sse"))) failures++;
         if (!await Scenario("reverse-reserved-connection", ReverseRequestCapacity)) failures++;
-        if (failures != 0) throw new Exception("CLR4 MCP failed scenarios: " + failures + "/3");
-        Console.WriteLine("PASS CLR4 MCP 3/3");
+        if (!await Scenario("reverse-close-queued", ReverseQueuedClose)) failures++;
+        if (failures != 0) throw new Exception("CLR4 MCP failed scenarios: " + failures + "/4");
+        Console.WriteLine("PASS CLR4 MCP 4/4");
     }
     private static int Main()
     { try { Run().GetAwaiter().GetResult(); return 0; } catch (Exception error) { Console.Error.WriteLine(error); return 1; } }
@@ -134,10 +158,12 @@ internal static class FrameworkMcpProbe
         private readonly Task loop;
         private readonly TaskCompletionSource<bool> allReplies = new TaskCompletionSource<bool>();
         private readonly ConcurrentQueue<string> trace = new ConcurrentQueue<string>();
+        internal readonly TaskCompletionSource<bool> BothPingsWritten = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource<bool> FirstReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<bool> Headers = new TaskCompletionSource<bool>();
         internal readonly TaskCompletionSource<bool> ReleasePings = new TaskCompletionSource<bool>();
         internal int Calls, Replies, Deletes, Cancellations, MaximumConnections;
-        private int active;
+        private int active, pingsWritten;
         internal Uri Endpoint;
         internal string Diagnostics() { return "STATE calls=" + Calls + " replies=" + Replies + " active=" + active + " maximum=" + MaximumConnections + " servicePointLimit=" + ServicePointManager.FindServicePoint(Endpoint).ConnectionLimit + " trace=" + string.Join(";", trace); }
         internal Server(string value)
@@ -169,12 +195,16 @@ internal static class FrameworkMcpProbe
                 { await Reply(stream, "200 OK", json.Serialize(new { jsonrpc = "2.0", id = message["id"], result = new { protocolVersion = "2025-11-25", capabilities = new { }, serverInfo = new { name = "owned-clr4", version = "1" } } }), "application/json", "Mcp-Session-Id: owned-clr4\r\n"); return; }
                 if (method == "notifications/cancelled") Interlocked.Increment(ref Cancellations);
                 if (method == null)
-                { if (Interlocked.Increment(ref Replies) == 2) allReplies.TrySetResult(true); await Reply(stream, "202 Accepted", "", "application/json", ""); return; }
+                {
+                    if (Interlocked.Increment(ref Replies) == 2) allReplies.TrySetResult(true);
+                    if (mode == "reverse-close") { FirstReply.TrySetResult(true); await Task.Delay(Timeout.Infinite, stop.Token); }
+                    await Reply(stream, "202 Accepted", "", "application/json", ""); return;
+                }
                 if (method.StartsWith("notifications/")) { await Reply(stream, "202 Accepted", "", "application/json", ""); return; }
                 Require(method == "tools/call", "Unexpected request."); int call = Interlocked.Increment(ref Calls);
                 string type = mode == "deadline-json" ? "application/json" : "text/event-stream";
                 string headers = "HTTP/1.1 200 OK\r\nContent-Type: " + type + "\r\nConnection: close\r\n\r\n";
-                if (mode != "reverse") { await Write(stream, headers + (mode == "deadline-json" ? "{" : ": open\n\n")); Headers.TrySetResult(true); await Task.Delay(Timeout.Infinite, stop.Token); return; }
+                if (mode != "reverse" && mode != "reverse-close") { await Write(stream, headers + (mode == "deadline-json" ? "{" : ": open\n\n")); Headers.TrySetResult(true); await Task.Delay(Timeout.Infinite, stop.Token); return; }
                 if (call == 2) Headers.TrySetResult(true);
                 await ReleasePings.Task;
                 trace.Enqueue("ping-start " + call);
@@ -182,6 +212,7 @@ internal static class FrameworkMcpProbe
                 // Framework response buffer without relying on packet timing luck.
                 await Write(stream, headers + "data: " + json.Serialize(new { jsonrpc = "2.0", id = 900 + call, method = "ping" }) + "\n\n");
                 trace.Enqueue("ping-sent " + call);
+                if (Interlocked.Increment(ref pingsWritten) == 2) BothPingsWritten.TrySetResult(true);
                 await allReplies.Task;
                 await Write(stream, "data: " + json.Serialize(new { jsonrpc = "2.0", id = message["id"], result = new { ok = true } }) + "\n\n");
             }
