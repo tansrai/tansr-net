@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory = $true)][string]$OutputDirectory,
     [string]$CliRoot,
     [string]$RecoveryCliRoot,
+    [string]$SessionCliRoot,
     [string]$PreviousPackageDirectory,
     [ValidatePattern('^[0-9A-Za-z.+-]+$')][string]$PreviousVersion,
     [switch]$PlanOnly
@@ -14,7 +15,7 @@ $repository = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $target = [IO.Path]::GetFullPath($OutputDirectory)
 if (Test-Path -LiteralPath $target) { throw 'Use a new evidence directory; previous results are never overwritten.' }
 if ($target.StartsWith($repository + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'Keep CI evidence outside the source checkout.' }
-foreach ($name in @('CliRoot', 'RecoveryCliRoot', 'PreviousPackageDirectory')) {
+foreach ($name in @('CliRoot', 'RecoveryCliRoot', 'SessionCliRoot', 'PreviousPackageDirectory')) {
     $value = Get-Variable -Name $name -ValueOnly
     if ($value) { Set-Variable -Name $name -Value (Resolve-Path -LiteralPath $value).Path }
 }
@@ -24,7 +25,8 @@ $version = [string]$properties.Project.PropertyGroup.Version
 if ($version -notmatch '^[0-9A-Za-z.+-]+$') { throw 'Missing explicit package version.' }
 if ($PreviousVersion -and -not $PreviousPackageDirectory) { throw 'PreviousVersion requires PreviousPackageDirectory.' }
 $scope = [ordered]@{
-    cliRoot = $CliRoot; recoveryCliRoot = $RecoveryCliRoot; previousPackageDirectory = $PreviousPackageDirectory
+    cliRoot = $CliRoot; recoveryCliRoot = $RecoveryCliRoot; sessionCliRoot = if ($SessionCliRoot) { $SessionCliRoot } else { $CliRoot }
+    previousPackageDirectory = $PreviousPackageDirectory
     previousVersion = if ($PreviousVersion) { $PreviousVersion } elseif ($PreviousPackageDirectory) { $version } else { $null }
     excludedWindowsMethods = @(); notRun = @(
         @{ name = 'ServeSourceIntegration / five clients / real UI / Electron performance'; reason = 'Run their existing explicit source, runtime and device entry points separately. This script does not provision those environments.' }
@@ -170,8 +172,9 @@ try {
         if ($CliRoot) {
             Invoke-CiStep 'upstream-contract' $pwsh @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'check-contract.ps1'), '-SourceRoot', $CliRoot)
             Invoke-CiStep 'upstream-parity' 'node' @('scripts/check-parity.mjs', '--source-root', $CliRoot)
-            $loader = [Uri]::new((Join-Path $CliRoot 'node_modules/tsx/dist/loader.mjs')).AbsoluteUri
-            Invoke-CiStep 'node-session-compatibility' 'node' @('--import', $loader, 'scripts/check-session-compatibility.mjs', $CliRoot)
+            $sessionSource = if ($SessionCliRoot) { $SessionCliRoot } else { $CliRoot }
+            $loader = [Uri]::new((Join-Path $sessionSource 'node_modules/tsx/dist/loader.mjs')).AbsoluteUri
+            Invoke-CiStep 'node-session-compatibility' 'node' @('--import', $loader, 'scripts/check-session-compatibility.mjs', $sessionSource)
         }
         # Original test-windows publication mechanism: per-project obj lock, then one default locked restore.
         $publishAttempted = $true

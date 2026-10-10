@@ -106,3 +106,23 @@ Plaintext SDK formats remain supported. Migrate existing publication and journal
 独立的 `scripts/packed-memory-integration.mjs` 用封存公开包 Host 驱动真实 Console 设备进程。其专用测试检查 DPAPI 双库、实际 publication 正文及 journal 中的 Base64 副本、原键失回、进程重开、撤权、错主体和资源关闭。完整工程验收、其它 UI/运行时、平台环境与发布仍单独记录。
 
 The controller retains the original memory request and scope before sending. A lost response is reconciled with `RestoreMemoryOperation` and `QueryMemoryAsync`; a missing receipt alone never grants replay. Only an explicit pre-admission busy/backoff refusal plus an absent original receipt permits a bounded attempt of exactly the same request. Revocation may stop the device with a nonzero exit; preserve its original databases and reconcile instead of reporting business success. The sealed-package integration gate exercises actual Console processes and Windows DPAPI/SQLite. It does not certify other native UIs, runtimes, operating systems or a release.
+
+## 新持久化 profile（RFC-PST-1，显式选择）
+
+两个现有入口（独立 --device-memory 与同一终端配置中的 publication）均支持在 publication 内加入 "profile": "terminal-persistence-v1"。省略仍使用原 terminal-services-v1；未知值拒绝。新 profile 采用新的数据库路径，identity 必须改用精确的五个平级字段 applicationScopeId、endUserId、sourceId、sourceGeneration、domainKey，不含嵌套 scope 或 authorizationRevision。其值继续来自可信来源登记。
+
+Serve 应在原 memoryPublicationFor 返回值显式选择同一个 profile；SDK 注册固定 TansrTerminalPersistenceV1，仍经原 MemoryPublication 权限、执行绑定、加密 journal 领取操作。终端只持久保存不透明块、永久双键和原 transfer，不提取或决定记忆。maxTransfers 配置映射为新介质的 MaxActiveTransfers；其余逻辑硬帽由 SqliteTerminalPersistenceOptions 声明，maxPages 为额外 SQLite 页帽，不等同于剩余磁盘空间。
+
+新格式使用 SqliteTerminalPersistenceStore 与 WindowsTerminalPersistenceHost。CopyToEncryptedAsync(destination, staging, keyProvider) 只复制同一新格式到新路径并重加密，完整保留 Root、永久索引、原 transfer 和 staging 材料。成功只表示复制与校验完成，切换仍 pending；当前API没有激活、源退役或writer切换方法。即使已停止原writer并结算unknown，也不会令副本变成可写。原库和钥保留；不自动导入旧六动作介质，不自动回退，不宣称仅凭 AEAD 能阻止整库旧备份回滚。
+
+### English
+
+Both existing device-memory and combined terminal-device examples accept an explicit publication.profile of terminal-persistence-v1. Omission retains terminal-services-v1. Use a new database path and the exact flat five-field identity supplied by the trusted host. The Serve host must select the same profile. Execution, MemoryPublication permission and the encrypted journal remain shared with the original device lifecycle; the terminal does not implement memory policy.
+
+The new SQLite adapter atomically stores opaque blocks, permanent dual-key entries and original transfer results. Logical canonical-byte quotas and the SQLite page cap are separate. Explicit CopyToEncryptedAsync copies and re-encrypts the same new format, including pending transfers; it does not switch the live writer, import legacy media, or grant rollback authority. Keep the source and reconcile unknown results; this API does not activate the copy or perform cutover.
+
+新 profile 的同格式复制目标具有认证加密的持久只读标记；重开也只允许 head/read/lookup/query，当前API没有激活、源退役或cutover方法；不得将副本交给持续写入的执行器。
+The new profile persists an authenticated read-only marker in each copy. Reopening allows only head/read/lookup/query; the current API has no activation, writer-switch, source-retirement or cutover method; do not attach a copy to a continuously writing executor.
+
+新计划还会在原 SQLite 事务中核对实际已用/空闲页、所有在途票据的保守完整预算与 max_page_count。ready 对象不缩减这项保守预算；低物理上限可能先于逻辑限额拒绝新计划，原票据仍可按原键续办。当前按 status 扫描定位在途行，不声称百万历史下 O(1) 准入；该门也不保证 WAL 或文件系统不会遇外部满盘。
+New plans check allocated/free pages and conservative budgets for all active tickets within the original transaction. Ready objects do not reduce that budget. Admission can reject before logical limits while preserving an existing ticket. The current status lookup can scan retained history; no constant-time admission or filesystem/WAL free-space guarantee is claimed.

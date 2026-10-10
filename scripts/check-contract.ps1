@@ -16,6 +16,48 @@ function Resolve-ContractPath([string]$root, [string]$relative) {
     return $path
 }
 
+# Locks may deliberately retain different upstream revisions. Hash raw Git blob
+# bytes at each recorded commit; decoding native stdout would normalize encoding
+# or newlines and comparing one working tree would conflate independent locks.
+function Get-PinnedGitHash([string]$Root, [string]$Revision, [string]$Relative) {
+    if ($Revision -cnotmatch '^[a-f0-9]{40}$') { throw 'Upstream source revision must be a full lowercase Git commit.' }
+    $arguments = @('-C', $Root, 'cat-file', 'blob', ($Revision + ':' + $Relative.Replace('\', '/')))
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'; $start.UseShellExecute = $false; $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true; $start.RedirectStandardError = $true
+    if ($start.PSObject.Properties['ArgumentList']) {
+        foreach ($argument in $arguments) { $start.ArgumentList.Add($argument) }
+    }
+    else {
+        # Windows PowerShell 5.1 uses the same native argv quoting rules.
+        $start.Arguments = ($arguments | ForEach-Object {
+            '"' + [regex]::Replace([regex]::Replace($_, '(\\*)"', '$1$1\"'), '(\\+)$', '$1$1') + '"'
+        }) -join ' '
+    }
+    $process = [Diagnostics.Process]::new(); $process.StartInfo = $start
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+        if (-not $process.Start()) { throw 'Could not start pinned Git source comparison.' }
+        $errorTask = $process.StandardError.ReadToEndAsync()
+        $digest = $algorithm.ComputeHash($process.StandardOutput.BaseStream)
+        $process.WaitForExit()
+        $diagnostic = $errorTask.GetAwaiter().GetResult()
+        if ($process.ExitCode -ne 0) { throw ('Missing or unreadable pinned Git object: ' + $Revision + ':' + $Relative + '; ' + $diagnostic.Trim()) }
+        return ([BitConverter]::ToString($digest)).Replace('-', '').ToLowerInvariant()
+    }
+    finally { $algorithm.Dispose(); $process.Dispose() }
+}
+$gitSource = $false
+if ($SourceRoot) {
+    $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
+    $gitSource = Test-Path -LiteralPath (Join-Path $SourceRoot '.git')
+    if ($gitSource) {
+        Write-Output 'Upstream comparison: exact Git blobs at each locked sourceRevision (or the manifest default); runtime fixture HEAD checks remain separate.'
+    }
+    else {
+        Write-Output 'Upstream comparison: supplied filesystem snapshot bytes only; no Git revision provenance is asserted.'
+    }
+}
 $checked = 0
 foreach ($entry in $manifest.files) {
     if ($entry.sha256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid SHA256 in contract lock.' }
@@ -26,7 +68,12 @@ foreach ($entry in $manifest.files) {
     }
     if ($SourceRoot -and $entry.source) {
         $source = Resolve-ContractPath $SourceRoot $entry.source
-        if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -cne $entry.sha256) {
+        if ($gitSource) {
+            $revision = if ($entry.PSObject.Properties['sourceRevision']) { [string]$entry.sourceRevision } else { [string]$manifest.sourceRevision }
+            $sourceHash = Get-PinnedGitHash $SourceRoot $revision $entry.source
+        }
+        else { $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() }
+        if ($sourceHash -cne $entry.sha256) {
             throw ('Upstream contract changed; review before updating: ' + $entry.source)
         }
     }

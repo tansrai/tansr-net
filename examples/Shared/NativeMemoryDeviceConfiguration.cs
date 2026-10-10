@@ -24,6 +24,9 @@ internal sealed class NativeMemoryDeviceConfiguration
         JournalMaxOperations = Positive(journal, "maxOperations"); JournalMaxStoredBytes = Positive(journal, "maxStoredBytes"); JournalMaxPages = Positive(journal, "maxPages");
         var publication = value.GetProperty("publication"); PublicationPath = AbsolutePath(publication, "path"); PublicationMode = Mode(publication);
         PublicationIdentity = publication.GetProperty("identity").Clone();
+        PublicationProfile = publication.TryGetProperty("profile", out var profile) ? profile.GetString() ?? "" : "terminal-services-v1";
+        if (PublicationProfile != "terminal-services-v1" && PublicationProfile != "terminal-persistence-v1")
+            throw new InvalidOperationException("device_memory_unknown_profile");
         MaxTransfers = Positive(publication, "maxTransfers"); MaxStagingBytes = Positive(publication, "maxStagingBytes"); MaxPages = Positive(publication, "maxPages");
         var encryption = value.GetProperty("encryption");
         if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("device_memory_explicit_encryption_required");
@@ -54,6 +57,7 @@ internal sealed class NativeMemoryDeviceConfiguration
     internal int JournalMaxOperations { get; }
     internal long JournalMaxStoredBytes { get; }
     internal int JournalMaxPages { get; }
+    internal string PublicationProfile { get; }
     internal string PublicationPath { get; }
     internal string PublicationMode { get; }
     internal JsonElement PublicationIdentity { get; }

@@ -15,12 +15,13 @@ internal sealed class NativeMemoryDeviceHost
     internal string SessionId { get; }
 #if WINDOWS || NETFRAMEWORK
     private readonly NativeDeviceHost device;
-    private readonly SqliteMemoryPublicationStore store;
+    private readonly Func<Task> closeStore;
+    private readonly Func<CancellationToken, Task<string>> readCapacity;
     private readonly TansrClient controllerClient, deviceClient;
     private Task? stopTask;
     private readonly object gate = new();
-    private NativeMemoryDeviceHost(string sessionId, NativeDeviceHost device, SqliteMemoryPublicationStore store, TansrClient controllerClient, TansrClient deviceClient)
-    { SessionId = sessionId; this.device = device; this.store = store; this.controllerClient = controllerClient; this.deviceClient = deviceClient; }
+    private NativeMemoryDeviceHost(string sessionId, NativeDeviceHost device, Func<Task> closeStore, Func<CancellationToken, Task<string>> readCapacity, TansrClient controllerClient, TansrClient deviceClient)
+    { SessionId = sessionId; this.device = device; this.closeStore = closeStore; this.readCapacity = readCapacity; this.controllerClient = controllerClient; this.deviceClient = deviceClient; }
     internal Task Completion => device.Completion;
 #else
     private NativeMemoryDeviceHost() { SessionId = ""; }
@@ -33,21 +34,44 @@ internal sealed class NativeMemoryDeviceHost
         var configuration = await NativeMemoryDeviceConfiguration.LoadAsync(configurationPath, ct).ConfigureAwait(false);
         var authority = TrustedExampleScope.FromPath(configuration.ScopeFile);
         var controller = CreateClient(configuration, authority, configuration.ControllerTokenEnvironment);
-        TansrClient? executor = null; SqliteMemoryPublicationStore? store = null; NativeDeviceHost? device = null;
+        TansrClient? executor = null; Func<Task>? closeStore = null; NativeDeviceHost? device = null;
         try
         {
             var key = configuration.KeyMode == "create"
                 ? CurrentUserDpapiArchiveKeyProvider.Create(configuration.KeyPath, configuration.KeyId)
                 : CurrentUserDpapiArchiveKeyProvider.Open(configuration.KeyPath, configuration.KeyId);
             executor = CreateClient(configuration, authority, configuration.DeviceTokenEnvironment);
-            store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
+            WindowsBusinessTool tool;
+            Func<CancellationToken, Task<string>> readCapacity;
+            if (configuration.PublicationProfile == "terminal-persistence-v1")
             {
-                EnablePreview = true, Path = configuration.PublicationPath, Mode = OpenMode(configuration.PublicationMode),
-                Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope, KeyProvider = key,
-                MaxTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages,
-            }, ct).ConfigureAwait(false);
-            var publication = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true);
-            var tool = publication.CreateTool();
+                var store = await SqliteTerminalPersistenceStore.OpenAsync(new SqliteTerminalPersistenceOptions
+                {
+                    EnableProfile = true, Path = configuration.PublicationPath, Mode = OpenMode(configuration.PublicationMode),
+                    Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope, KeyProvider = key,
+                    MaxActiveTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages,
+                }, ct).ConfigureAwait(false);
+                closeStore = () => store.CloseAsync();
+                tool = new WindowsTerminalPersistenceHost(store, enableProfile: true).CreateTool();
+                // Read-only status never fabricates a new execution owner to query the store.
+                readCapacity = token => { token.ThrowIfCancellationRequested(); return Task.FromResult(" profile=terminal-persistence-v1；容量以原执行通道的 head 回执为准"); };
+            }
+            else
+            {
+                var store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
+                {
+                    EnablePreview = true, Path = configuration.PublicationPath, Mode = OpenMode(configuration.PublicationMode),
+                    Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope, KeyProvider = key,
+                    MaxTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages,
+                }, ct).ConfigureAwait(false);
+                closeStore = () => store.CloseAsync();
+                tool = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true).CreateTool();
+                readCapacity = async token =>
+                {
+                    var capacity = await store.GetCapacityAsync(token).ConfigureAwait(false);
+                    return " transfers=" + capacity.StoredTransfers + "/" + capacity.MaxTransfers + " stagingBytes=" + capacity.StagingBytes + "/" + capacity.MaxStagingBytes + " pages=" + capacity.AllocatedPages + "/" + capacity.MaxPages;
+                };
+            }
             device = await NativeDeviceHost.StartAsync(controller, executor, configuration.SessionId, authority.ReadScope,
                 configuration.WorkspacePath, configuration.WorkspaceId, configuration.WorkspaceRevision,
                 new SqliteExecutorJournalOptions
@@ -66,12 +90,12 @@ internal sealed class NativeMemoryDeviceHost
                         throw new ExecutionRejectedException("EACCES");
                     return Task.CompletedTask;
                 }, new[] { tool }, cancellationToken: ct).ConfigureAwait(false);
-            return new NativeMemoryDeviceHost(configuration.SessionId, device, store, controller, executor);
+            return new NativeMemoryDeviceHost(configuration.SessionId, device, closeStore, readCapacity, controller, executor);
         }
         catch
         {
             try { if (device != null) await device.StopAsync().ConfigureAwait(false); }
-            finally { try { if (store != null) await store.CloseAsync().ConfigureAwait(false); } finally { executor?.Dispose(); controller.Dispose(); } }
+            finally { try { if (closeStore != null) await closeStore().ConfigureAwait(false); } finally { executor?.Dispose(); controller.Dispose(); } }
             throw;
         }
 #else
@@ -83,10 +107,9 @@ internal sealed class NativeMemoryDeviceHost
     internal async Task<string> ReadStatusAsync(CancellationToken ct = default)
     {
 #if WINDOWS || NETFRAMEWORK
-        var capacity = await store.GetCapacityAsync(ct).ConfigureAwait(false);
+        var capacity = await readCapacity(ct).ConfigureAwait(false);
         return "session=" + SessionId + " device=" + device.Host.State +
-            " transfers=" + capacity.StoredTransfers + "/" + capacity.MaxTransfers + " stagingBytes=" + capacity.StagingBytes + "/" + capacity.MaxStagingBytes +
-            " pages=" + capacity.AllocatedPages + "/" + capacity.MaxPages +
+            capacity +
             "；容量及本机连接状态不证明记忆已排空、模型已消费或远端关闭已耐久。设备保持领取操作，直到显式停止。";
 #else
         await Task.CompletedTask; ct.ThrowIfCancellationRequested(); throw new PlatformNotSupportedException();
@@ -105,7 +128,7 @@ internal sealed class NativeMemoryDeviceHost
     private async Task StopCoreAsync()
     {
         try { await device.StopAsync().ConfigureAwait(false); }
-        finally { try { await store.CloseAsync().ConfigureAwait(false); } finally { deviceClient.Dispose(); controllerClient.Dispose(); } }
+        finally { try { await closeStore().ConfigureAwait(false); } finally { deviceClient.Dispose(); controllerClient.Dispose(); } }
     }
     private static StorageOpenMode OpenMode(string mode) => mode == "create" ? StorageOpenMode.Create : StorageOpenMode.Reopen;
     private static TansrClient CreateClient(NativeMemoryDeviceConfiguration configuration, TrustedExampleScope authority, string tokenName) => new(new TansrClientOptions

@@ -45,10 +45,14 @@ public sealed class NativeMemoryDeviceConfigurationTests
         Assert.Equal("9007199254740993", parsed.PublicationIdentity.GetProperty("sourceGeneration").GetString());
         Assert.Equal("create", parsed.JournalMode); Assert.Equal("reopen", parsed.PublicationMode);
         Assert.Equal("FIXTURE_CONTROLLER", parsed.ControllerTokenEnvironment); Assert.Equal("FIXTURE_DEVICE", parsed.DeviceTokenEnvironment);
+        Assert.Equal("terminal-services-v1", parsed.PublicationProfile);
+        input["publication"]!["profile"] = "terminal-persistence-v1";
+        Assert.Equal("terminal-persistence-v1", Parse(input).PublicationProfile);
         Assert.Equal(4096, parsed.JournalMaxOperations); Assert.Equal(32, parsed.MaxTransfers);
     }
 
     [Theory]
+    [InlineData("unknown-profile")]
     [InlineData("preview")]
     [InlineData("mode")]
     [InlineData("credential-url")]
@@ -70,6 +74,7 @@ public sealed class NativeMemoryDeviceConfigurationTests
             case "plaintext-provider": input["encryption"]!["provider"] = "none"; break;
             case "key-path-alias": input["encryption"]!["path"] = input["journal"]!["path"]!.DeepClone(); break;
             case "auto-key-mode": input["encryption"]!["mode"] = "auto"; break;
+            case "unknown-profile": input["publication"]!["profile"] = "automatic"; break;
             case "preview": input["enablePreview"] = false; break;
             case "mode": input["publication"]!["mode"] = "auto"; break;
             case "credential-url": input["serveUrl"] = "https://user:secret@serve.example"; break;
