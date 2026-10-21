@@ -17,6 +17,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
     private JsonElement? _discovered;
     private string? _scope;
     private readonly Dictionary<string, JsonElement> _bindings = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _persistence = new Dictionary<string, string>(StringComparer.Ordinal);
     public ArchiveClient(TansrClient client, JsonElement? limits = null)
     {
         _client = client ?? throw new ArgumentNullException(nameof(client)); _local = J.Copy(limits ?? MaximumLimits(), "Limits"); ValidateLimits(_local);
@@ -26,7 +27,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
     {
         string scope = J.Canonical(ReadScope()); lock (_gate)
         {
-            if (_scope != scope) { _scope = scope; _discovered = null; _bindings.Clear(); }
+            if (_scope != scope) { _scope = scope; _discovered = null; _bindings.Clear(); _persistence.Clear(); }
             return Intersect(_local, _discovered, _bindings.TryGetValue(bindingId, out var value) ? value : (JsonElement?)null);
         }
     }
@@ -48,6 +49,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
             else if (eventType == "material.status") ValidateResponse(payload, input, "MaterialReceipt", scope, limits);
             else if (eventType == "binding.status") { ValidateResponse(payload, input, "BindingView", scope, limits); J.Need(WireJson.EncodeControl(payload).Length <= payload.GetProperty("limits").GetProperty("controlBytes").GetInt32(), "frame_too_large"); }
             else if (eventType == "material.request") ValidateMaterialRequest(payload);
+            if (eventType == "binding.status" || eventType == "archive.status") ObservePersistence(payload, eventType == "binding.status", scope);
             await onFrame(frame, ct).ConfigureAwait(false); J.Need(J.Equal(scope, ReadScope()), "context_changed");
         }, lastEventId, cancellationToken, limits.GetProperty("controlBytes").GetInt32(), onConnected);
     }
@@ -114,9 +116,10 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
         var value = await _client.SendControlAsync(method, path, method == HttpMethod.Post ? input : (JsonElement?)null, ct, maximum, expectedStatus).ConfigureAwait(false);
         WireJson.ValidateNamed(responseSchema, value); J.Need(J.Equal(scope, ReadScope()), "context_changed");
         ValidateResponse(value, input, responseSchema, scope, limits);
+        if (responseSchema == "BindingView" || responseSchema == "ArchiveStatus") ObservePersistence(value, responseSchema == "BindingView", scope);
         lock (_gate)
         {
-            if (_scope != J.Canonical(scope)) { _bindings.Clear(); _discovered = null; _scope = J.Canonical(scope); }
+            if (_scope != J.Canonical(scope)) { _bindings.Clear(); _persistence.Clear(); _discovered = null; _scope = J.Canonical(scope); }
             if (responseSchema == "CapabilitiesResponse") _discovered = value.GetProperty("limits").Clone();
             if (responseSchema == "BindingView") _bindings[J.Text(value, "bindingId")] = value.GetProperty("limits").Clone();
         }
@@ -135,6 +138,18 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
         if (schema == "MaterialUploadChunkRequest") { var bytes = WireJson.DecodeBase64(J.Text(value, "base64")); J.Need(bytes.Length == value.GetProperty("bytes").GetInt32() && bytes.Length <= limits.GetProperty("materialChunkBytes").GetInt32() && WireJson.Sha256(bytes) == J.Text(value, "chunkSha256")); }
         if (schema == "MaterialResponseRequest") { J.Unique(value.GetProperty("results"), "recordId"); J.Need(value.GetProperty("results").GetArrayLength() <= limits.GetProperty("materialCandidates").GetInt32()); }
     }
+    private void ObservePersistence(JsonElement value, bool remember, JsonElement scope)
+    {
+        string bindingId = J.Text(value, "bindingId"), signature = J.PersistenceSignature(value);
+        lock (_gate)
+        {
+            if (_scope == J.Canonical(scope))
+            {
+                if (_persistence.TryGetValue(bindingId, out var prior)) J.Need(prior == signature, "context_changed");
+                if (remember) _persistence[bindingId] = signature;
+            }
+        }
+    }
     private void ValidateResponse(JsonElement value, JsonElement input, string schema, JsonElement scope, JsonElement limits)
     {
         foreach (string key in new[] { "bindingId", "materialRequestId", "generations" }) if (input.TryGetProperty(key, out var expected) && value.TryGetProperty(key, out var actual)) J.Need(J.Equal(expected, actual));
@@ -150,7 +165,7 @@ public sealed class ArchiveClient : IArchiveRecoveryClient, IArchiveConnectionSo
                 J.Need(J.Equal(J.Without(value.GetProperty("scope"), "authorizationRevision"), J.Without(scope, "authorizationRevision"))); J.Unique(value.GetProperty("acceptedCapabilities")); J.Unique(value.GetProperty("rejectedCapabilities"), "capability");
                 var accepted = value.GetProperty("acceptedCapabilities").EnumerateArray().Select(x => x.GetString()!).ToArray(); var rejected = value.GetProperty("rejectedCapabilities").EnumerateArray().Select(x => J.Text(x, "capability")).ToArray(); J.Need(!accepted.Intersect(rejected).Any());
                 J.Need(value.GetProperty("archiveAckFormat").GetString() == (accepted.Contains("archive-transfer-v1") ? "split-receipts-v1" : null));
-                if (input.TryGetProperty("target", out var target)) { J.Need(J.Equal(target, value.GetProperty("target")) && J.Text(input.GetProperty("archive"), "sourceId") == J.Text(value, "sourceId")); var required = input.GetProperty("requiredCapabilities").EnumerateArray().Select(x => x.GetString()!).ToArray(); var asked = required.Concat(input.GetProperty("optionalCapabilities").EnumerateArray().Select(x => x.GetString()!)).ToArray(); J.Need(required.All(accepted.Contains) && accepted.Length + rejected.Length == asked.Length && accepted.Concat(rejected).All(asked.Contains)); }
+                if (input.TryGetProperty("target", out var target)) { J.Need(J.Text(value, "availability") == "legacy-complete"); J.Need(J.Equal(target, value.GetProperty("target")) && J.Text(input.GetProperty("archive"), "sourceId") == J.Text(value, "sourceId")); var required = input.GetProperty("requiredCapabilities").EnumerateArray().Select(x => x.GetString()!).ToArray(); var asked = required.Concat(input.GetProperty("optionalCapabilities").EnumerateArray().Select(x => x.GetString()!)).ToArray(); J.Need(required.All(accepted.Contains) && accepted.Length + rejected.Length == asked.Length && accepted.Concat(rejected).All(asked.Contains)); }
             }
         }
         if (schema == "ArchiveStatus")

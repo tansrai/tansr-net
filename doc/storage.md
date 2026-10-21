@@ -39,6 +39,12 @@ The explicit cloud mode uses the independent authenticated journal control API a
 
 ## 档案自动接收与按需材料
 
+Archive 的发现、绑定与状态现在接受独立 `source-managed` 分支；`persistence` 必须给出实际 `terminal`／`cloud`、来源和代际、`localDisk:false`、可信控制与匹配的交接方式。它只声明 Archive 交接，不代替 `GetSessionPersistenceAsync` 的各域覆盖。客户端和接收器核对同绑定的模式／来源一致，拒绝新旧声明混用，不从存储事实授予权限。旧 `legacy-complete`／`unchanged` 原分支保留；旧客户端严格拒绝新分支，不静默降级。
+
+无盘宿主由可信 session factory 创建并安装绑定，先用 `GetBindingTargetAsync` 找到已有绑定，再调用 `GetBindingAsync` 和原下载／耐久 ACK。旧 `CreateBindingAsync` 请求仍表示 durable-spool 合同，在新宿主明确返回 `unsupported_capability`；本批不宣称新增的公开创建模式。terminal 模式使用实际耐久接收器，cloud 模式可只消费平台历史和云日志、无需创建本地 Archive 数据库。可选的下载副本仍必须真实耐久保存才 ACK。
+
+The Archive transport supports legacy and explicit `source-managed` responses. New hosts create bindings in the trusted session factory; discover that binding before downloading. Legacy public binding creation is unsupported on diskless hosts. Terminal and cloud modes share the original archive integrity and ACK rules; cloud mode does not require a local archive database.
+
 `ArchiveSessionHost` 组合原 `ArchiveTransferSession`、`ArchiveRecoverySession` 和 `MaterialSource`。宿主只配置可信身份、本地介质与事件游标；SDK 自动消费原 SSE、耐久接收后 ACK、处理 `material.request` 并在断线后查询原操作。
 
 ```csharp

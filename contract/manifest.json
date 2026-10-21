@@ -7,21 +7,21 @@
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 12,
-    "schemaHash": "dfb0eb7bd75a5aba2584bdf6cec28799685cac437a7951d33f8fc682e5368b1a",
+    "revision": 13,
+    "schemaHash": "35fb881d52c49e6b5123ced2a6ae74e128c10de24b1dfa53f7bf03fec2e83d38",
     "sourceBranch": "main",
-    "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
+    "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "PST-SERVE-01 approved dual-mode persistence and cloud journal contracts pinned to exact upstream Git blobs; original byte/storage baseline retained per file."
+    "note": "PST-SERVE-01 approved dual-mode persistence, cloud journal and source-managed Archive responses pinned to exact upstream Git blobs; original byte/storage baseline retained per file."
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
       "bytes": 91198,
-      "sha256": "2461d1c4529af14694b9e185bdcd574a6780eedaa973025c8e9316d0fdc2a7da",
-      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a"
+      "sha256": "66d59cff765b99d24580b884193331e2d5b70c9b6e7ff07646dfa9591b3e6aca",
+      "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
@@ -47,9 +47,9 @@
     {
       "snapshot": "contract/sdk2-ext-v1.schema.json",
       "source": "doc/rfc/sdk2-ext-v1.schema.json",
-      "bytes": 114220,
-      "sha256": "4c13275462d9f71fca7af32b46d8e70e05ac1fb1efc23d98484caf9236f6acc9",
-      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a"
+      "bytes": 124485,
+      "sha256": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
+      "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a"
     },
     {
       "snapshot": "contract/sdk2-wire-v1.json",

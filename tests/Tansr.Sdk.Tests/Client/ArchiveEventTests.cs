@@ -5,6 +5,7 @@ using System.Text.Json;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Tests.Api;
+using Tansr.Sdk.Tests.Archive;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Tests.Client;
@@ -38,6 +39,23 @@ public sealed class ArchiveEventTests
             Content = new StringContent(body, Encoding.UTF8, "text/event-stream"),
             Headers = { CacheControl = new CacheControlHeaderValue { NoStore = true } }
         };
+
+    [Theory]
+    [InlineData("terminal", "terminal-durable-ack")]
+    [InlineData("cloud", "cloud-immutable-publish")]
+    public async Task SourceManagedArchiveEventsPreserveCursorAndCheckSourceFacts(string mode, string handoff)
+    {
+        var fixture = new ArchiveFlowFixture();
+        var persistence = ArchiveFlowFixture.Element(new { contract = "serve-persistence-v1", mode, handoff, sourceId = "source", sourceGeneration = "source-generation", localDisk = false, trustedControl = true });
+        var status = ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(fixture.Status, "sessionPersistence", "source-managed"), "persistence", persistence), "generations", Element(Generations));
+        var frame = ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(Element(FrameJson()), "eventType", "archive.status"), "revision", "2"), "payload", status);
+        byte[] Bytes(JsonElement value) => Encoding.UTF8.GetBytes("id: " + Cursor + "\nevent: archive.status\ndata: " + WireJson.CanonicalString(value) + "\n\n");
+        var bytes = Bytes(frame); int count = 0; var decoder = Decoder();
+        await decoder.FeedAsync(bytes, bytes.Length, (value, _) => { count++; Assert.Equal(Cursor, value.GetProperty("cursor").GetString()); Assert.Equal(mode, value.GetProperty("payload").GetProperty("persistence").GetProperty("mode").GetString()); return Task.CompletedTask; }, default);
+        decoder.Complete(); Assert.Equal(1, count);
+        var bad = ArchiveFlowFixture.Set(frame, "payload", ArchiveFlowFixture.Set(status, "sourceGeneration", "other")); bytes = Bytes(bad);
+        Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => Decoder().FeedAsync(bytes, bytes.Length, (_, _) => throw new InvalidOperationException("invalid source must never reach consumer"), default))).Code);
+    }
 
     [Fact]
     public async Task StrictDecoderHandlesEveryByteSplitIncludingUtf8AndCrLf()

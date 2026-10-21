@@ -24,6 +24,16 @@ internal static class ArchiveJson
     internal static string Text(JsonElement value, string property) => value.GetProperty(property).GetString()!;
     internal static string Canonical(JsonElement value) => WireJson.CanonicalString(value, 1048576);
     internal static bool Equal(JsonElement left, JsonElement right) => Canonical(left) == Canonical(right);
+    // 源声明不是授权。只比较已通过具名 schema 的宿主事实，避免同一绑定悄悄换持久模式。
+    internal static string PersistenceSignature(JsonElement value)
+    {
+        if (!value.TryGetProperty("persistence", out var persistence)) return "legacy";
+        WireJson.ValidateNamed("ArchiveSourcePersistence", persistence);
+        if (value.TryGetProperty("sourceId", out var source)) Need(source.GetString() == Text(persistence, "sourceId"), "context_changed");
+        if (value.TryGetProperty("sourceGeneration", out var generation)) Need(generation.GetString() == Text(persistence, "sourceGeneration"), "context_changed");
+        return Canonical(persistence);
+    }
+    internal static void SamePersistence(JsonElement binding, JsonElement status) => Need(PersistenceSignature(binding) == PersistenceSignature(status), "context_changed");
     internal static long Seq(JsonElement value, string property) => Sequence.Parse(Text(value, property)).ToInt64();
     internal static JsonElement Identity(JsonElement value)
     {

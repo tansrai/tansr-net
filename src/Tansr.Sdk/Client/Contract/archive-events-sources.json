@@ -6,8 +6,9 @@
     {
       "source": "packages/api-client/src/sdk2/event-frame.ts",
       "target": "event-frame.ts",
-      "bytes": 14952,
-      "sha256": "0e59e163edd17aac72ab91ff14acc7d3ca8d4bffcb7955748c283839c2b5836a"
+      "bytes": 15695,
+      "sha256": "0ede4456c74217933c2471017b7f786aff03b1a5e150a25c10ab1fafa984ec54",
+      "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a"
     },
     {
       "source": "packages/api-client/src/sdk2/strict-event-stream.ts",

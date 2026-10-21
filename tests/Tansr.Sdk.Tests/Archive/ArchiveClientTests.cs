@@ -10,6 +10,27 @@ namespace Tansr.Sdk.Tests.Archive;
 
 public sealed class ArchiveClientTests
 {
+    [Theory]
+    [InlineData("terminal", "terminal-durable-ack")]
+    [InlineData("cloud", "cloud-immutable-publish")]
+    public async Task SourceManagedBindingAndStatusExposeRealModeAndRejectSilentSourceChange(string mode, string handoff)
+    {
+        var fixture = new ArchiveFlowFixture();
+        var persistence = ArchiveFlowFixture.Element(new { contract = "serve-persistence-v1", mode, handoff, sourceId = "source", sourceGeneration = "source-generation", localDisk = false, trustedControl = true });
+        var binding = ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(fixture.Binding, "availability", "source-managed"), "persistence", persistence);
+        var status = ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(fixture.Status, "sessionPersistence", "source-managed"), "persistence", persistence);
+        using var http = UnifiedStamp.Client(new Handler(request => Response(request.RequestUri!.AbsolutePath.EndsWith("/archive/status", StringComparison.Ordinal) ? status : binding)));
+        using var tansr = Client(http, fixture); var client = new ArchiveClient(tansr);
+        Assert.Equal(mode, (await client.GetBindingAsync("binding")).GetProperty("persistence").GetProperty("mode").GetString());
+        Assert.Equal(handoff, (await client.GetArchiveStatusAsync("binding")).GetProperty("persistence").GetProperty("handoff").GetString());
+        Assert.Throws<WireProtocolException>(() => WireJson.ValidateNamed("LegacyBindingView", binding));
+        var badFact = ArchiveFlowFixture.Set(persistence, "handoff", mode == "cloud" ? "terminal-durable-ack" : "cloud-immutable-publish");
+        Assert.Throws<WireProtocolException>(() => WireJson.ValidateNamed("BindingView", ArchiveFlowFixture.Set(binding, "persistence", badFact)));
+        status = fixture.Status;
+        Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.GetArchiveStatusAsync("binding"))).Code);
+        binding = ArchiveFlowFixture.Set(binding, "persistence", ArchiveFlowFixture.Set(persistence, "sourceGeneration", "next"));
+        Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => client.GetBindingAsync("binding"))).Code);
+    }
     [Fact]
     public async Task OriginalArtifactEnvelopeCanExceedControlBytesWithoutChangingChunkLimit()
     {

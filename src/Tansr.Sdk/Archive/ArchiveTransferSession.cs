@@ -32,7 +32,7 @@ public sealed class ArchiveTransferSession
             for (int index = 0; index < maximumPages; index++)
             {
                 check(); string bindingId = J.Text(_identity, "bindingId"); var binding = J.Copy(await _client.GetBindingAsync(bindingId, cancellationToken).ConfigureAwait(false), "BindingView"); check(); MatchBinding(binding);
-                var status = J.Copy(await _client.GetArchiveStatusAsync(bindingId, cancellationToken).ConfigureAwait(false), "ArchiveStatus"); check(); MatchSource(status); J.Need(J.Text(status, "revision") == J.Text(binding, "revision") && J.Text(status, "state") == J.Text(binding, "state"));
+                var status = J.Copy(await _client.GetArchiveStatusAsync(bindingId, cancellationToken).ConfigureAwait(false), "ArchiveStatus"); check(); MatchSource(status); J.SamePersistence(binding, status); J.Need(J.Text(status, "revision") == J.Text(binding, "revision") && J.Text(status, "state") == J.Text(binding, "state"));
                 var head = await _store.HeadAsync(cancellationToken).ConfigureAwait(false); check(); var limits = J.Copy(_client.GetEffectiveLimits(bindingId), "Limits");
                 var request = J.Build(w => { w.WriteString("protocol", J.Protocol); w.WriteString("bindingId", bindingId); J.Put(w, "generations", _identity.GetProperty("target").GetProperty("generations")); w.WriteString("afterSequence", head.HasValue ? J.Text(head.Value, "sequence") : null); w.WriteNumber("limit", limits.GetProperty("pageRecords").GetInt32()); w.WriteNumber("maxBytes", limits.GetProperty("pageBytes").GetInt32()); });
                 var page = J.Copy(await _client.ReadRecordsAsync(request, cancellationToken).ConfigureAwait(false), "ArchivePage"); check();
@@ -55,6 +55,7 @@ public sealed class ArchiveTransferSession
                 // Refresh before the first durable write; this is not a rebase of a previously issued ACK.
                 var currentBinding = J.Copy(await _client.GetBindingAsync(bindingId, cancellationToken).ConfigureAwait(false), "BindingView"); check(); MatchBinding(currentBinding);
                 var currentStatus = J.Copy(await _client.GetArchiveStatusAsync(bindingId, cancellationToken).ConfigureAwait(false), "ArchiveStatus"); check(); MatchSource(currentStatus);
+                J.SamePersistence(currentBinding, currentStatus); J.SamePersistence(binding, currentBinding);
                 J.Need(J.Seq(currentBinding, "revision") >= J.Seq(binding, "revision") && J.Text(currentStatus, "revision") == J.Text(currentBinding, "revision") && J.Text(currentStatus, "state") == J.Text(currentBinding, "state") && J.Equal(currentStatus.GetProperty("publishedThroughSequence"), page.GetProperty("publishedThroughSequence")), "context_changed");
                 binding = currentBinding; status = currentStatus;
                 var identity = J.Copy(_requestIdentity(binding), "RequestIdentity"); check(); J.Need(J.Text(identity, "operationEpoch") == J.Text(binding.GetProperty("operationEpoch"), "id"));

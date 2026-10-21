@@ -1,8 +1,8 @@
 {
   "format": "tansr-api-manifest-v1",
   "contract": "unified-v1",
-  "revision": 12,
-  "schemaHash": "dfb0eb7bd75a5aba2584bdf6cec28799685cac437a7951d33f8fc682e5368b1a",
+  "revision": 13,
+  "schemaHash": "35fb881d52c49e6b5123ced2a6ae74e128c10de24b1dfa53f7bf03fec2e83d38",
   "families": [
     {
       "id": "agent-session-v1",
@@ -81,7 +81,7 @@
       "status": "final",
       "rfc": "doc/rfc/RFC-SDK2-1-兼容SDK1的扩展协议.md",
       "source": "doc/rfc/sdk2-ext-v1.schema.json",
-      "sha256": "4c13275462d9f71fca7af32b46d8e70e05ac1fb1efc23d98484caf9236f6acc9",
+      "sha256": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
       "golden": {
         "scripts/sdk2/fixtures/sdk2-wire-v1.json": "1aedfebff05a0343617e99cde48469eefd13c9a20417cc3e84e0754fd138e7dc"
       },
