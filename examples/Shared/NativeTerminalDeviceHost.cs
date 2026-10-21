@@ -20,7 +20,8 @@ internal sealed class NativeTerminalDeviceHost
 {
 #if WINDOWS || NETFRAMEWORK
     private readonly WindowsWorkspace workspace;
-    private readonly SqliteExecutorJournal journal;
+    private readonly IExecutorJournal journal;
+    private readonly bool cloudStorage;
     private readonly Func<Task>? closePublication;
     private readonly TansrClient controller, device;
     private readonly bool ownsController, ownsDevice;
@@ -31,12 +32,12 @@ internal sealed class NativeTerminalDeviceHost
     private readonly object gate = new();
     private Task? stopTask;
     private readonly NativeOperationConsent consent = new();
-    private NativeTerminalDeviceHost(WindowsWorkspace workspace, SqliteExecutorJournal journal,
-        TansrClient controller, TansrClient device, TerminalConnection controllerTerminal, TerminalConnection deviceTerminal, Func<Task>? closePublication, bool ownsController, bool ownsDevice)
-    { this.workspace = workspace; this.journal = journal; this.controller = controller; this.device = device; this.controllerTerminal = controllerTerminal; this.deviceTerminal = deviceTerminal; this.closePublication = closePublication; this.ownsController = ownsController; this.ownsDevice = ownsDevice; }
+    private NativeTerminalDeviceHost(WindowsWorkspace workspace, IExecutorJournal journal,
+        TansrClient controller, TansrClient device, TerminalConnection controllerTerminal, TerminalConnection deviceTerminal, Func<Task>? closePublication, bool ownsController, bool ownsDevice, bool cloudStorage)
+    { this.workspace = workspace; this.journal = journal; this.controller = controller; this.device = device; this.controllerTerminal = controllerTerminal; this.deviceTerminal = deviceTerminal; this.closePublication = closePublication; this.ownsController = ownsController; this.ownsDevice = ownsDevice; this.cloudStorage = cloudStorage; }
     internal Task Completion => host.Completion;
     internal string? LastNotificationErrorCode => host.LastNotificationErrorCode;
-    internal string Status => "device=" + host.State + "；自动记忆=" + (closePublication == null ? "未装配" : "与终端工具共用原设备绑定") + "；仅表示本机设备状态，远端任务和记忆收尾以原回执为准。";
+    internal string Status => "device=" + host.State + "；存储=" + (cloudStorage ? "cloud（Serve平台保管，无本地数据库）" : "terminal") + "；自动记忆=" + (cloudStorage ? "平台来源，以持久化发现为准" : closePublication == null ? "未装配" : "与终端工具共用原设备绑定") + "；仅表示本机设备状态，远端任务和记忆收尾以原回执为准。";
 #else
     private NativeTerminalDeviceHost() { }
     internal Task Completion => Task.CompletedTask;
@@ -63,6 +64,8 @@ internal sealed class NativeTerminalDeviceHost
         var config = document.RootElement;
         if (Text(config, "format") != "tansr-example-terminal-device-v1" || !config.GetProperty("enablePreview").GetBoolean())
             throw new InvalidOperationException("terminal_device_explicit_preview_required");
+        var storageMode = ReadStorageMode(config);
+        var cloudStorage = storageMode == "cloud";
         var publicationProfile = config.TryGetProperty("publication", out var selectedMemory) && selectedMemory.TryGetProperty("profile", out var selectedProfile)
             ? selectedProfile.GetString() : "terminal-services-v1";
         if (publicationProfile != "terminal-services-v1" && publicationProfile != "terminal-persistence-v1")
@@ -83,49 +86,73 @@ internal sealed class NativeTerminalDeviceHost
         IReadOnlyDictionary<string, string>? hostHeaders = string.IsNullOrEmpty(userToken) ? null : new Dictionary<string, string> { ["x-tansr-demo-user-token"] = userToken! };
         TansrClientOptions Options(string variable) => new()
         {
-            BaseUri = endpoint, AllowInsecureLoopback = allowHttp, PrincipalProvider = authority.ReadPrincipal, ExecutionScopeProvider = authority.ReadScope,
-            SessionContract = sessionContract, AdditionalRequestHeaders = hostHeaders,
+            BaseUri = endpoint,
+            AllowInsecureLoopback = allowHttp,
+            PrincipalProvider = authority.ReadPrincipal,
+            ExecutionScopeProvider = authority.ReadScope,
+            SessionContract = sessionContract,
+            AdditionalRequestHeaders = hostHeaders,
             TokenProvider = token => { token.ThrowIfCancellationRequested(); return Task.FromResult(Environment.GetEnvironmentVariable(variable) is { Length: > 0 } value ? value : throw new InvalidOperationException("terminal_device_token_missing")); }
         };
         var controller = borrowedController ?? new TansrClient(Options(controlToken)); var device = useControllerForDevice ? controller : new TansrClient(Options(deviceToken));
         var controllerTerminal = TerminalConnection.ForClient(controller, true); var deviceTerminal = TerminalConnection.ForClient(device, true);
-        WindowsWorkspace? workspace = null; SqliteExecutorJournal? journal = null; Func<Task>? closePublication = null; NativeTerminalDeviceHost? result = null;
+        WindowsWorkspace? workspace = null; IExecutorJournal? journal = null; Func<Task>? closePublication = null; NativeTerminalDeviceHost? result = null;
         try
         {
-            var work = config.GetProperty("workspace"); var log = config.GetProperty("journal");
-            var workPath = Absolute(work, "path"); var journalPath = Absolute(log, "path");
+            // 显式选择必须与可信 Serve 装配一致；发现失败不能降级成本地库。旧配置保留原调用。
+            if (config.TryGetProperty("storageMode", out _))
+            {
+                var persistence = await controller.GetSessionPersistenceAsync(sessionId, ct).ConfigureAwait(false);
+                if (Text(persistence, "mode") != storageMode) throw new InvalidOperationException("terminal_device_storage_mode_mismatch");
+                if (cloudStorage && (!persistence.GetProperty("handoff").GetProperty("executionJournal").GetBoolean() ||
+                    !persistence.GetProperty("handoff").GetProperty("trustedControl").GetBoolean() ||
+                    !persistence.GetProperty("coverage").EnumerateArray().Any(item => item.GetString() == "executions")))
+                    throw new InvalidOperationException("terminal_device_cloud_journal_unavailable");
+            }
+            var work = config.GetProperty("workspace");
+            var workPath = Absolute(work, "path"); string? journalPath = null;
             var compactCompletedReceipts = false;
-            if (log.TryGetProperty("compactCompletedReceipts", out var compact))
-            {
-                if (compact.ValueKind != JsonValueKind.True && compact.ValueKind != JsonValueKind.False)
-                    throw new InvalidOperationException("terminal_device_journal_compact_boolean_required");
-                compactCompletedReceipts = compact.GetBoolean();
-            }
-            if (journalPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("terminal_journal_must_be_outside_workspace");
             IArchiveKeyProvider? keyProvider = null;
-            if (config.TryGetProperty("encryption", out var encryption))
-            {
-                if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("terminal_device_explicit_encryption_required");
-                string keyPath = Absolute(encryption, "path");
-                if (string.Equals(keyPath, journalPath, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(keyPath, Absolute(config, "trustedScopeFile"), StringComparison.OrdinalIgnoreCase) ||
-                    keyPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
-                    config.TryGetProperty("publication", out var publicationConfig) && string.Equals(keyPath, Absolute(publicationConfig, "path"), StringComparison.OrdinalIgnoreCase))
-                    throw new InvalidOperationException("terminal_device_key_path_must_be_separate");
-                keyProvider = Text(encryption, "mode") == "create" ? CurrentUserDpapiArchiveKeyProvider.Create(keyPath, Text(encryption, "keyId")) :
-                    Text(encryption, "mode") == "reopen" ? CurrentUserDpapiArchiveKeyProvider.Open(keyPath, Text(encryption, "keyId")) :
-                    throw new InvalidOperationException("terminal_device_explicit_key_mode_required");
-            }
-            if (config.TryGetProperty("publication", out _) && keyProvider == null) throw new InvalidOperationException("terminal_memory_encryption_required");
-            workspace = new WindowsWorkspace(workPath, new WindowsWorkspaceOptions { AllWritersCooperate = work.TryGetProperty("allWritersCooperate", out var cooperate) && cooperate.GetBoolean() });
             var scope = authority.ReadScope(); var executorId = Text(config, "executorId"); var workspaceId = Text(work, "id");
-            journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
+            if (!cloudStorage)
             {
-                Path = journalPath, Mode = Text(log, "mode") == "create" ? StorageOpenMode.Create : Text(log, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_device_open_mode_required"),
-                CompactCompletedReceipts = compactCompletedReceipts, KeyProvider = keyProvider,
-                ExecutorId = executorId, ApplicationScopeId = Text(scope, "applicationScopeId"), EndUserId = Text(scope, "endUserId"), ReadContext = authority.ReadScope,
-            }, ct).ConfigureAwait(false);
+                var log = config.GetProperty("journal"); journalPath = Absolute(log, "path");
+                if (log.TryGetProperty("compactCompletedReceipts", out var compact))
+                {
+                    if (compact.ValueKind != JsonValueKind.True && compact.ValueKind != JsonValueKind.False)
+                        throw new InvalidOperationException("terminal_device_journal_compact_boolean_required");
+                    compactCompletedReceipts = compact.GetBoolean();
+                }
+                if (journalPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("terminal_journal_must_be_outside_workspace");
+                if (config.TryGetProperty("encryption", out var encryption))
+                {
+                    if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("terminal_device_explicit_encryption_required");
+                    string keyPath = Absolute(encryption, "path");
+                    if (string.Equals(keyPath, journalPath, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(keyPath, Absolute(config, "trustedScopeFile"), StringComparison.OrdinalIgnoreCase) ||
+                        keyPath.StartsWith(workPath.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+                        config.TryGetProperty("publication", out var publicationConfig) && string.Equals(keyPath, Absolute(publicationConfig, "path"), StringComparison.OrdinalIgnoreCase))
+                        throw new InvalidOperationException("terminal_device_key_path_must_be_separate");
+                    keyProvider = Text(encryption, "mode") == "create" ? CurrentUserDpapiArchiveKeyProvider.Create(keyPath, Text(encryption, "keyId")) :
+                        Text(encryption, "mode") == "reopen" ? CurrentUserDpapiArchiveKeyProvider.Open(keyPath, Text(encryption, "keyId")) :
+                        throw new InvalidOperationException("terminal_device_explicit_key_mode_required");
+                }
+                if (config.TryGetProperty("publication", out _) && keyProvider == null) throw new InvalidOperationException("terminal_memory_encryption_required");
+                journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
+                {
+                    Path = journalPath,
+                    Mode = Text(log, "mode") == "create" ? StorageOpenMode.Create : Text(log, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_device_open_mode_required"),
+                    CompactCompletedReceipts = compactCompletedReceipts,
+                    KeyProvider = keyProvider,
+                    ExecutorId = executorId,
+                    ApplicationScopeId = Text(scope, "applicationScopeId"),
+                    EndUserId = Text(scope, "endUserId"),
+                    ReadContext = authority.ReadScope,
+                }, ct).ConfigureAwait(false);
+            }
+            else journal = new CloudExecutorJournal(device, sessionId, () => result?.host.Connection ?? throw new InvalidOperationException("terminal_device_connection_required"));
+            workspace = new WindowsWorkspace(workPath, new WindowsWorkspaceOptions { AllWritersCooperate = work.TryGetProperty("allWritersCooperate", out var cooperate) && cooperate.GetBoolean() });
             var allowed = config.GetProperty("allowedTools").EnumerateArray().Select(x => x.GetString() ?? "").ToArray();
             if (allowed.Length == 0 || allowed.Any(string.IsNullOrWhiteSpace) || allowed.Distinct(StringComparer.Ordinal).Count() != allowed.Length)
                 throw new InvalidOperationException("terminal_device_allowed_tools_required");
@@ -141,9 +168,15 @@ internal sealed class NativeTerminalDeviceHost
                 {
                     var store = await SqliteTerminalPersistenceStore.OpenAsync(new SqliteTerminalPersistenceOptions
                     {
-                        EnableProfile = true, Path = memoryPath, Mode = mode,
-                        Identity = memory.GetProperty("identity").Clone(), ReadContext = authority.ReadScope, KeyProvider = keyProvider!,
-                        MaxActiveTransfers = memory.GetProperty("maxTransfers").GetInt32(), MaxStagingBytes = memory.GetProperty("maxStagingBytes").GetInt32(), MaxPages = memory.GetProperty("maxPages").GetInt32(),
+                        EnableProfile = true,
+                        Path = memoryPath,
+                        Mode = mode,
+                        Identity = memory.GetProperty("identity").Clone(),
+                        ReadContext = authority.ReadScope,
+                        KeyProvider = keyProvider!,
+                        MaxActiveTransfers = memory.GetProperty("maxTransfers").GetInt32(),
+                        MaxStagingBytes = memory.GetProperty("maxStagingBytes").GetInt32(),
+                        MaxPages = memory.GetProperty("maxPages").GetInt32(),
                     }, ct).ConfigureAwait(false);
                     closePublication = () => store.CloseAsync();
                     memoryTool = new WindowsTerminalPersistenceHost(store, enableProfile: true).CreateTool();
@@ -152,9 +185,15 @@ internal sealed class NativeTerminalDeviceHost
                 {
                     var store = await SqliteMemoryPublicationStore.OpenAsync(new SqliteMemoryPublicationOptions
                     {
-                        EnablePreview = true, Path = memoryPath, Mode = mode,
-                        Identity = memory.GetProperty("identity").Clone(), ReadContext = authority.ReadScope, KeyProvider = keyProvider,
-                        MaxTransfers = memory.GetProperty("maxTransfers").GetInt32(), MaxStagingBytes = memory.GetProperty("maxStagingBytes").GetInt32(), MaxPages = memory.GetProperty("maxPages").GetInt32(),
+                        EnablePreview = true,
+                        Path = memoryPath,
+                        Mode = mode,
+                        Identity = memory.GetProperty("identity").Clone(),
+                        ReadContext = authority.ReadScope,
+                        KeyProvider = keyProvider,
+                        MaxTransfers = memory.GetProperty("maxTransfers").GetInt32(),
+                        MaxStagingBytes = memory.GetProperty("maxStagingBytes").GetInt32(),
+                        MaxPages = memory.GetProperty("maxPages").GetInt32(),
                     }, ct).ConfigureAwait(false);
                     closePublication = () => store.CloseAsync();
                     memoryTool = new WindowsMemoryPublicationHost(store, enablePreview: true, requireEncryption: true).CreateTool();
@@ -172,11 +211,12 @@ internal sealed class NativeTerminalDeviceHost
                 {
                     var request = new WindowsProcessRequest(executable,
                         new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", arguments.GetProperty("command").GetString()! },
-                        () => directory.AcquireProcessDirectory(arguments.GetProperty("cwd").GetString()!)) { ExpectedExecutableSha256 = digest };
+                        () => directory.AcquireProcessDirectory(arguments.GetProperty("cwd").GetString()!))
+                    { ExpectedExecutableSha256 = digest };
                     request.Environment["SystemRoot"] = Environment.GetFolderPath(Environment.SpecialFolder.Windows); return request;
                 };
             }
-            result = new NativeTerminalDeviceHost(workspace, journal, controller, device, controllerTerminal, deviceTerminal, closePublication, borrowedController == null, !useControllerForDevice);
+            result = new NativeTerminalDeviceHost(workspace, journal, controller, device, controllerTerminal, deviceTerminal, closePublication, borrowedController == null, !useControllerForDevice, cloudStorage);
             var owner = result;
             var configurationIdentity = WireJson.CanonicalString(config);
             var initialPrincipal = authority.ReadPrincipal();
@@ -227,7 +267,7 @@ internal sealed class NativeTerminalDeviceHost
         catch
         {
             if (result != null) await result.StopAsync().ConfigureAwait(false);
-            else { if (closePublication != null) await closePublication().ConfigureAwait(false); journal?.Dispose(); workspace?.Dispose(); deviceTerminal.Dispose(); controllerTerminal.Dispose(); if (!useControllerForDevice) device.Dispose(); if (borrowedController == null) controller.Dispose(); }
+            else { if (closePublication != null) await closePublication().ConfigureAwait(false); if (journal != null) await journal.CloseAsync().ConfigureAwait(false); workspace?.Dispose(); deviceTerminal.Dispose(); controllerTerminal.Dispose(); if (!useControllerForDevice) device.Dispose(); if (borrowedController == null) controller.Dispose(); }
             throw;
         }
 #else
@@ -279,9 +319,21 @@ internal sealed class NativeTerminalDeviceHost
             finally
             {
                 try { if (closePublication != null) await closePublication().ConfigureAwait(false); }
-                finally { host?.Dispose(); journal.Dispose(); workspace.Dispose(); deviceTerminal.Dispose(); controllerTerminal.Dispose(); if (ownsDevice) device.Dispose(); if (ownsController) controller.Dispose(); observation.Dispose(); }
+                finally
+                {
+                    try { await journal.CloseAsync().ConfigureAwait(false); }
+                    finally { host?.Dispose(); workspace.Dispose(); deviceTerminal.Dispose(); controllerTerminal.Dispose(); if (ownsDevice) device.Dispose(); if (ownsController) controller.Dispose(); observation.Dispose(); }
+                }
             }
         }
+    }
+    internal static string ReadStorageMode(JsonElement config)
+    {
+        var mode = config.TryGetProperty("storageMode", out var value) ? value.GetString() : "terminal";
+        if (mode != "terminal" && mode != "cloud") throw new InvalidOperationException("terminal_device_explicit_storage_mode_required");
+        if (mode == "cloud" && (config.TryGetProperty("journal", out _) || config.TryGetProperty("encryption", out _) || config.TryGetProperty("publication", out _)))
+            throw new InvalidOperationException("terminal_device_cloud_local_store_forbidden");
+        return mode;
     }
     private static string Text(JsonElement value, string key) => value.GetProperty(key).GetString() is { Length: > 0 } text && !text.Any(char.IsControl) ? text : throw new InvalidOperationException("terminal_device_invalid_" + key);
     private static string Absolute(JsonElement value, string key)

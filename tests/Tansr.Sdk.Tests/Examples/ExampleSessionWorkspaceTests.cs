@@ -12,6 +12,20 @@ namespace Tansr.Sdk.Tests.Examples;
 public sealed class ExampleSessionWorkspaceTests
 {
     [Fact]
+    public async Task QueryableMessageActionPreservesOriginalRequestIdAndUsesExistingMessageRoute()
+    {
+        using var fixture = new Fixture(); await fixture.StartAsync();
+        await fixture.Workspace.ExecuteAsync(31, "original-request\r\nfirst line\nsecond line");
+        Assert.Equal("/api/sessions/s/messages", fixture.Handler.Requests.Last());
+        using var body = JsonDocument.Parse(fixture.Handler.Bodies.Last());
+        Assert.Equal("original-request", body.RootElement.GetProperty("requestId").GetString());
+        Assert.Equal("first line\nsecond line", body.RootElement.GetProperty("prompt").GetString());
+        var before = fixture.Handler.Requests.Count;
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Workspace.ExecuteAsync(31, "no-body"));
+        Assert.Equal(before, fixture.Handler.Requests.Count);
+    }
+
+    [Fact]
     public void LocalHostModuleIsAnExplicitPinnedDeveloperPair()
     {
         var values = new Dictionary<string, string>();

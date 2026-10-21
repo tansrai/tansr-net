@@ -19,7 +19,7 @@ public static class UnifiedOperationState
 }
 
 /// <summary>Capability closure (<c>GET /api/sessions/:id/capabilities</c>; unified-v1 <c>CapabilityClosure</c>). Decoding is strict:
-/// exactly the five keys, all eight closure domains, all 77 closure operations (every manifest operation outside <c>discovery</c>
+/// exactly the five keys, all eight closure domains, all current closure operations (every manifest operation outside <c>discovery</c>
 /// except the session-contract probe), and the <c>closureId</c> must equal
 /// <c>sha256("tansr.unified.closure.v1" ‖ 0x00 ‖ canonical({authorizationRevision, domains, operations}))</c>. Anything else is
 /// <c>invalid_closure</c> — a closure the SDK cannot verify is never consulted. The closure is the <em>declared capability
@@ -30,7 +30,7 @@ public sealed class UnifiedCapabilityClosure
     /// <summary>The eight closure domains in schema order (<c>discovery</c> is facade-owned and has no closure state).</summary>
     public static readonly IReadOnlyList<string> Domains = new[] { "session", "execution", "archive", "archive-sync", "cache", "terminal", "terminal-observation", "terminal-profile" };
 
-    /// <summary>The 77 operations a closure must enumerate, in manifest order: every operation whose domain is not
+    /// <summary>The operations a closure must enumerate, in the current manifest order: every operation whose domain is not
     /// <c>discovery</c>, minus <see cref="ApiRoutes.SessionCapabilities"/> (the SDK1 session-contract probe under
     /// <c>/api/capabilities/sessions</c>, which is discovery by nature even though the manifest files it under <c>session</c>).</summary>
     public static readonly IReadOnlyList<ApiOperation> Operations = BuildOperations();
@@ -68,7 +68,7 @@ public sealed class UnifiedCapabilityClosure
     public DomainState Domain(string domain) =>
         domains.TryGetValue(domain ?? throw new ArgumentNullException(nameof(domain)), out var state) ? state : throw new ArgumentOutOfRangeException(nameof(domain));
 
-    /// <summary>Fence state of a closure operation; <see cref="ArgumentOutOfRangeException"/> for names outside the 77.</summary>
+    /// <summary>Fence state of a closure operation; <see cref="ArgumentOutOfRangeException"/> for names outside the current manifest.</summary>
     public string State(string operation) =>
         operations.TryGetValue(operation ?? throw new ArgumentNullException(nameof(operation)), out var state) ? state : throw new ArgumentOutOfRangeException(nameof(operation));
 
@@ -197,7 +197,7 @@ public sealed class UnifiedCapabilityClosure
         using (document) return Parse(document.RootElement.Clone());
     }
 
-    /// <summary>True when <paramref name="name"/> is one of the 77 closure operation names.</summary>
+    /// <summary>True when <paramref name="name"/> is one of the current closure operation names.</summary>
     public static bool IsClosureOperation(string name)
     {
         foreach (var operation in Operations) if (operation.Name == name) return true;

@@ -3948,6 +3948,234 @@
         "binding"
       ],
       "additionalProperties": false
+    },
+    "ExecutionJournalClaimRequest": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "sdk2-ext-v1"
+        },
+        "executorId": {
+          "$ref": "#/definitions/Id"
+        },
+        "connectionId": {
+          "$ref": "#/definitions/Id"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Id"
+        },
+        "digest": {
+          "$ref": "#/definitions/Digest"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Id"
+        }
+      },
+      "required": [
+        "protocol",
+        "executorId",
+        "connectionId",
+        "operationId",
+        "digest",
+        "attemptId"
+      ],
+      "additionalProperties": false,
+      "$comment": "PST-SERVE-01: attemptId identifies one execution attempt. Only the first durable claim returns granted. A lost response, repeated claim or expired connection never grants execution again."
+    },
+    "ExecutionJournalCompleteRequest": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "sdk2-ext-v1"
+        },
+        "executorId": {
+          "$ref": "#/definitions/Id"
+        },
+        "connectionId": {
+          "$ref": "#/definitions/Id"
+        },
+        "operationId": {
+          "$ref": "#/definitions/Id"
+        },
+        "digest": {
+          "$ref": "#/definitions/Digest"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Id"
+        },
+        "receipt": {
+          "$ref": "#/definitions/ExecutionReceiptRequest"
+        },
+        "claimToken": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$",
+          "minLength": 43,
+          "maxLength": 43
+        }
+      },
+      "required": [
+        "protocol",
+        "executorId",
+        "connectionId",
+        "operationId",
+        "digest",
+        "attemptId",
+        "receipt",
+        "claimToken"
+      ],
+      "additionalProperties": false,
+      "$comment": "Original dispatch, current principal/connection and claim attempt must match. Same final receipt is idempotent; a different result conflicts. A non-owner cannot complete unknown."
+    },
+    "ExecutionJournalRecord": {
+      "type": "object",
+      "properties": {
+        "operation": {
+          "$ref": "#/definitions/ExecutionOperation"
+        },
+        "attemptId": {
+          "$ref": "#/definitions/Id"
+        },
+        "connectionId": {
+          "$ref": "#/definitions/Id"
+        },
+        "status": {
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "unknown"
+          ]
+        },
+        "receipt": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExecutionReceiptRequest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "operation",
+        "attemptId",
+        "connectionId",
+        "status",
+        "receipt"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionJournalClaimResponse": {
+      "$comment": "Only the first durable claim grants execution and exposes claimToken. The token is a 256-bit unpadded base64url secret; only its hash is persisted. Replays, reads and lists never disclose the token. Complete requires the token in addition to original dispatch/attempt/connection and scope checks.",
+      "anyOf": [
+        {
+          "type": "object",
+          "properties": {
+            "protocol": {
+              "const": "sdk2-ext-v1"
+            },
+            "record": {
+              "$ref": "#/definitions/ExecutionJournalRecord"
+            },
+            "disposition": {
+              "const": "granted"
+            },
+            "claimToken": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{43}$",
+              "minLength": 43,
+              "maxLength": 43
+            }
+          },
+          "required": [
+            "protocol",
+            "record",
+            "disposition",
+            "claimToken"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "protocol": {
+              "const": "sdk2-ext-v1"
+            },
+            "record": {
+              "$ref": "#/definitions/ExecutionJournalRecord"
+            },
+            "disposition": {
+              "enum": [
+                "pending",
+                "busy",
+                "completed"
+              ]
+            }
+          },
+          "required": [
+            "protocol",
+            "record",
+            "disposition"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "ExecutionJournalReadResponse": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "sdk2-ext-v1"
+        },
+        "record": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/ExecutionJournalRecord"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "record"
+      ],
+      "additionalProperties": false
+    },
+    "ExecutionJournalListResponse": {
+      "type": "object",
+      "properties": {
+        "protocol": {
+          "const": "sdk2-ext-v1"
+        },
+        "records": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/ExecutionJournalRecord"
+          },
+          "maxItems": 100
+        },
+        "nextCursor": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Id"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "records",
+        "nextCursor"
+      ],
+      "additionalProperties": false,
+      "$comment": "Ascending operationId cursor, limit 1..100 (default 50), optional authorized sessionId filter. Not a concurrent snapshot. Records are scoped to the authenticated principal and executor."
     }
   }
 }

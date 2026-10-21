@@ -2,6 +2,41 @@
 
 三种介质职责不同：档案保存原会话资料；记忆 publication 保存 Serve 决定的自动记忆；缓存连续性保留逻辑分组及不透明票据。它们都不在客户端重新实现上下文选择、记忆决策、权限或计费。
 
+## 可信双模式与云执行日志
+
+`GetSessionPersistenceAsync(sessionId)`／`AgentSession.GetPersistenceAsync()` 返回该会话实际固定的 `terminal` 或 `cloud`、来源身份与代际、恢复覆盖、交接能力和 `localDisk:false`。模式由可信 Serve 装配选择，读取接口不改变模式；发现失败、能力缺失或来源变化都不能偷偷换成本地数据库。旧会话调用与既有本地 Archive／Memory／SQLite 执行日志保持原语义。
+
+显式云模式中，历史、记忆和控制记录由 Serve 的平台来源维护；客户端无需打开本地档案、记忆或执行数据库。`CloudExecutorJournal` 实现原 `IExecutorJournal`，通过独立 `execution.journal.*` 控制接口保存执行意图和结果，不走 `tool.invoke`，因此不会循环依赖正在认领的工具。
+
+```csharp
+var persistence = await client.GetSessionPersistenceAsync(sessionId, ct);
+if (persistence.GetProperty("mode").GetString() != "cloud" ||
+    !persistence.GetProperty("handoff").GetProperty("executionJournal").GetBoolean())
+    throw new InvalidOperationException("cloud_journal_unavailable");
+
+// deviceHost 的实际注册连接；不是来自模型文本或历史档案的 ID。
+var journal = new CloudExecutorJournal(deviceClient, sessionId,
+    () => deviceHost.Connection ?? throw new InvalidOperationException("device_not_connected"));
+// 把 journal 注入原 DeviceSessionHost／TerminalDeviceHost，其他权限与工具接线不变。
+// 正常停止并排空执行器后，由宿主 await journal.CloseAsync()。
+```
+
+只有原子认领首次返回 `granted` 才开始执行。首次响应中的 `claimToken` 仅留 RAM，完成时由服务端验证；读取与列表不返回该秘密证明。回包丢失、`pending` 或 `busy` 抛出 `CloudJournalClaimUnavailableException` 或原网络异常，不映射成本地 journal 的 `Pending→Complete(unknown)`。另一活跃执行器的记录不能被当前实例终结。认领意图只在有界 RAM 中保留；进程丢失意图后可查询原结果，但不得借查询响应中的标识重新取得执行权。claim/complete 不接受通用 `Idempotency-Key`，否则缓存首次 granted 可能错误复授执行权；公开 `CallAsync` 也会明确拒绝该组合，不静默删头。设备副作用与云结果提交不是同一事务：崩溃窗口可能留下 unknown，此时只对账、不自动重做。云日志没有声明 `IEncryptedExecutorJournal` 的端侧加密保证；显式要求该保证的业务工具仍按原要求拒绝未声明的介质。
+
+### 消息受理失回与重开
+
+```csharp
+// requestId 在发送前由应用确定并保留；这里也可以只在当前进程 RAM 中保留。
+var requestId = Guid.NewGuid().ToString("N");
+await session.SendWithRequestAsync("合成任务", requestId, ct);
+var acceptance = await session.GetInputAcceptanceAsync(requestId, ct);
+var page = await session.ListInputAcceptancesAsync(limit: 50, cancellationToken: ct);
+```
+
+查询返回原键的 `accepted`／`unknown` 或 `receipt:null`。`accepted` 仅表示原输入受理，不表示任务完成或费用结算。HTTP／SSE 断开不触发自动重发；列表不能按“最新一条”、文本相似度或相同内容推断丢失的原请求关联。缺少唯一可信关联时保持未决。多模态使用 `SendBlocksWithRequestAsync`；旧 `SendAsync`／`SendBlocksAsync` 不暗加请求键、不改变原调用。
+
+The explicit cloud mode uses the independent authenticated journal control API and does not require a local database. Only a first confirmed grant permits execution. A lost claim response, another active owner, or an unknown outcome never authorizes automatic re-execution. Read-only persistence discovery and original message acceptance queries do not grant authority; an accepted input is not proof of completed work. Existing terminal stores remain available under the original local semantics.
+
 ## 档案自动接收与按需材料
 
 `ArchiveSessionHost` 组合原 `ArchiveTransferSession`、`ArchiveRecoverySession` 和 `MaterialSource`。宿主只配置可信身份、本地介质与事件游标；SDK 自动消费原 SSE、耐久接收后 ACK、处理 `material.request` 并在断线后查询原操作。

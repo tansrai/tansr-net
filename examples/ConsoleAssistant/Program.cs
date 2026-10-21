@@ -36,7 +36,7 @@ internal static class Program
             Console.WriteLine("草稿：/draft <全文>、/draft-file <UTF8文件>、/draft、/send-draft；同轮：/insert <全文>、/insert-draft、/input-status、/input-retry（原键）；离线：--offline、/offline。多会话：--worker <jobs.jsonl> [--concurrency 1..8]。提示词来源与策略：/prompt（显式只读）。");
             Console.WriteLine("运行叙述：TANSR_NARRATOR_VERBOSITY=quiet|normal|verbose（默认normal），与原事件观察共用同一泵；verbose只报告思考字符数，不输出思考正文。Worker以phase=narration输出相同叙述。");
             Console.WriteLine("Windows设备自动记忆：--device-memory <可信配置JSON>；独立controller/device票据，持续领取原操作直到Ctrl+C或/stop，不关闭远端会话。见 examples/Shared/device-memory.md。");
-            Console.WriteLine("共享工作台：/workspace 显示操作；/workspace <0..27> [参数]，覆盖能力/任务/会话分页/快照/分叉/cwd，以及本机SDK1镜像与SDK2档案。/export <快照ID> <新文件路径>，/import <快照路径>。三个示例共用TANSR_PROFILE/TANSR_CAPABILITIES_PROFILE/TANSR_THINKING_BUDGET/TANSR_MAX_TOKENS/TANSR_MAX_USD受信宿主请求。");
+            Console.WriteLine("共享工作台：/workspace 显示操作；/workspace <0..31> [参数]，覆盖能力/任务/会话分页/快照/分叉/cwd、本机SDK1镜像与SDK2档案，以及持久化模式和原消息受理查询。/export <快照ID> <新文件路径>，/import <快照路径>。三个示例共用TANSR_PROFILE/TANSR_CAPABILITIES_PROFILE/TANSR_THINKING_BUDGET/TANSR_MAX_TOKENS/TANSR_MAX_USD受信宿主请求。");
             Console.WriteLine("本机设备工具：/device-start <受信JSON配置>；/device-status；/device-stop；本地批准使用 /device-allow <原ID> 或 /device-deny <原ID>。不读取第二条stdin，不自动批准或改用Serve宿主工具。");
             Console.WriteLine("离线授权存储：--offline-archive <受信配置JSON> / --offline-memory <受信配置JSON>，不创建会话、不连接Serve、不ACK；要求已有本机数据及仍有效的可信本地授权。与 --offline 的陈旧呈现/草稿分开。");
             return 0;

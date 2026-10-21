@@ -7,35 +7,35 @@
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 7,
-    "schemaHash": "b60e77ffcbf08d985a993dbdbd4cf610f12f7c7e70f090aee5ff8d523f70bb57",
+    "revision": 12,
+    "schemaHash": "dfb0eb7bd75a5aba2584bdf6cec28799685cac437a7951d33f8fc682e5368b1a",
     "sourceBranch": "main",
-    "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
+    "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "Unified /api route table, headers and envelopes (UAPI-01). Revision 7 pinned from tansr-cli main 64df76b2 (U7-OPS: approval.credential.submit, :ticketId placeholder, etagPath / expectedRevision / requestIdPath facts, archive-sync-v1 and cache family fingerprints)."
+    "note": "PST-SERVE-01 approved dual-mode persistence and cloud journal contracts pinned to exact upstream Git blobs; original byte/storage baseline retained per file."
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 85134,
-      "sha256": "f6255bc868b4de5cb2af759a55069ab4651027d4125ef86d37f14a91d3307288"
+      "bytes": 91198,
+      "sha256": "2461d1c4529af14694b9e185bdcd574a6780eedaa973025c8e9316d0fdc2a7da",
+      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 86449,
-      "sha256": "fd07962916f7662ecc69c3f8c8d2b79aa5b99f542cbfd310a50f56777e51f117"
+      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
+      "bytes": 87703,
+      "sha256": "af4679affd29b83520d314eb60fb04543c5cfc22a5fb3b785d6fae967ac3ab78"
     },
     {
       "snapshot": "contract/unified-v1.golden.json",
       "source": "doc/rfc/unified-v1.golden.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 100944,
-      "sha256": "42531a3937563d8c0d719c5970629b25bbabf3a8ea8436550db5bfddf9d206fd"
+      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
+      "bytes": 109264,
+      "sha256": "e05e4e2a191b0e43348c88689bd077c478b81d11b12edf2b6f267b210aa39044"
     },
     {
       "snapshot": "contract/canonical-cross-vectors.json",
@@ -47,8 +47,9 @@
     {
       "snapshot": "contract/sdk2-ext-v1.schema.json",
       "source": "doc/rfc/sdk2-ext-v1.schema.json",
-      "bytes": 108205,
-      "sha256": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605"
+      "bytes": 114220,
+      "sha256": "4c13275462d9f71fca7af32b46d8e70e05ac1fb1efc23d98484caf9236f6acc9",
+      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a"
     },
     {
       "snapshot": "contract/sdk2-wire-v1.json",

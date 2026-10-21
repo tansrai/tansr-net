@@ -84,7 +84,8 @@ public sealed class ApiCallOptions
     /// else, so other operations are rejected locally with <c>closure_id_not_applicable</c>; stale → 412 <c>rediscover</c>).</summary>
     public string? ClosureId { get; set; }
     /// <summary>Write-operation idempotency key → <c>Idempotency-Key</c> (1–128 printable ASCII). Rejected locally on reads / streams
-    /// (<c>invalid_idempotency_key</c>) because the facade answers 400 <c>idempotency_key_not_applicable</c>.</summary>
+    /// (<c>invalid_idempotency_key</c>) because the facade answers 400 <c>idempotency_key_not_applicable</c>.
+    /// Journal claim/complete likewise reject this header; use their original operation/attempt identity.</summary>
     public string? IdempotencyKey { get; set; }
     /// <summary>Resource precondition → <c>If-Match</c>: the <c>ETag</c> of the last read (<c>"&lt;revision&gt;"</c>) or a bare decimal
     /// revision. Only operations with an <c>expectedRevision</c> position accept it (<see cref="ApiOperation.AcceptsIfMatch"/>).</summary>
