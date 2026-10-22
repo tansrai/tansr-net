@@ -49,6 +49,12 @@ internal static class TerminalCandidateContract
             try { TerminalPersistenceContract.Validate("Request", WireJson.Parse(System.Text.Encoding.UTF8.GetBytes(TerminalJson.Text(args, "argsJson")), 32768)); return true; }
             catch (WireProtocolException) { return false; }
         }
+        if (name == PersistenceCustodyContract.ToolName)
+        {
+            if (tool != "MemoryPublication" || TerminalJson.Text(args, "definitionDigest") != PersistenceCustodyContract.DefinitionDigest) return false;
+            try { PersistenceCustodyContract.Validate("Request", WireJson.Parse(System.Text.Encoding.UTF8.GetBytes(TerminalJson.Text(args, "argsJson")), 32768)); return true; }
+            catch (WireProtocolException) { return false; }
+        }
         string expectedTool, digest, definition;
         if (name == BackgroundToolName)
         { expectedTool = "Shell"; digest = BackgroundToolDefinitionSha256; definition = "BackgroundRequest"; }

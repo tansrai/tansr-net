@@ -10,7 +10,7 @@ using Tansr.Sdk.Windows.Security;
 namespace Tansr.Sdk.Windows.Storage;
 
 /// <summary>Encrypted opaque objects, permanent dual-key entries and original transfer facts in one FULL SQLite transaction.</summary>
-public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenceStore, IDisposable
+public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenceCustodyStore, IDisposable
 {
     public const string Format = "terminal-persistence-encrypted-net-sqlite-v1";
     private const int MaximumMetadataBytes = 262144;
@@ -42,6 +42,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
 
     public bool AtomicDurablePersistence => true;
     public bool EncryptedState => true;
+    public bool CustodyHandoffEnabled => _options.EnableCustodyHandoff;
     public JsonElement Identity => _options.Identity.Clone();
 
     public static Task<SqliteTerminalPersistenceStore> OpenAsync(SqliteTerminalPersistenceOptions options, CancellationToken cancellationToken = default)
@@ -59,6 +60,9 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
             options.MaxObjects < 0 || options.MaxObjects > 1048576 ||
             options.MaxRetainedBytes < 0 || options.MaxRetainedBytes > 1073741824 ||
             options.MaxPages < 32 || options.MaxPages > 1048576) throw new MemoryPublicationRejectedException("invalid_request");
+        var migrationBudget = options.MigrationBudget ?? new PersistenceCustodyMigrationBudget();
+        if (migrationBudget.Bytes < 0 || migrationBudget.Bytes > 1102569742 || migrationBudget.Objects < 0 || migrationBudget.Objects > 1310721)
+            throw new MemoryPublicationRejectedException("invalid_request");
         string path = StorageFileIdentity.FullPath(options.Path);
         var fixedOptions = new SqliteTerminalPersistenceOptions
         {
@@ -69,6 +73,10 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
             ReadContext = options.ReadContext,
             KeyProvider = options.KeyProvider,
             AuthorizeRecovery = options.AuthorizeRecovery,
+            EnableCustodyHandoff = options.EnableCustodyHandoff,
+            Custody = options.EnableCustodyHandoff ? PersistenceCustodyContract.Copy("Custody", options.Custody) : default,
+            CustodyAuthority = options.CustodyAuthority,
+            MigrationBudget = new PersistenceCustodyMigrationBudget { Bytes = migrationBudget.Bytes, Objects = migrationBudget.Objects },
             MaxActiveTransfers = options.MaxActiveTransfers,
             MaxStagingBytes = options.MaxStagingBytes,
             MaxReceiptEntries = options.MaxReceiptEntries,
@@ -77,6 +85,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
             MaxRetainedBytes = options.MaxRetainedBytes,
             MaxPages = options.MaxPages,
         };
+        if (fixedOptions.EnableCustodyHandoff && fixedOptions.CustodyAuthority == null) throw new MemoryPublicationRejectedException("invalid_request");
         string keyId = MemoryPublicationBodyCipher.ReadKeyId(fixedOptions.KeyProvider);
         var owner = new OpenOwner { Signature = Signature(fixedOptions, keyId) }; OpenOwner? maintenance = null;
         lock (OwnersGate)
@@ -145,7 +154,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
                     store.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.Seal("key-check", Array.Empty<byte>())));
                     store.SaveState(new State { ReadOnlyCopy = readOnlyCopy });
                 }
-                store.CheckFixed(); store.Audit();
+                store.InitializeCustody(); store.CheckFixed(); store.Audit();
             }, CheckOpening);
             CheckOpening(); owner.Opening = false; return Task.FromResult(store);
         }
@@ -190,7 +199,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
         }
     }
 
-    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, Action? prepare = null, Action? verifyResult = null)
+    private T Run<T>(Func<Action, T> work, CancellationToken cancellationToken, Action? prepare = null, Action? verifyResult = null, Action? assertCurrent = null)
     {
         lock (_gate)
         {
@@ -205,6 +214,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
                     Require(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested();
                     var current = Scope(_options.ReadContext, _options.Identity); Require(!_poisoned, "reentrant");
                     Require(Equal(scope, current), "context_changed"); CheckFixed();
+                    assertCurrent?.Invoke();
                     if (_cipher != null)
                     {
                         // Key providers are host callbacks too. Recheck authority after the final key read.

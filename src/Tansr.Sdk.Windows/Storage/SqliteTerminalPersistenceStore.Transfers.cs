@@ -81,13 +81,20 @@ public sealed partial class SqliteTerminalPersistenceStore
         }
         return plan;
     }
-    private void Reuse(Ticket ticket)
+    private void Reuse(Ticket ticket, State state)
     {
         void Accept(ObjectRef reference)
         {
             var prior = ticket.Accepted.FirstOrDefault(x => x.Key == reference.Key);
             if (prior != null) { Need(prior.Bytes == reference.Bytes, "invalid_request"); return; }
             ReadObject(reference); ticket.Accepted.Add(reference);
+            if (ticket.ReleasedReuseReservations)
+            {
+                Require(ticket.RawRemaining >= reference.Bytes && ticket.ObjectsRemaining > 0);
+                ticket.RawRemaining -= reference.Bytes; ticket.ObjectsRemaining--;
+                state.Used["reservedBytes"] -= reference.Bytes; state.Used["reservedObjects"]--;
+                state.Used["stagingBytes"] -= reference.Bytes;
+            }
         }
         List<ObjectRef> originals = new();
         if (ticket.Base.HasValue)
@@ -170,10 +177,11 @@ public sealed partial class SqliteTerminalPersistenceStore
     { AccountTicket(state, ticket); SaveTicket(ticket); SaveState(state); }
     private void Finish(State state, Ticket ticket, JsonElement? result, string? rejection)
     {
+        long stagingBytes = TicketStagingBytes(ticket);
         ticket.Status = rejection == null ? "committed" : "rejected"; ticket.Result = result;
         ticket.Rejection = rejection == null ? null : Json(w => { w.WriteString("code", rejection); Nullable(w, "observedRoot", state.Root); });
         ticket.Accepted.Clear(); ticket.Base = null; AccountTicket(state, ticket);
-        state.Used["activeTransfers"]--; state.Used["stagingBytes"] -= N(ticket.Request.GetProperty("declared"), "bytes");
+        state.Used["activeTransfers"]--; state.Used["stagingBytes"] -= stagingBytes;
         state.Used["reservedBytes"] -= ticket.RawRemaining + ticket.MetadataRemaining;
         state.Used["reservedObjects"] -= ticket.ObjectsRemaining; state.Used["reservedReceiptEntries"] -= ticket.EntriesRemaining;
         ticket.RawRemaining = ticket.MetadataRemaining = ticket.ObjectsRemaining = ticket.EntriesRemaining = 0;
@@ -214,7 +222,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         state.Used["activeTransfers"]++; state.Used["transferFacts"]++; state.Used["stagingBytes"] += bytes;
         state.Used["reservedBytes"] += bytes + MetadataReserve; state.Used["reservedObjects"] += objects; state.Used["reservedReceiptEntries"] += added;
         if (!Expected(state.Root, request.GetProperty("expected"))) { Finish(state, ticket, null, "revision_conflict"); return; }
-        try { Reuse(ticket); }
+        try { Reuse(ticket, state); }
         catch (MemoryPublicationRejectedException error) { Finish(state, ticket, null, error.Code); return; }
         catch (WireProtocolException) { Finish(state, ticket, null, "invalid_request"); return; }
         SaveProgress(state, ticket);
@@ -241,7 +249,7 @@ public sealed partial class SqliteTerminalPersistenceStore
             ChargeMetadata(state, ticket, ObjectMetadataCost(reference));
             state.Used["objects"]++; state.Used["retainedBytes"] += bytes.Length;
         }
-        try { Reuse(ticket); }
+        try { Reuse(ticket, state); }
         catch (MemoryPublicationRejectedException error) { Finish(state, ticket, null, error.Code); return; }
         catch (WireProtocolException) { Finish(state, ticket, null, "invalid_request"); return; }
         SaveProgress(state, ticket);

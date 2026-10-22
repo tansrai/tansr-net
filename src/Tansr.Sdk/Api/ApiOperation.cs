@@ -52,8 +52,9 @@ public sealed class ApiOperation
     public string? ExpectedRevisionKind { get; }
     /// <summary>True when <c>If-Match</c> applies (a write operation with an <c>expectedRevision</c> position).</summary>
     public bool AcceptsIfMatch => ExpectedRevisionPath != null;
-    /// <summary>True when <c>Idempotency-Key</c> applies (manifest <c>kind: write</c>; the facade rejects it on reads / streams).</summary>
-    public bool AcceptsIdempotencyKey => Kind == "write";
+    /// <summary>True when <c>Idempotency-Key</c> applies. Journal claim/complete use their durable operation/attempt identity;
+    /// replaying a cached granted response would grant execution twice, so the facade rejects this header there.</summary>
+    public bool AcceptsIdempotencyKey => Kind == "write" && Name != "execution.journal.claim" && Name != "execution.journal.complete";
     /// <summary>Placeholder names in template order.</summary>
     public IReadOnlyList<string> Placeholders => placeholders;
     /// <summary>Literal template prefix up to (and including the slash before) the first placeholder; the whole

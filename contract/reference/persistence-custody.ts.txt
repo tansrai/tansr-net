@@ -1,0 +1,39 @@
+/** PST-SERVE-01 已会签目录摘要字节。只组织原值，不授予权限、不生成业务身份。 */
+import { encodeCanonical } from './canonical/index.js';
+import type { PersistenceCustodyIdentity, PersistenceCustodyRecord, PersistenceCustodyRootRecord,
+  PersistenceCustodyLegacyRootRecord, PersistenceCustodyRootProof, PersistenceCustodyPrepareRequest } from './persistence-custody.generated.js';
+
+const bytes = (value: unknown): Uint8Array => encodeCanonical(value, { maxBytes: 32768 });
+
+/** 原业务根与控制摘要固定一个快照；源/目的托管位置不参与业务身份。 */
+export function persistenceCustodySnapshotBytes(identity: PersistenceCustodyIdentity,
+  root: PersistenceCustodyRootRecord | PersistenceCustodyLegacyRootRecord): Uint8Array {
+  return bytes(['PST-CUSTODY-SNAPSHOT', identity, root]);
+}
+
+/** 空目录初值。目录非空，第一项必须为与 fixedRoot 相符的原根描述。 */
+export function persistenceCustodyInventorySeedBytes(identity: PersistenceCustodyIdentity,
+  originFormat: PersistenceCustodyRootProof['originFormat'], fixedRoot: string): Uint8Array {
+  return bytes(['PST-CUSTODY-DIRECTORY', identity, originFormat, fixedRoot]);
+}
+
+/** 每项链式摘要；index 为全目录原序号，从 "0" 开始，与分页大小无关。 */
+export function persistenceCustodyRecordBytes(index: string, previousDigest: string, record: PersistenceCustodyRecord): Uint8Array {
+  return bytes(['PST-CUSTODY-RECORD', index, previousDigest, record]);
+}
+
+/** 管理意图摘要排除传输 envelope 与 operationId，本键重试不得换意图。 */
+export function persistenceCustodyPrepareIntentBytes(request: PersistenceCustodyPrepareRequest): Uint8Array {
+  return bytes({ identity: request.identity, source: request.source, destination: request.destination,
+    expectedWriterFence: request.expectedWriterFence, expectedRoot: request.expectedRoot });
+}
+
+/** 原 PST 请求本身定义 intentSha256；原字节不受托管迁移改写。 */
+export function persistenceCustodyWriterIntentBytes(originalRequest: unknown): Uint8Array {
+  return bytes(originalRequest);
+}
+
+/** 写者认领 operationId = SHA256(本函数返回的 canonical 字节)。 */
+export function persistenceCustodyWriterOperationBytes(originalRequest: unknown): Uint8Array {
+  return bytes(['PST-CUSTODY', originalRequest]);
+}

@@ -142,7 +142,10 @@ internal sealed class ArchiveEventDecoder
         {
             if (SessionJson.String(payload, "bindingId") != bindingId) Fail("context_changed");
             if (eventName == "archive.status" || eventName == "binding.status")
+            {
+                _ = Archive.ArchiveJson.PersistenceSignature(payload);
                 if (SessionJson.String(payload, "revision") != SessionJson.String(value, "revision")) Fail("invalid_response");
+            }
             if (payload.TryGetProperty("generations", out var actual) && WireJson.CanonicalString(actual) != generations) Fail("context_changed");
             if (payload.TryGetProperty("target", out var target) && WireJson.CanonicalString(target.GetProperty("generations")) != generations) Fail("context_changed");
             if (payload.TryGetProperty("scope", out var scope) && (SessionJson.String(scope, "applicationScopeId") != application || SessionJson.String(scope, "endUserId") != user)) Fail("context_changed");

@@ -20,6 +20,7 @@
     <EmbeddedResource Include="../../contract/terminal-profile-v1.schema.json" LogicalName="Tansr.Sdk.Terminal.terminal-profile-v1.schema.json" />
     <EmbeddedResource Include="../../contract/terminal-shell-sandbox-v1.schema.json" LogicalName="Tansr.Sdk.Terminal.terminal-shell-sandbox-v1.schema.json" />
     <EmbeddedResource Include="../../contract/terminal-persistence-v1.schema.json" LogicalName="Tansr.Sdk.Terminal.terminal-persistence-v1.schema.json" />
+    <EmbeddedResource Include="../../contract/persistence-custody-handoff-v1.schema.json" LogicalName="Tansr.Sdk.Terminal.persistence-custody-handoff-v1.schema.json" />
     <InternalsVisibleTo Include="Tansr.Sdk.Tests" />
     <InternalsVisibleTo Include="Tansr.Sdk.IntegrationTests" />
   </ItemGroup>

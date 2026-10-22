@@ -146,3 +146,50 @@ actual database/WAL files for body and raw/encoded key probes; exclusive SQLite 
 WAL index, and owned sidecars disappear on close. This local package evidence complements the
 separately retained real Serve/Console tests; it is not a release, other-platform or physical
 power-loss claim. Evidence: `archive/PST-PLAN-20261009/dev-20261010-b8/ios-net`.
+
+## 端侧与云端托管交接的共同权威
+
+`persistence-custody-handoff-v1` 是显式扩展。`SqliteTerminalPersistenceOptions.EnableCustodyHandoff`
+默认关闭；启用时还必须指定原 `Custody` 和 `ITerminalPersistenceCustodyAuthority`。同一五字段
+业务身份的所有端侧、云侧和跨会话写者必须服从同一个强一致权威。源／目的托管位置改变不重写
+业务身份、原请求号、正文、永久回执或删除代际。Serve 不因此建立本地文件、临时库或隐式缓存后备。
+
+`PersistenceCustodyReadClient` 复用原 `TansrClient` 的认证、严格 canonical JSON、响应上限和
+授权变更检查，仅使用生成的 UAPI 发现／原键查询路由。它**不实现写入权威**，不能从 HTTP
+查询结果取得 writer 权限，不能声明端侧事务已提交或回滚，也不能完成 cutover：
+
+```csharp
+// client 是按原接入文档配置好当前应用／用户 scope 的 TansrClient。
+var custodyReader = new Tansr.Sdk.Terminal.PersistenceCustodyReadClient(client);
+var capabilities = await custodyReader.GetCapabilitiesAsync(cancellationToken);
+// originalQuery 是从受信维护任务保存的原 QueryRequest，不能换 operationId 或 intentSha256。
+var originalOutcome = await custodyReader.QueryAsync(originalQuery, cancellationToken);
+```
+
+`installed=false` 或 `writerAuthority=unavailable` 不得触发本地权威兜底。
+`preparing=true`、`ticket=null` 表示共同冻结已开始而材料证明尚未完成，并非迁移不存在；
+不能据此解锁旧源。查询失败保留原操作，SDK 不自动重试或换键。
+
+写入适配器由开发者在可信部署边界实现并注入，连接 Serve 所用的同一 SQL/CAS 权威。当前 SDK
+提供 `ITerminalPersistenceCustodyAuthority` 及 `TerminalPersistenceCustodyAuthorityGuard`，
+不附带一个能凭普通用户 HTTP 身份远程认领／释放 writer 的默认 bridge。装配者需要把当前权限
+及原执行关联带入自己的可信通道；公开只读端点、客户端本地布尔变量和目录导入证明均不能替代它。
+SQLite store 会使用该守卫检查原 scope、原键、custody，以及异步等待后的授权；终局同步提交前仍检查 lease。
+
+- `AcquireWriterAsync` 仅允许共同权威本次新建的认领进入原 SQLite 工作；旧 active／unknown
+  必须对账，不能拿查询到的 claim 再次执行。`AssertCurrent` 在等待后和事务最终提交前同步调用。
+- 本地事务确定提交后，以原响应摘要调用 `FinishAsync`；只有明确回滚才能提交 rolled-back。
+  超时、I/O 异常、COMMIT 或 finish 失回都不能伪装成回滚，不自动释放，不自动重发。
+- `writer-query` 只读核原认领。已确定 committed 的原请求重试，沿原 PST transfer 校验
+  begin／owner／intent 并返回当前只读投影，不重新认领或写业务，也不新增永久响应日志。
+  原 `responseDigest` 记录当时结局，不要求后来已合法推进的 progress 与旧响应逐字相等。
+- `BeginHandoffAsync` 先冻结整个域，再由端侧读取固定目录并调用 `RecordPreparedAsync` 保存
+  原 proof。prepare、verify、cutover 和 abort 均保留原 operationId／intent；未成功切换前目的不成为 writer。
+
+The custody profile is opt-in. All writers for the unchanged business identity must use one explicitly
+injected trusted authority. `PersistenceCustodyReadClient` only discovers capabilities and queries the
+original operation; it is not a writer authority or a remote management bridge. The developer-supplied
+authority must connect to the same shared SQL/CAS control plane used by Serve and verify current permissions
+and original execution ownership. Only a newly created claim grants execution. Unknown outcomes retain their
+original claim; neither timeouts nor disposal imply rollback. A preparing response without a ticket remains
+unresolved and cannot unlock the source. Serve retains no local persistence or implicit fallback.

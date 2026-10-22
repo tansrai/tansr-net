@@ -2,7 +2,48 @@
 
 三种介质职责不同：档案保存原会话资料；记忆 publication 保存 Serve 决定的自动记忆；缓存连续性保留逻辑分组及不透明票据。它们都不在客户端重新实现上下文选择、记忆决策、权限或计费。
 
+## 可信双模式与云执行日志
+
+`GetSessionPersistenceAsync(sessionId)`／`AgentSession.GetPersistenceAsync()` 返回该会话实际固定的 `terminal` 或 `cloud`、来源身份与代际、恢复覆盖、交接能力和 `localDisk:false`。模式由可信 Serve 装配选择，读取接口不改变模式；发现失败、能力缺失或来源变化都不能偷偷换成本地数据库。旧会话调用与既有本地 Archive／Memory／SQLite 执行日志保持原语义。
+
+显式云模式中，历史、记忆和控制记录由 Serve 的平台来源维护；客户端无需打开本地档案、记忆或执行数据库。`CloudExecutorJournal` 实现原 `IExecutorJournal`，通过独立 `execution.journal.*` 控制接口保存执行意图和结果，不走 `tool.invoke`，因此不会循环依赖正在认领的工具。
+
+```csharp
+var persistence = await client.GetSessionPersistenceAsync(sessionId, ct);
+if (persistence.GetProperty("mode").GetString() != "cloud" ||
+    !persistence.GetProperty("handoff").GetProperty("executionJournal").GetBoolean())
+    throw new InvalidOperationException("cloud_journal_unavailable");
+
+// deviceHost 的实际注册连接；不是来自模型文本或历史档案的 ID。
+var journal = new CloudExecutorJournal(deviceClient, sessionId,
+    () => deviceHost.Connection ?? throw new InvalidOperationException("device_not_connected"));
+// 把 journal 注入原 DeviceSessionHost／TerminalDeviceHost，其他权限与工具接线不变。
+// 正常停止并排空执行器后，由宿主 await journal.CloseAsync()。
+```
+
+只有原子认领首次返回 `granted` 才开始执行。首次响应中的 `claimToken` 仅留 RAM，完成时由服务端验证；读取与列表不返回该秘密证明。回包丢失、`pending` 或 `busy` 抛出 `CloudJournalClaimUnavailableException` 或原网络异常，不映射成本地 journal 的 `Pending→Complete(unknown)`。另一活跃执行器的记录不能被当前实例终结。认领意图只在有界 RAM 中保留；进程丢失意图后可查询原结果，但不得借查询响应中的标识重新取得执行权。claim/complete 不接受通用 `Idempotency-Key`，否则缓存首次 granted 可能错误复授执行权；公开 `CallAsync` 也会明确拒绝该组合，不静默删头。设备副作用与云结果提交不是同一事务：崩溃窗口可能留下 unknown，此时只对账、不自动重做。云日志没有声明 `IEncryptedExecutorJournal` 的端侧加密保证；显式要求该保证的业务工具仍按原要求拒绝未声明的介质。
+
+### 消息受理失回与重开
+
+```csharp
+// requestId 在发送前由应用确定并保留；这里也可以只在当前进程 RAM 中保留。
+var requestId = Guid.NewGuid().ToString("N");
+await session.SendWithRequestAsync("合成任务", requestId, ct);
+var acceptance = await session.GetInputAcceptanceAsync(requestId, ct);
+var page = await session.ListInputAcceptancesAsync(limit: 50, cancellationToken: ct);
+```
+
+查询返回原键的 `accepted`／`unknown` 或 `receipt:null`。`accepted` 仅表示原输入受理，不表示任务完成或费用结算。HTTP／SSE 断开不触发自动重发；列表不能按“最新一条”、文本相似度或相同内容推断丢失的原请求关联。缺少唯一可信关联时保持未决。多模态使用 `SendBlocksWithRequestAsync`；旧 `SendAsync`／`SendBlocksAsync` 不暗加请求键、不改变原调用。
+
+The explicit cloud mode uses the independent authenticated journal control API and does not require a local database. Only a first confirmed grant permits execution. A lost claim response, another active owner, or an unknown outcome never authorizes automatic re-execution. Read-only persistence discovery and original message acceptance queries do not grant authority; an accepted input is not proof of completed work. Existing terminal stores remain available under the original local semantics.
+
 ## 档案自动接收与按需材料
+
+Archive 的发现、绑定与状态现在接受独立 `source-managed` 分支；`persistence` 必须给出实际 `terminal`／`cloud`、来源和代际、`localDisk:false`、可信控制与匹配的交接方式。它只声明 Archive 交接，不代替 `GetSessionPersistenceAsync` 的各域覆盖。客户端和接收器核对同绑定的模式／来源一致，拒绝新旧声明混用，不从存储事实授予权限。旧 `legacy-complete`／`unchanged` 原分支保留；旧客户端严格拒绝新分支，不静默降级。
+
+无盘宿主由可信 session factory 创建并安装绑定，先用 `GetBindingTargetAsync` 找到已有绑定，再调用 `GetBindingAsync` 和原下载／耐久 ACK。旧 `CreateBindingAsync` 请求仍表示 durable-spool 合同，在新宿主明确返回 `unsupported_capability`；本批不宣称新增的公开创建模式。terminal 模式使用实际耐久接收器，cloud 模式可只消费平台历史和云日志、无需创建本地 Archive 数据库。可选的下载副本仍必须真实耐久保存才 ACK。
+
+The Archive transport supports legacy and explicit `source-managed` responses. New hosts create bindings in the trusted session factory; discover that binding before downloading. Legacy public binding creation is unsupported on diskless hosts. Terminal and cloud modes share the original archive integrity and ACK rules; cloud mode does not require a local archive database.
 
 `ArchiveSessionHost` 组合原 `ArchiveTransferSession`、`ArchiveRecoverySession` 和 `MaterialSource`。宿主只配置可信身份、本地介质与事件游标；SDK 自动消费原 SSE、耐久接收后 ACK、处理 `material.request` 并在断线后查询原操作。
 
@@ -156,3 +197,48 @@ The offline entry points reopen the original local stores and enforce an explici
 夹具只在真实会话创建且原 binding-target、binding、archive status 核对成功后签发可信本机配置。界面依次启动档案宿主、发送合成任务、同步并读取原记录；材料处理和耐久 ACK 均由公开 SDK 完成。缓存界面保存原请求、回执和受护票据，重开只查询原意图，关闭不伪造跨运行恢复。自然过期、跨运行和供应商费用另按原验收证据归属，不以菜单点击代替。
 
 The native UI fixture composes the original public offload/archive/cache hosts. Configuration comes from the actual session binding and trusted host state, not from UI-generated identities. Archive synchronization uses the SDK's durable ACK path; cache reopening retains the original operation. The upstream model/cache peer is synthetic, so this proves protocol consumption and local persistence, not provider cache savings or production billing.
+
+## 显式托管交接与完整目录
+
+`SqliteTerminalPersistenceStore` 保留原 `terminal-persistence-v1` 的正文、双键永久回执和原
+transfer。选择托管交接时显式启用 `EnableCustodyHandoff`，提供当前 `Custody` 和所有写者
+共用的受信 `CustodyAuthority`；有关可信部署边界见 [设备记忆](device-memory.md#端侧与云端托管交接的共同权威)。
+`WindowsTerminalPersistenceHost.CreateCustodyTool()` 将新合同登记在原 `MemoryPublication`
+权限、ExecutionHost 和加密执行账本下，不借用 Shell／文件权限。未启用的原存储模式保持原行为。
+
+交接使用原 `ExecuteCustodyAsync` 消费已冻结的 `persistence-custody-handoff-v1` Request／Response。
+调用方保存原 `operationId`、`intentSha256`、五字段身份及 proof，不能在超时后重造操作。顺序为：
+
+1. 源端 `prepare` 先由共同权威冻结全域写者，再在原 SQLite FULL 事务中读取固定目录。
+2. `export-page`／`import-page` 按原目录 offset 续传，每页最多 32 项；目录包含原根、**全部**
+   永久回执、已完成及未完成 transfer、原对象及其控制材料，不受单次 begin 的 256 条增量限制。
+3. `export-object`／`import-object` 以最多 12,288 字节的连续块传输；可用更小块，按原 offset
+   与块摘要查重，完成后核整个对象摘要。页与对象保存在 SDK 加密介质，不能放在 Serve 文件系统。
+4. `verify` 完整核对目录链、对象、原根、索引和容量计量，在同一 FULL 事务安装只读目标。
+   本地 verified 并不授予 writer；必须由共同权威明确发布 `cutover` 后才能启用。
+5. cutover 失回时查询原操作。只有共同权威已发布且身份、根和 custody 匹配才激活原目标。
+   旧源保持冻结；历史查询不得解除后续交接的围栏。后继交接继续使用同一机制。
+
+原 source 的业务容量计数与预留量原样保留。C# 原 pending transfer 的 reused 预留和 Node 已
+释放 reused 预留的两种计量均按其原事实消费，不借导入提高或减少已占额度。目录和暂存副本另受
+本机 SQLite 页帽及物理磁盘限制；`MaxPages` 不等于 WAL 或文件系统可用空间保证。空间不足保持
+原库与具名操作，不清理未知对象、不回退明文或另一介质。
+
+当前合同目录 proof 的对象总字节帽仍为 1 GiB，且包含控制和 transfer 元数据，不能把它等同于
+原业务正文可用额度。原业务接近满额、加入完整目录元数据后超过此帽的交接会明确拒绝；不会删除
+回执、截短目录或放宽原容量来凑通过。这一极限容量交接限制单独保留，尚未声称覆盖所有满额域。
+
+`CopyToEncryptedAsync` 仍是原业务格式的只读备份／换钥入口；它不复制托管控制历史，也不转移
+共同 writer 权限。恢复写入或切换保管位置应使用上述完整目录交接，不将备份文件设为当前权威。
+旧 Serve 文件目录 `legacy-serve-v1` 由 Serve 的显式迁移适配器处理；本 C# 记忆存储不会将这类
+目录伪装成 `terminal-persistence-v1`。SQL／OSS 的真实共同权威验证与本机 SQLite 消费验证分列。
+
+The custody extension transfers the complete original domain, including every permanent receipt and pending
+transfer, through bounded pages and object chunks. Source freezing, target verification and writer publication
+are separate steps. SQLite uses its existing authenticated encryption and FULL transactions; Serve never stores
+the catalog locally. The target remains read-only until the shared authority publishes its original operation.
+Repeated settled PST requests expose the current original transfer without executing business work again.
+Unknown claims stay unresolved. Source reservations remain unchanged; staging is additionally bounded by the
+local media limits. A read-only rekey/backup is not a custody cutover or a writer-authority recovery mechanism.
+The current 1 GiB catalog proof cap includes control and transfer metadata. A domain whose complete catalog
+exceeds that cap is explicitly rejected; it is never truncated and its original business quota is not enlarged.

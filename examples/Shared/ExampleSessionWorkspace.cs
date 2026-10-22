@@ -29,6 +29,7 @@ internal sealed class ExampleSessionWorkspace
         "连接 SDK2 本地档案（参数：受信 JSON 路径）", "同步 SDK2 档案与原 ACK", "读取 SDK2 本地档案", "停止 SDK2 本机档案连接", "SDK2 档案状态",
         "重查并清理 SDK1 镜像临时快照",
         "打开缓存连续性配置（参数：受信 JSON 路径）", "新建逻辑缓存绑定", "使用原票据续接逻辑缓存", "查询缓存原请求", "读取缓存诊断", "显式关闭逻辑缓存", "本机缓存接入状态",
+        "读取持久化模式与恢复覆盖", "查询原消息受理（参数：requestId）", "列出原消息受理（参数：可选原游标）", "发送可查询原消息（首行requestId，其余为正文）",
     };
 
     internal async Task<string> ExecuteAsync(int action, string argument, CancellationToken cancellationToken = default)
@@ -53,6 +54,13 @@ internal sealed class ExampleSessionWorkspace
                 return "forkSessionId=" + fork.Id + "\n原会话保持连接。要使用分叉，请先断开，再在恢复会话 ID 中填入此值。";
             case 9: return (await session.SetCwdAsync(Required(argument), ct).ConfigureAwait(false)).GetRawText();
             case 10: return (await session.CompactAsync(new CompactOptions { Instructions = Empty(argument) }, ct).ConfigureAwait(false)).GetRawText();
+            case 28: return (await session.GetPersistenceAsync(ct).ConfigureAwait(false)).GetRawText();
+            case 29: return (await session.GetInputAcceptanceAsync(Required(argument), ct).ConfigureAwait(false)).GetRawText();
+            case 30: return (await session.ListInputAcceptancesAsync(Empty(argument), cancellationToken: ct).ConfigureAwait(false)).GetRawText();
+            case 31:
+                var split = argument.IndexOf('\n');
+                if (split <= 0 || split == argument.Length - 1) throw new InvalidOperationException("original_request_id_and_prompt_required");
+                return (await session.SendWithRequestAsync(argument.Substring(split + 1), argument.Substring(0, split).TrimEnd('\r'), ct).ConfigureAwait(false)).GetRawText();
             default:
                 if (action >= 11 && action <= 27 && storage != null) return await storage(action, argument, ct).ConfigureAwait(false);
                 throw new InvalidOperationException("select_workspace_action");

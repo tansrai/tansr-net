@@ -1,5 +1,34 @@
 # 原生示例的统一工作台
 
+## 显式选择 terminal／cloud
+
+三个原生示例的设备配置新增 `storageMode`。`"terminal"` 保留原本地 `journal`、可选加密与 publication；旧配置省略此字段继续使用原模式。`"cloud"` 必须与 Serve 的持久化发现一致，且具备可信控制与云执行日志覆盖。云配置禁止同时出现 `journal`、`encryption` 或 `publication`，不会创建本地 SQLite、DPAPI 密钥或内存 publication 数据库，也不会在请求失败时落盘兜底。设备工作区继续用于用户批准的文件／Shell 工具，不属于 Serve 持久化。
+
+云配置示例（所有身份均来自受信宿主，替换示例值）：
+
+```json
+{
+  "format": "tansr-example-terminal-device-v1",
+  "enablePreview": true,
+  "storageMode": "cloud",
+  "serveUrl": "https://serve.example.com/",
+  "sessionId": "original-session",
+  "trustedScopeFile": "C:\\TansrConfig\\scope.json",
+  "controllerTokenEnvironment": "TANSR_CONTROLLER_TOKEN",
+  "deviceTokenEnvironment": "TANSR_DEVICE_TOKEN",
+  "executorId": "windows-device",
+  "bindingRequestId": "original-binding-request",
+  "workspace": { "path": "C:\\TansrWorkspace", "id": "workspace", "revision": "1" },
+  "allowedTools": ["Read", "Write"]
+}
+```
+
+Console `/device-start`、WPF 和 WinForms 的“连接本机设备工具”共用此装配。应用草稿与界面呈现 JSON 仍是原示例的可选应用行为，不作为云端档案或授权事实；本配置不宣称用户终端禁止一切文件。云端自动记忆由 Serve 来源处理，不在终端注册 publication 工具。
+
+共享工作台新增动作 28（持久化发现）、29（按原 requestId 查询消息受理）、30（有界列举受理事实）、31（首行 requestId，其余正文，显式发送可查询消息）。Console 使用 `/workspace <编号> [参数]`；GUI 动作列表共用同一实现。发送失回后使用 29 查询原键，不自动执行 31，不从列表猜测原请求。`accepted` 不等于执行完成；`unknown` 保留未知。
+
+Cloud mode keeps the original device executor, approval and output pipeline while replacing only its journal with the independent cloud adapter. It never creates a fallback local database. The shared workspace exposes persistence discovery and original-input lookup for all three demos; neither a lookup nor a replayed claim grants fresh execution authority.
+
 WPF、WinForms net48 和 Console 使用相同的 `ExampleSessionWorkspace`、`ExampleSessionOptions` 及公开 SDK。工作台提供能力发现、任务/待办/用量、分页历史、快照创建/恢复/删除/导入/导出/分叉和受控 cwd。分叉返回新 ID，原会话继续保持；不自动迁移到分叉，不重放工具。导出只创建新文件，不覆盖已有档案。
 
 三个入口都读取短期票据 `TANSR_SESSION_TOKEN`、`TANSR_SERVE_URL`，本机开发 HTTP 必须显式 `TANSR_ALLOW_HTTP_LOOPBACK=1`。票据不写草稿或日志。本地 Serve 继续使用 `ExampleConnection` → `LocalServeHost` 的 PID/私有口令所有权检查，不另外启动 Node 客户端代理。

@@ -11,6 +11,31 @@ namespace Tansr.Sdk.Windows.Tests.Hosting;
 
 public sealed class WindowsTerminalPersistenceHostTests
 {
+    [Fact]
+    public async Task CustodyReservedToolRequiresExplicitProfileAndOriginalMemoryAuthority()
+    {
+        using var fixture = new Fixture(); var store = new Store(); var host = new WindowsTerminalPersistenceHost(store, true);
+        Assert.Throws<ExecutionRejectedException>(() => host.CreateCustodyTool()); store.CustodyHandoffEnabled = true;
+        Assert.NotNull(host.CreateCustodyTool());
+        var request = CustodyQuery(store.Identity); var operation = Operation(request, custody: true, definitionDigest: host.CreateCustodyTool().DefinitionDigest);
+        store.Response = Json(new { contract = "persistence-custody-handoff-v1", identity = store.Identity, operationId = "move", intentSha256 = new string('a', 64), action = "query", preparing = true, ticket = (object?)null });
+        var response = await Direct(host, request, operation, fixture.Workspace, _ => Task.CompletedTask, true);
+        Assert.Equal("ok", response.GetProperty("status").GetString()); Assert.Equal(1, store.CustodyCalls); Assert.Equal(0, store.Calls);
+        await Assert.ThrowsAsync<ExecutionRejectedException>(() => Direct(host, request, Operation(request, "foreign", true, host.CreateCustodyTool().DefinitionDigest), fixture.Workspace, _ => Task.CompletedTask, true));
+        Assert.Equal(1, store.CustodyCalls);
+    }
+
+    [Fact]
+    public async Task CustodyPostCommitMismatchRemainsUnknownAndNeverProducesToolSuccess()
+    {
+        using var fixture = new Fixture(); var store = new Store { CustodyHandoffEnabled = true };
+        var request = CustodyQuery(store.Identity); var host = new WindowsTerminalPersistenceHost(store, true);
+        store.Response = Json(new { contract = "persistence-custody-handoff-v1", identity = store.Identity, operationId = "different", intentSha256 = new string('a', 64), action = "query", preparing = false, ticket = (object?)null });
+        await Assert.ThrowsAsync<IOException>(() => Direct(host, request, Operation(request, custody: true, definitionDigest: host.CreateCustodyTool().DefinitionDigest), fixture.Workspace, _ => Task.CompletedTask, true));
+        Assert.Equal(1, store.CustodyCalls);
+    }
+
+    private static JsonElement CustodyQuery(JsonElement identity) => Json(new { contract = "persistence-custody-handoff-v1", identity, operationId = "move", intentSha256 = new string('a', 64), action = "query" });
     [Theory]
     [InlineData("body")]
     [InlineData("body-page")]
@@ -97,7 +122,7 @@ public sealed class WindowsTerminalPersistenceHostTests
 
     private static JsonElement Query() => Json(new { contract = "terminal-persistence-v1", sourceId = "source", sourceGeneration = "1", domainKey = "domain", action = "query", transferId = "original", intentSha256 = new string('c', 64) });
     private static JsonElement Json(object value) => JsonSerializer.SerializeToElement(value);
-    private static JsonElement Operation(JsonElement request, string user = "user")
+    private static JsonElement Operation(JsonElement request, string user = "user", bool custody = false, string? definitionDigest = null)
     {
         var value = Json(new
         {
@@ -107,23 +132,25 @@ public sealed class WindowsTerminalPersistenceHostTests
             scope = new { applicationScopeId = "app", endUserId = user, authorizationRevision = "1" },
             binding = new { bindingId = "binding", revision = "1", target = new { executorId = "executor", connectionId = "connection", connectionRevision = "1", workspaceId = "workspace", workspaceRevision = "1" } },
             toolName = "MemoryPublication",
-            request = new { operation = "tool.invoke", args = new { name = "TansrTerminalPersistenceV1", definitionDigest = "33029a264edf81f3fda2a13fc382403d0cd7ffefa1f38088bb9366f387a13587", argsJson = WireJson.CanonicalString(request) } },
+            request = new { operation = "tool.invoke", args = new { name = custody ? "TansrPersistenceCustodyHandoffV1" : "TansrTerminalPersistenceV1", definitionDigest = definitionDigest ?? (custody ? "3229dd48076f9b34c8072d769a3cd278f8e092fd98efc280e7ac5b35945f441a" : "33029a264edf81f3fda2a13fc382403d0cd7ffefa1f38088bb9366f387a13587"), argsJson = WireJson.CanonicalString(request) } },
             expiresAt = "2099-01-01T00:00:00.000Z"
         });
         var fields = value.EnumerateObject().ToDictionary(x => x.Name, x => x.Value.Clone()); fields["digest"] = Json(WireJson.DomainDigest("tansr.sdk2.execution.v1", WireJson.EncodeControl(value, 1048576))); return Json(fields);
     }
-    private static Task<JsonElement> Direct(WindowsTerminalPersistenceHost host, JsonElement request, JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard)
+    private static Task<JsonElement> Direct(WindowsTerminalPersistenceHost host, JsonElement request, JsonElement operation, WindowsWorkspace workspace, Func<CancellationToken, Task> guard, bool custody = false)
     {
         Func<WindowsProcessRequest, CancellationToken, Task<WindowsProcessResult>> noProcess = (_, _) => throw new InvalidOperationException("No process authority");
         var context = Activator.CreateInstance(typeof(WindowsBusinessToolContext), BindingFlags.Instance | BindingFlags.NonPublic, null, [operation, workspace, guard, noProcess, false], null)!;
-        return (Task<JsonElement>)typeof(WindowsTerminalPersistenceHost).GetMethod("InvokeAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(host, [request, context, CancellationToken.None])!;
+        return (Task<JsonElement>)typeof(WindowsTerminalPersistenceHost).GetMethod(custody ? "InvokeCustodyAsync" : "InvokeAsync", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(host, [request, context, CancellationToken.None])!;
     }
-    private sealed class Store : ITerminalPersistenceStore
+    private sealed class Store : ITerminalPersistenceCustodyStore
     {
-        internal bool Encrypted = true; internal int Calls, Closes; internal JsonElement Response;
+        internal bool Encrypted = true; internal int Calls, Closes, CustodyCalls; internal JsonElement Response;
+        public bool CustodyHandoffEnabled { get; set; }
         public bool AtomicDurablePersistence => true; public bool EncryptedState => Encrypted;
         public JsonElement Identity => Json(new { applicationScopeId = "app", endUserId = "user", sourceId = "source", sourceGeneration = "1", domainKey = "domain" });
         public Task<JsonElement> ExecuteAsync(JsonElement request, string ownerCanonical, CancellationToken ct = default) { Calls++; return Task.FromResult(Response); }
+        public Task<JsonElement> ExecuteCustodyAsync(JsonElement request, string ownerCanonical, CancellationToken ct = default) { CustodyCalls++; return Task.FromResult(Response); }
         public Task CloseAsync(CancellationToken ct = default) { Closes++; return Task.CompletedTask; }
     }
     private sealed class Fixture : IDisposable

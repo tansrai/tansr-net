@@ -4,6 +4,7 @@ namespace Tansr.Sdk.Protocol;
 public static class WireContract
 {
     public const string Protocol = "sdk2-ext-v1";
-    public const string SchemaSha256 = "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605";
+    public const string SchemaSha256 = "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f";
+    /// <summary>原字节与存储互操作的基线。后续会签增量按 contract/manifest.json 的逐文件 sourceRevision 锁定。</summary>
     public const string SourceRevision = "027de7e2d9b647374b7fe94cb0e4a7429a9195e2";
 }

@@ -1,5 +1,6 @@
 /** Staged package-internal SDK2 transport validation; no kernel, filesystem or authority. */
 import { SDK2_LIMIT_RANGES } from './wire-limits-generated.js';
+import { validateNamed } from './wire-codec.js';
 
 export const SDK2_EVENT_JSON_BYTES = 262144;
 export const SDK2_EVENT_SSE_BYTES = 262317;
@@ -110,9 +111,13 @@ function artifact(value: unknown): ObjectValue {
 }
 function archiveStatus(p: ObjectValue): void {
   fields(p, ['protocol', 'bindingId', 'revision', 'generations', 'sourceId', 'sourceGeneration', 'publishedThroughSequence',
-    'acknowledgedCoverage', 'releasableThroughSequence', 'pendingBytes', 'pendingRecords', 'sessionPersistence', 'state']);
+    'acknowledgedCoverage', 'releasableThroughSequence', 'pendingBytes', 'pendingRecords', 'sessionPersistence', 'state'],
+  p.sessionPersistence === 'source-managed' ? ['persistence'] : []);
   seq(p.revision); generations(p.generations); id(p.sourceId); id(p.sourceGeneration); choice(p.state, STATES);
-  if (p.sessionPersistence !== 'unchanged') streamFail(); integer(p.pendingBytes, 0, 67108864); integer(p.pendingRecords, 0, 4096);
+  if (p.sessionPersistence === 'source-managed') {
+    persistence(p.persistence, p.sourceId, p.sourceGeneration);
+  } else if (p.sessionPersistence !== 'unchanged') streamFail();
+  integer(p.pendingBytes, 0, 67108864); integer(p.pendingRecords, 0, 4096);
   const published = p.publishedThroughSequence === null ? null : seq(p.publishedThroughSequence);
   const released = p.releasableThroughSequence === null ? null : seq(p.releasableThroughSequence);
   if (published === 0n || released === 0n) streamFail();
@@ -120,6 +125,11 @@ function archiveStatus(p: ObjectValue): void {
     const ack = coverage(p.acknowledgedCoverage), last = seq(ack.throughSequence);
     if (published === null || last > published || (released !== null && released > last)) streamFail();
   } else if (released !== null) streamFail();
+}
+function persistence(value: unknown, sourceId: unknown, sourceGeneration?: unknown): void {
+  try { validateNamed('ArchiveSourcePersistence', value); } catch { streamFail(); }
+  const fact = object(value);
+  if (fact.sourceId !== sourceId || sourceGeneration !== undefined && fact.sourceGeneration !== sourceGeneration) streamFail('context_mismatch');
 }
 function materialRequest(p: ObjectValue): void {
   fields(p, ['protocol', 'bindingId', 'materialRequestId', 'target', 'sourceId', 'sourceGeneration', 'requestedRecords', 'purpose',
@@ -159,12 +169,13 @@ function dateTime(value: unknown): number {
 }
 function bindingStatus(p: ObjectValue, context: Sdk2EventContext): void {
   fields(p, ['protocol', 'bindingId', 'scope', 'target', 'revision', 'state', 'sourceId', 'acceptedCapabilities', 'rejectedCapabilities',
-    'availability', 'operationEpoch', 'limits', 'archiveAckFormat']);
+    'availability', 'operationEpoch', 'limits', 'archiveAckFormat'], p.availability === 'source-managed' ? ['persistence'] : []);
   seq(p.revision); choice(p.state, STATES); id(p.sourceId); target(p.target);
   const scope = fields(p.scope, ['applicationScopeId', 'endUserId', 'authorizationRevision']);
   id(scope.applicationScopeId); legacy(scope.endUserId); seq(scope.authorizationRevision);
   if (scope.applicationScopeId !== context.applicationScopeId || scope.endUserId !== context.endUserId) streamFail('context_mismatch');
-  if (p.availability !== 'legacy-complete') streamFail();
+  if (p.availability === 'source-managed') persistence(p.persistence, p.sourceId);
+  else if (p.availability !== 'legacy-complete') streamFail();
   const accepted = array(p.acceptedCapabilities, 1, 2).map(value => choice(value, CAPS));
   if (new Set(accepted).size !== accepted.length) streamFail(); const rejected = new Set<string>();
   for (const item of array(p.rejectedCapabilities, 0, 2)) {

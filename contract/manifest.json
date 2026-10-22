@@ -2,40 +2,37 @@
   "format": "tansr-net-contract-lock-v1",
   "protocol": "sdk2-ext-v1",
   "sourceRepository": "tansr-cli",
-  "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
+  "sourceRevision": "233387f288e3632944a77b7078aadc95c6a31ef9",
   "terminalServices": "separately-pinned-preview",
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 7,
-    "schemaHash": "b60e77ffcbf08d985a993dbdbd4cf610f12f7c7e70f090aee5ff8d523f70bb57",
+    "revision": 14,
+    "schemaHash": "b792dc53f45ca2b8fdc8438bd5b50d6d6c8a3eb08ac29920215d75a470349faf",
     "sourceBranch": "main",
-    "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "Unified /api route table, headers and envelopes (UAPI-01). Revision 7 pinned from tansr-cli main 64df76b2 (U7-OPS: approval.credential.submit, :ticketId placeholder, etagPath / expectedRevision / requestIdPath facts, archive-sync-v1 and cache family fingerprints)."
+    "note": "PST-SERVE-01 approved optional custody profile; source-managed contract bytes are locked to the merged tansr-cli main commit below; legacy SDK2 wire fixtures retain their explicit original source revisions.",
+    "sourceWorktreeSnapshot": false
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 85134,
-      "sha256": "f6255bc868b4de5cb2af759a55069ab4651027d4125ef86d37f14a91d3307288"
+      "bytes": 95048,
+      "sha256": "bea3853f323ffad3048eaec70271bc5d337d1f6a47cb690a2be624c7b9058b59"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 86449,
-      "sha256": "fd07962916f7662ecc69c3f8c8d2b79aa5b99f542cbfd310a50f56777e51f117"
+      "bytes": 88274,
+      "sha256": "fa72c7f383489f8261aae52abce71818e5a6e1989a43339f25e6f7fba971fdf6"
     },
     {
       "snapshot": "contract/unified-v1.golden.json",
       "source": "doc/rfc/unified-v1.golden.json",
-      "sourceRevision": "64df76b24bfd3bc62850f4b04093553708b7708c",
-      "bytes": 100944,
-      "sha256": "42531a3937563d8c0d719c5970629b25bbabf3a8ea8436550db5bfddf9d206fd"
+      "bytes": 109466,
+      "sha256": "f5ad381edd569847b03d83f3ff6e8b5a8e5cdf99d2f0777b658b8fa02f8b162d"
     },
     {
       "snapshot": "contract/canonical-cross-vectors.json",
@@ -47,20 +44,23 @@
     {
       "snapshot": "contract/sdk2-ext-v1.schema.json",
       "source": "doc/rfc/sdk2-ext-v1.schema.json",
-      "bytes": 108205,
-      "sha256": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605"
+      "bytes": 124485,
+      "sha256": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
+      "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a"
     },
     {
       "snapshot": "contract/sdk2-wire-v1.json",
       "source": "scripts/sdk2/fixtures/sdk2-wire-v1.json",
       "bytes": 4848,
-      "sha256": "d911959c91182834af396e09c523a14f223a65871588561dff5faf1d0ba27930"
+      "sha256": "d911959c91182834af396e09c523a14f223a65871588561dff5faf1d0ba27930",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
     },
     {
       "snapshot": "contract/reference/wire-codec.ts",
       "source": "packages/api-client/src/sdk2/wire-codec.ts",
       "bytes": 10889,
-      "sha256": "315d0fdea198d454c5f25ce1df06f209f740abb459c5c02eacd3bd51fbe4f9f7"
+      "sha256": "315d0fdea198d454c5f25ce1df06f209f740abb459c5c02eacd3bd51fbe4f9f7",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
     },
     {
       "source": "scripts/test/sdk2-extension-schema.test.mjs",
@@ -72,6 +72,24 @@
       "snapshot": "contract/schema-vectors.json",
       "sha256": "7515024bb86552c36a5f466269043cff54bf8ded7378f11c8864468571d50c01",
       "bytes": 41056
+    },
+    {
+      "snapshot": "contract/persistence-custody-handoff-v1.schema.json",
+      "source": "doc/rfc/persistence-custody-handoff-v1.schema.json",
+      "bytes": 61406,
+      "sha256": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9"
+    },
+    {
+      "snapshot": "contract/persistence-custody-handoff-v1.golden.json",
+      "source": "doc/rfc/persistence-custody-handoff-v1.golden.json",
+      "bytes": 88386,
+      "sha256": "c9319eb931970c140d88aef6e453c89bf94d65d13f8a1d0d5b51ac731d4333ac"
+    },
+    {
+      "snapshot": "contract/reference/persistence-custody.ts.txt",
+      "source": "packages/protocol/src/persistence-custody.ts",
+      "bytes": 2358,
+      "sha256": "b9cb8aecf53895af1234ed07916ffb0e899ddacfb70d1f84f062a846ff6d9669"
     }
   ]
 }

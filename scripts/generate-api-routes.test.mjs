@@ -63,10 +63,10 @@ const covered = {
 test('the pristine repo artifact validates and the generated route table is current', () => {
   const validated = validate(artifact());
   assert.equal(validated.status, 0, validated.stderr);
-  assert.match(validated.stdout, /^api-routes: valid \(81 operations, revision 7, sha256 [0-9a-f]{64}\)/);
+  assert.match(validated.stdout, /^api-routes: valid \(89 operations, revision 12, sha256 [0-9a-f]{64}\)/);
   const checked = run(['--check']);
   assert.equal(checked.status, 0, checked.stderr);
-  assert.match(checked.stdout, /^api-routes: ok \(81 operations, revision 7, /);
+  assert.match(checked.stdout, /^api-routes: ok \(89 operations, revision 12, /);
 });
 
 test('--validate never touches the lock or the generated file', () => {

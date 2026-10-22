@@ -56,6 +56,8 @@ internal static class ArchiveReceiverValidation
     internal static ArchiveBatch Prepare(JsonElement identity, JsonElement limits, JsonElement? head, ArchiveReceiveInput input, ISet<string>? deletedRecordIds = null)
     {
         var binding = Copy(input.Binding, "BindingView"); var status = Copy(input.Status, "ArchiveStatus");
+        try { ArchiveJson.SamePersistence(binding, status); }
+        catch (Tansr.Sdk.Client.TansrProtocolException) { throw new StorageException("identity_mismatch"); }
         var page = Copy(input.Page, "ArchivePage"); var request = Copy(input.Request, "RequestIdentity");
         var generations = identity.GetProperty("target").GetProperty("generations");
         Need(new[] { binding, status, page }.All(v => String(v, "bindingId") == String(identity, "bindingId")), "identity_mismatch");

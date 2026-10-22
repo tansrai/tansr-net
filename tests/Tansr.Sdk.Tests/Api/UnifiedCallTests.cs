@@ -17,6 +17,19 @@ namespace Tansr.Sdk.Tests.Api;
 /// same way because what is under test is the SDK's handling of the answer, not the facade's enforcement point.</summary>
 public sealed class UnifiedCallTests
 {
+    [Theory]
+    [InlineData("execution.journal.claim")]
+    [InlineData("execution.journal.complete")]
+    public async Task CloudJournalNeverUsesGenericCachedWriteReplay(string name)
+    {
+        using var handler = new Handler(_ => throw new InvalidOperationException("must not send"));
+        using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
+        var operation = ApiRoutes.Find(name)!; Assert.False(operation.AcceptsIdempotencyKey);
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => client.CallAsync(operation,
+            new ApiCallOptions { Id = "pc", IdempotencyKey = "generic-replay", Body = Element("{}") }));
+        Assert.Equal("invalid_idempotency_key", error.Code); Assert.Empty(handler.Requests);
+    }
+
     private const string TraceId = "5f2b0e3c9a7d4b1e8c6f0a2d3e4b5c6d";
 
     /// <summary>facade.ts / client.ts: <c>tansr-closure-id</c> applies to session-scoped write operations only.</summary>
@@ -100,7 +113,8 @@ public sealed class UnifiedCallTests
             int before = handler.Requests.Count;
             // The declared closure id travels only where the facade accepts it (session-scoped writes); elsewhere the SDK must not send it.
             var options = Ids(operation, o => { if (ClosureIdApplies(operation)) { o.ClosureId = declared.ClosureId; guarded++; } });
-            if (operation.Kind == "write") { options.Body = Element("{\"requestId\":\"r-1\"}"); options.IdempotencyKey = "r-1"; }
+            if (operation.Kind == "write") options.Body = Element("{\"requestId\":\"r-1\"}");
+            if (operation.AcceptsIdempotencyKey) options.IdempotencyKey = "r-1";
             if (declared.IsEnabled(operation))
             {
                 var result = await client.CallAsync(operation, options);
@@ -378,7 +392,7 @@ public sealed class UnifiedCallTests
         Assert.Empty(handler.Requests);
         var list = await client.CallAsync(ApiRoutes.SessionList, new ApiCallOptions { Query = [new("limit", "5")] });
         Assert.Equal("/api/sessions", handler.Requests.Single().RequestUri!.AbsolutePath); Assert.Equal("?limit=5", handler.Requests.Single().RequestUri!.Query);
-        Assert.Equal(200, list.Status); Assert.Equal(7, list.Meta.ManifestRevision);
+        Assert.Equal(200, list.Status); Assert.Equal(ApiRoutes.ManifestRevision, list.Meta.ManifestRevision);
     }
 
     [Fact]

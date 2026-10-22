@@ -7,6 +7,38 @@ namespace Tansr.Sdk.Tests.Archive;
 
 public sealed class ArchiveTransferSessionTests
 {
+    [Theory]
+    [InlineData("terminal", "terminal-durable-ack")]
+    [InlineData("cloud", "cloud-immutable-publish")]
+    public async Task SourceManagedArchiveKeepsDurableReceiveAndOriginalAcknowledgement(string mode, string handoff)
+    {
+        var data = new ArchiveFlowFixture(); var store = new ArchiveFlowFixture.Store(data); var client = new ArchiveFlowFixture.Client(data);
+        var persistence = ArchiveFlowFixture.Element(new { contract = "serve-persistence-v1", mode, handoff, sourceId = "source", sourceGeneration = "source-generation", localDisk = false, trustedControl = true });
+        client.AlterBinding = value => ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(value, "availability", "source-managed"), "persistence", persistence);
+        client.AlterStatus = value => ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(value, "sessionPersistence", "source-managed"), "persistence", persistence);
+        store.OnReceive = () => Assert.DoesNotContain("ack", client.Calls);
+        var session = new ArchiveTransferSession(client, store, data.Identity, () => data.Scope, _ => data.RequestIdentity);
+        var result = await session.PullAsync(); Assert.Equal(1, result.ArchivedRecords); Assert.True(result.Complete); Assert.Single(result.Receipts); Assert.Null(store.Pending);
+        Assert.Equal(WireJson.CanonicalString(data.Ack(data.RequestIdentity)), WireJson.CanonicalString(client.LastAck!.Value));
+        // 与 Windows SQLite、云副本接收器相同的真实准备器；不能只验证 IArchiveStore 测试替身。
+        var input = new ArchiveReceiveInput { Binding = client.AlterBinding(data.Binding), Status = client.AlterStatus(data.Status), Page = data.Page, Request = data.RequestIdentity,
+            Artifacts = new[] { new ArchiveArtifact("artifact", data.Body) } };
+        var batch = Tansr.Sdk.Archive.Replication.ArchiveReceiverValidation.Prepare(data.Identity, new ArchiveRecoveryFixture().Limits, null, input);
+        Assert.Equal(WireJson.CanonicalString(data.Ack(data.RequestIdentity)), WireJson.CanonicalString(batch.Ack));
+        Assert.Equal(data.Body, batch.Bodies["artifact"]);
+        input.Status = data.Status;
+        Assert.Equal("identity_mismatch", Assert.Throws<StorageException>(() => Tansr.Sdk.Archive.Replication.ArchiveReceiverValidation.Prepare(data.Identity, new ArchiveRecoveryFixture().Limits, null, input)).Code);
+    }
+    [Fact]
+    public async Task MixedLegacyAndSourceManagedStatusCannotReachDurableReceiver()
+    {
+        var data = new ArchiveFlowFixture(); var store = new ArchiveFlowFixture.Store(data); var client = new ArchiveFlowFixture.Client(data);
+        var persistence = ArchiveFlowFixture.Element(new { contract = "serve-persistence-v1", mode = "cloud", handoff = "cloud-immutable-publish", sourceId = "source", sourceGeneration = "source-generation", localDisk = false, trustedControl = true });
+        client.AlterBinding = value => ArchiveFlowFixture.Set(ArchiveFlowFixture.Set(value, "availability", "source-managed"), "persistence", persistence);
+        var session = new ArchiveTransferSession(client, store, data.Identity, () => data.Scope, _ => data.RequestIdentity);
+        Assert.Equal("context_changed", (await Assert.ThrowsAsync<TansrProtocolException>(() => session.PullAsync())).Code);
+        Assert.Equal(0, store.Receives); Assert.DoesNotContain("ack", client.Calls);
+    }
     [Fact]
     public async Task RevisionAdvancedDuringDownloadIsRefreshedBeforeOriginalDurableWrite()
     {

@@ -1,5 +1,13 @@
 # Serve 源码 HTTP/SSE 联验
 
+## 独立云 journal 消费
+
+`ServeCloudJournalTests` 单独消费本地已启动的原 Serve 测试宿主。设置 `TANSR_CLOUD_JOURNAL_URL`、`TANSR_CLOUD_JOURNAL_CONTROL_URL`、`TANSR_CLOUD_JOURNAL_TOKEN` 后，只运行该类过滤器。控制端 `/start` 和 `/lose-next-commit` 仅属于合成验收夹具，不是产品 API。
+
+用例走原 `DeviceSessionHost` 的初始化、登记、绑定、轮询和回执链，使用真实 HTTP 与 `CloudExecutorJournal`。先核首次持久认领后工具仅执行一次、原桥完成；再制造第二笔认领提交失回，核对没有第二次副作用、查询保持 pending、不可重新认领。没有本地 journal/记忆数据库。SQL 使用明确登记的受控连接夹具，该证据不冒充生产 MySQL、OSS 或完整故障恢复验收。
+
+## 既有集成入口
+
 本节所述原工装的回环监听导入指定的 CLI 源码；下文独立封存包工装不消费活动源码。SDK1 传输回归采用原 `FakeAgentFactory` 的受控子类；高阶链通过公开 Serve 工厂，使用真实平台装配、kernel 查询循环、设备执行、档案介质和 HTTP/SSE，仅把上游平台与模型替换为确定性合成响应。所有运行零真实平台凭据、零付费采样。
 
 先由统一工程门编译 Release，再单独运行：

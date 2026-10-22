@@ -23,6 +23,9 @@ public sealed partial class SqliteTerminalPersistenceStore
         internal JsonElement Request;
         internal JsonElement? Base, Result, Rejection;
         internal long RawRemaining, MetadataRemaining = MetadataReserve, ObjectsRemaining, EntriesRemaining, AccountedBytes;
+        // Original C# media retained reused reservations until finish; portable Node tickets release
+        // them immediately. Import preserves the source's exact counters and original public facts.
+        internal bool ReleasedReuseReservations;
         internal readonly List<ObjectRef> Accepted = new();
     }
     private sealed class ObjectRef
@@ -96,12 +99,13 @@ public sealed partial class SqliteTerminalPersistenceStore
     {
         _parent.Check(); _file.Check();
         long version = Number("PRAGMA data_version"); _dataVersion ??= version; Require(_dataVersion == version, "identity_mismatch");
-        Require(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == Schema.Length);
-        using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND length(sql)<=4096 LIMIT 6")) using (var reader = command.ExecuteReader())
+        var expectedSchema = _options.EnableCustodyHandoff ? Schema.Concat(CustodySchema).ToArray() : Schema;
+        Require(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == expectedSchema.Length);
+        using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND length(sql)<=4096")) using (var reader = command.ExecuteReader())
         {
             var found = new HashSet<string>(StringComparer.Ordinal);
-            while (reader.Read()) { Require(!reader.IsDBNull(0) && Schema.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); }
-            Require(found.Count == Schema.Length);
+            while (reader.Read()) { Require(!reader.IsDBNull(0) && expectedSchema.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); }
+            Require(found.Count == expectedSchema.Length);
         }
         Require(Number("SELECT count(*) FROM metadata") == 1 && (string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=262144") == _metadata);
         Require(Number("SELECT count(*) FROM encryption") == 1);
@@ -161,6 +165,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         Nullable(w, "base", row.Base); Nullable(w, "result", row.Result); Nullable(w, "rejection", row.Rejection);
         w.WriteNumber("rawRemaining", row.RawRemaining); w.WriteNumber("metadataRemaining", row.MetadataRemaining);
         w.WriteNumber("objectsRemaining", row.ObjectsRemaining); w.WriteNumber("entriesRemaining", row.EntriesRemaining); w.WriteNumber("accountedBytes", row.AccountedBytes);
+        if (row.ReleasedReuseReservations) w.WriteBoolean("releasedReuseReservations", true);
         w.WriteStartArray("accepted"); foreach (var reference in row.Accepted) RefJson(reference).WriteTo(w); w.WriteEndArray();
     });
     private void SaveTicket(Ticket row)
@@ -176,7 +181,10 @@ public sealed partial class SqliteTerminalPersistenceStore
         string status = reader.GetString(0); Require(status == "staging" || status == "committed" || status == "rejected");
         Require(!reader.IsDBNull(1)); var encoded = (byte[])reader.GetValue(1); Require(encoded.Length <= MetadataReserve + 28);
         var value = Decode("transfer\0" + id + "\0" + status, encoded);
-        Fields(value, "owner", "request", "status", "base", "result", "rejection", "rawRemaining", "metadataRemaining", "objectsRemaining", "entriesRemaining", "accountedBytes", "accepted");
+        bool released = value.TryGetProperty("releasedReuseReservations", out var releasedValue);
+        Require(!released || releasedValue.ValueKind == JsonValueKind.True);
+        Fields(value, new[] { "owner", "request", "status", "base", "result", "rejection", "rawRemaining", "metadataRemaining", "objectsRemaining", "entriesRemaining", "accountedBytes", "accepted" }
+            .Concat(released ? new[] { "releasedReuseReservations" } : Array.Empty<string>()).ToArray());
         var row = new Ticket
         {
             Id = id,
@@ -192,6 +200,7 @@ public sealed partial class SqliteTerminalPersistenceStore
             EntriesRemaining = value.GetProperty("entriesRemaining").GetInt64(),
             AccountedBytes = value.GetProperty("accountedBytes").GetInt64()
         };
+        row.ReleasedReuseReservations = released;
         TerminalPersistenceContract.Validate("Request", row.Request); Require(S(row.Request, "action") == "begin" && S(row.Request, "transferId") == id && row.Status == status);
         var owner = Owner(row.Owner); Require(S(owner.GetProperty("scope"), "applicationScopeId") == S(_options.Identity, "applicationScopeId") && S(owner.GetProperty("scope"), "endUserId") == S(_options.Identity, "endUserId"));
         Require(new[] { "sourceId", "sourceGeneration", "domainKey" }.All(name => S(row.Request, name) == S(_options.Identity, name)));

@@ -290,7 +290,8 @@ public sealed class UnifiedGoldenTests
             Assert.Equal(expected["etagPath"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.EtagPath);
             Assert.Equal(expected["expectedRevision"]?["path"]?.AsArray().Select(n => n!.GetValue<string>()).ToArray(), actual.ExpectedRevisionPath);
             Assert.Equal(expected["expectedRevision"]?["kind"]?.GetValue<string>(), actual.ExpectedRevisionKind);
-            Assert.Equal(actual.ExpectedRevisionPath != null, actual.AcceptsIfMatch); Assert.Equal(actual.Kind == "write", actual.AcceptsIdempotencyKey);
+            Assert.Equal(actual.ExpectedRevisionPath != null, actual.AcceptsIfMatch);
+            Assert.Equal(actual.Kind == "write" && actual.Name != "execution.journal.claim" && actual.Name != "execution.journal.complete", actual.AcceptsIdempotencyKey);
         }
         var families = manifest["families"]!.AsArray();
         foreach (var family in families)
@@ -302,7 +303,7 @@ public sealed class UnifiedGoldenTests
         var schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json")));
         var fenced = schema.RootElement.GetProperty("definitions").GetProperty("CapabilityClosure").GetProperty("properties").GetProperty("operations").GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray();
         Assert.Equal(fenced, UnifiedCapabilityClosure.Operations.Select(o => o.Name).ToArray());
-        Assert.Equal(77, fenced.Length);
+        Assert.Equal(85, fenced.Length);
     }
 
     /// <summary>Vectors the runtime does not replay, each with its status. Manifest negatives marked <c>generator-validated</c> have
@@ -359,9 +360,9 @@ public sealed class UnifiedGoldenTests
             if (status == GeneratorValidated) { Assert.True(ManifestNegative(vector), name); generatorValidated++; }
             else notConsumed++;
         }
-        // 165 = 141 replayed (7 definitions + the repo artifact) + 12 generator-validated + 12 explicitly not consumed.
-        Assert.Equal(165, total); Assert.Equal(total, consumed + generatorValidated + notConsumed);
-        Assert.Equal(141, consumed); Assert.Equal(12, generatorValidated); Assert.Equal(12, notConsumed);
+        // 166 = 142 replayed (including the upstream branch-summary closure) + 12 generator-validated + 12 explicitly not consumed.
+        Assert.Equal(166, total); Assert.Equal(total, consumed + generatorValidated + notConsumed);
+        Assert.Equal(142, consumed); Assert.Equal(12, generatorValidated); Assert.Equal(12, notConsumed);
         Assert.Equal(NotConsumed.Count, generatorValidated + notConsumed);
         foreach (var entry in NotConsumed) Assert.Equal(entry.Key.Substring(0, entry.Key.IndexOf('/')), Vector(entry.Key.Substring(entry.Key.IndexOf('/') + 1)).GetProperty("definition").GetString());
     }
