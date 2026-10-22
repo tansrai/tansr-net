@@ -2,40 +2,37 @@
   "format": "tansr-net-contract-lock-v1",
   "protocol": "sdk2-ext-v1",
   "sourceRepository": "tansr-cli",
-  "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2",
+  "sourceRevision": "233387f288e3632944a77b7078aadc95c6a31ef9",
   "terminalServices": "separately-pinned-preview",
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 13,
-    "schemaHash": "35fb881d52c49e6b5123ced2a6ae74e128c10de24b1dfa53f7bf03fec2e83d38",
+    "revision": 14,
+    "schemaHash": "b792dc53f45ca2b8fdc8438bd5b50d6d6c8a3eb08ac29920215d75a470349faf",
     "sourceBranch": "main",
-    "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "PST-SERVE-01 approved dual-mode persistence, cloud journal and source-managed Archive responses pinned to exact upstream Git blobs; original byte/storage baseline retained per file."
+    "note": "PST-SERVE-01 approved optional custody profile; source-managed contract bytes are locked to the merged tansr-cli main commit below; legacy SDK2 wire fixtures retain their explicit original source revisions.",
+    "sourceWorktreeSnapshot": false
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
-      "bytes": 91198,
-      "sha256": "66d59cff765b99d24580b884193331e2d5b70c9b6e7ff07646dfa9591b3e6aca",
-      "sourceRevision": "2fe98d9a3f09a671f0eedeac2ab6e2013777f00a"
+      "bytes": 95048,
+      "sha256": "bea3853f323ffad3048eaec70271bc5d337d1f6a47cb690a2be624c7b9058b59"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
-      "bytes": 87703,
-      "sha256": "af4679affd29b83520d314eb60fb04543c5cfc22a5fb3b785d6fae967ac3ab78"
+      "bytes": 88274,
+      "sha256": "fa72c7f383489f8261aae52abce71818e5a6e1989a43339f25e6f7fba971fdf6"
     },
     {
       "snapshot": "contract/unified-v1.golden.json",
       "source": "doc/rfc/unified-v1.golden.json",
-      "sourceRevision": "2cf4a3637aba3b8c85f69640f048acb8ea3c1e0a",
-      "bytes": 109264,
-      "sha256": "e05e4e2a191b0e43348c88689bd077c478b81d11b12edf2b6f267b210aa39044"
+      "bytes": 109466,
+      "sha256": "f5ad381edd569847b03d83f3ff6e8b5a8e5cdf99d2f0777b658b8fa02f8b162d"
     },
     {
       "snapshot": "contract/canonical-cross-vectors.json",
@@ -55,13 +52,15 @@
       "snapshot": "contract/sdk2-wire-v1.json",
       "source": "scripts/sdk2/fixtures/sdk2-wire-v1.json",
       "bytes": 4848,
-      "sha256": "d911959c91182834af396e09c523a14f223a65871588561dff5faf1d0ba27930"
+      "sha256": "d911959c91182834af396e09c523a14f223a65871588561dff5faf1d0ba27930",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
     },
     {
       "snapshot": "contract/reference/wire-codec.ts",
       "source": "packages/api-client/src/sdk2/wire-codec.ts",
       "bytes": 10889,
-      "sha256": "315d0fdea198d454c5f25ce1df06f209f740abb459c5c02eacd3bd51fbe4f9f7"
+      "sha256": "315d0fdea198d454c5f25ce1df06f209f740abb459c5c02eacd3bd51fbe4f9f7",
+      "sourceRevision": "027de7e2d9b647374b7fe94cb0e4a7429a9195e2"
     },
     {
       "source": "scripts/test/sdk2-extension-schema.test.mjs",
@@ -73,6 +72,24 @@
       "snapshot": "contract/schema-vectors.json",
       "sha256": "7515024bb86552c36a5f466269043cff54bf8ded7378f11c8864468571d50c01",
       "bytes": 41056
+    },
+    {
+      "snapshot": "contract/persistence-custody-handoff-v1.schema.json",
+      "source": "doc/rfc/persistence-custody-handoff-v1.schema.json",
+      "bytes": 61406,
+      "sha256": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9"
+    },
+    {
+      "snapshot": "contract/persistence-custody-handoff-v1.golden.json",
+      "source": "doc/rfc/persistence-custody-handoff-v1.golden.json",
+      "bytes": 88386,
+      "sha256": "c9319eb931970c140d88aef6e453c89bf94d65d13f8a1d0d5b51ac731d4333ac"
+    },
+    {
+      "snapshot": "contract/reference/persistence-custody.ts.txt",
+      "source": "packages/protocol/src/persistence-custody.ts",
+      "bytes": 2358,
+      "sha256": "b9cb8aecf53895af1234ed07916ffb0e899ddacfb70d1f84f062a846ff6d9669"
     }
   ]
 }

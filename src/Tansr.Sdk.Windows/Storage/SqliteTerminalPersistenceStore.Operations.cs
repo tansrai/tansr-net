@@ -9,7 +9,7 @@ namespace Tansr.Sdk.Windows.Storage;
 
 public sealed partial class SqliteTerminalPersistenceStore
 {
-    public Task<JsonElement> ExecuteAsync(JsonElement request, string ownerCanonical, CancellationToken cancellationToken = default)
+    private Task<JsonElement> ExecuteOriginalAsync(JsonElement request, string ownerCanonical, CancellationToken cancellationToken, Action? assertCurrent = null, bool mutationReplayOnly = false)
     {
         JsonElement fixedRequest = default, owner = default;
         return Task.FromResult(Run(check =>
@@ -17,7 +17,8 @@ public sealed partial class SqliteTerminalPersistenceStore
             Need(Equal(owner.GetProperty("scope"), Scope(_options.ReadContext, _options.Identity)), "request_conflict"); check();
             string action = S(fixedRequest, "action"); var state = LoadState();
             // An authenticated copy cannot become a writer merely by being reopened with the same owner.
-            Require(!state.ReadOnlyCopy || action == "head" || action == "read" || action == "lookup" || action == "query", "read_only_copy");
+            Require(!state.ReadOnlyCopy || mutationReplayOnly || action == "head" || action == "read" || action == "lookup" || action == "query", "read_only_copy");
+            if (!mutationReplayOnly && (action == "begin" || action == "put" || action == "commit")) AssertCustodyWritable();
             if (action == "head") return Response(fixedRequest, w =>
             { Nullable(w, "root", state.Root); w.WriteStartObject("capacity"); Prop(w, "limits", Limits(_options)); Prop(w, "used", Used(state)); w.WriteEndObject(); });
             if (action == "read" || action == "lookup")
@@ -60,6 +61,7 @@ public sealed partial class SqliteTerminalPersistenceStore
                 });
             }
             string id = S(fixedRequest, "transferId"); var ticket = LoadTicket(id);
+            if (mutationReplayOnly) Need(ticket != null, "request_conflict");
             if (ticket != null)
             {
                 Need(S(ticket.Request, "intentSha256") == S(fixedRequest, "intentSha256"), "request_conflict");
@@ -70,7 +72,7 @@ public sealed partial class SqliteTerminalPersistenceStore
                     bool authorized = _options.AuthorizeRecovery!(new TerminalPersistenceRecoveryContext(_options.Identity, id, Owner(ticket.Owner), owner)); check(); Need(authorized, "request_conflict");
                 }
             }
-            if (action != "query" && (action == "begin" && ticket == null || ticket?.Status == "staging"))
+            if (!mutationReplayOnly && action != "query" && (action == "begin" && ticket == null || ticket?.Status == "staging"))
                 Transaction(() =>
                 {
                     // Same exclusive connection; re-read the authenticated root/counters at the mutation boundary.
@@ -86,7 +88,7 @@ public sealed partial class SqliteTerminalPersistenceStore
             catch (WireProtocolException) { throw new MemoryPublicationRejectedException("invalid_request"); }
             Need(new[] { "sourceId", "sourceGeneration", "domainKey" }.All(name => S(fixedRequest, name) == S(_options.Identity, name)), "stale_generation");
             Need(S(owner.GetProperty("scope"), "applicationScopeId") == S(_options.Identity, "applicationScopeId") && S(owner.GetProperty("scope"), "endUserId") == S(_options.Identity, "endUserId"), "request_conflict");
-        }));
+        }, assertCurrent: assertCurrent));
     }
     private static void WritePayload(Utf8JsonWriter w, byte[] bytes)
     { w.WriteNumber("byteLength", bytes.Length); w.WriteString("base64", Convert.ToBase64String(bytes)); w.WriteString("payloadDigest", WireJson.Sha256(bytes)); }
@@ -125,9 +127,9 @@ public sealed partial class SqliteTerminalPersistenceStore
                 if (ticket.Status == "staging")
                 {
                     var plan = Material(ticket); foreach (var reference in ticket.Accepted) ReadObject(reference);
-                    Require(ticket.RawRemaining + ticket.Accepted.Where(x => x.Received).Sum(x => (long)x.Bytes) == N(ticket.Request.GetProperty("declared"), "bytes"));
-                    Require(ticket.ObjectsRemaining + ticket.Accepted.Count(x => x.Received) == N(ticket.Request.GetProperty("declared"), "objects"));
-                    counts.Used["activeTransfers"]++; counts.Used["stagingBytes"] += N(ticket.Request.GetProperty("declared"), "bytes");
+                    Require(ticket.RawRemaining + ticket.Accepted.Where(x => x.Received || ticket.ReleasedReuseReservations).Sum(x => (long)x.Bytes) == N(ticket.Request.GetProperty("declared"), "bytes"));
+                    Require(ticket.ObjectsRemaining + ticket.Accepted.Count(x => x.Received || ticket.ReleasedReuseReservations) == N(ticket.Request.GetProperty("declared"), "objects"));
+                    counts.Used["activeTransfers"]++; counts.Used["stagingBytes"] += TicketStagingBytes(ticket);
                     counts.Used["reservedBytes"] += ticket.RawRemaining + ticket.MetadataRemaining;
                     counts.Used["reservedObjects"] += ticket.ObjectsRemaining; counts.Used["reservedReceiptEntries"] += ticket.EntriesRemaining;
                 }

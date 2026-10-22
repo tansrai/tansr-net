@@ -22,6 +22,19 @@ public sealed class SqliteTerminalPersistenceOptions
     public int MaxPages { get; set; } = 327680;
     /// <summary>Optional trusted permission to query an original owner's transfer; never grants put or commit.</summary>
     public Func<TerminalPersistenceRecoveryContext, bool>? AuthorizeRecovery { get; set; }
+    /// <summary>Explicit custody migration. Every writer in this domain must use the same trusted shared authority.</summary>
+    public bool EnableCustodyHandoff { get; set; }
+    public JsonElement Custody { get; set; }
+    public ITerminalPersistenceCustodyAuthority? CustodyAuthority { get; set; }
+    /// <summary>可信宿主显式配置的目录对象迁移预算；不增加原业务容量。每次交接首次受理后固定。</summary>
+    public PersistenceCustodyMigrationBudget? MigrationBudget { get; set; }
+}
+
+/// <summary>完整目录唯一对象正文的预算；目录页、数据库空间和网络编码仍受各自限制。</summary>
+public sealed class PersistenceCustodyMigrationBudget
+{
+    public long Bytes { get; set; } = 1073741824;
+    public int Objects { get; set; } = 1048576;
 }
 
 public sealed class TerminalPersistenceRecoveryContext

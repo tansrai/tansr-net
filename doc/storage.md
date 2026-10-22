@@ -197,3 +197,48 @@ The offline entry points reopen the original local stores and enforce an explici
 夹具只在真实会话创建且原 binding-target、binding、archive status 核对成功后签发可信本机配置。界面依次启动档案宿主、发送合成任务、同步并读取原记录；材料处理和耐久 ACK 均由公开 SDK 完成。缓存界面保存原请求、回执和受护票据，重开只查询原意图，关闭不伪造跨运行恢复。自然过期、跨运行和供应商费用另按原验收证据归属，不以菜单点击代替。
 
 The native UI fixture composes the original public offload/archive/cache hosts. Configuration comes from the actual session binding and trusted host state, not from UI-generated identities. Archive synchronization uses the SDK's durable ACK path; cache reopening retains the original operation. The upstream model/cache peer is synthetic, so this proves protocol consumption and local persistence, not provider cache savings or production billing.
+
+## 显式托管交接与完整目录
+
+`SqliteTerminalPersistenceStore` 保留原 `terminal-persistence-v1` 的正文、双键永久回执和原
+transfer。选择托管交接时显式启用 `EnableCustodyHandoff`，提供当前 `Custody` 和所有写者
+共用的受信 `CustodyAuthority`；有关可信部署边界见 [设备记忆](device-memory.md#端侧与云端托管交接的共同权威)。
+`WindowsTerminalPersistenceHost.CreateCustodyTool()` 将新合同登记在原 `MemoryPublication`
+权限、ExecutionHost 和加密执行账本下，不借用 Shell／文件权限。未启用的原存储模式保持原行为。
+
+交接使用原 `ExecuteCustodyAsync` 消费已冻结的 `persistence-custody-handoff-v1` Request／Response。
+调用方保存原 `operationId`、`intentSha256`、五字段身份及 proof，不能在超时后重造操作。顺序为：
+
+1. 源端 `prepare` 先由共同权威冻结全域写者，再在原 SQLite FULL 事务中读取固定目录。
+2. `export-page`／`import-page` 按原目录 offset 续传，每页最多 32 项；目录包含原根、**全部**
+   永久回执、已完成及未完成 transfer、原对象及其控制材料，不受单次 begin 的 256 条增量限制。
+3. `export-object`／`import-object` 以最多 12,288 字节的连续块传输；可用更小块，按原 offset
+   与块摘要查重，完成后核整个对象摘要。页与对象保存在 SDK 加密介质，不能放在 Serve 文件系统。
+4. `verify` 完整核对目录链、对象、原根、索引和容量计量，在同一 FULL 事务安装只读目标。
+   本地 verified 并不授予 writer；必须由共同权威明确发布 `cutover` 后才能启用。
+5. cutover 失回时查询原操作。只有共同权威已发布且身份、根和 custody 匹配才激活原目标。
+   旧源保持冻结；历史查询不得解除后续交接的围栏。后继交接继续使用同一机制。
+
+原 source 的业务容量计数与预留量原样保留。C# 原 pending transfer 的 reused 预留和 Node 已
+释放 reused 预留的两种计量均按其原事实消费，不借导入提高或减少已占额度。目录和暂存副本另受
+本机 SQLite 页帽及物理磁盘限制；`MaxPages` 不等于 WAL 或文件系统可用空间保证。空间不足保持
+原库与具名操作，不清理未知对象、不回退明文或另一介质。
+
+当前合同目录 proof 的对象总字节帽仍为 1 GiB，且包含控制和 transfer 元数据，不能把它等同于
+原业务正文可用额度。原业务接近满额、加入完整目录元数据后超过此帽的交接会明确拒绝；不会删除
+回执、截短目录或放宽原容量来凑通过。这一极限容量交接限制单独保留，尚未声称覆盖所有满额域。
+
+`CopyToEncryptedAsync` 仍是原业务格式的只读备份／换钥入口；它不复制托管控制历史，也不转移
+共同 writer 权限。恢复写入或切换保管位置应使用上述完整目录交接，不将备份文件设为当前权威。
+旧 Serve 文件目录 `legacy-serve-v1` 由 Serve 的显式迁移适配器处理；本 C# 记忆存储不会将这类
+目录伪装成 `terminal-persistence-v1`。SQL／OSS 的真实共同权威验证与本机 SQLite 消费验证分列。
+
+The custody extension transfers the complete original domain, including every permanent receipt and pending
+transfer, through bounded pages and object chunks. Source freezing, target verification and writer publication
+are separate steps. SQLite uses its existing authenticated encryption and FULL transactions; Serve never stores
+the catalog locally. The target remains read-only until the shared authority publishes its original operation.
+Repeated settled PST requests expose the current original transfer without executing business work again.
+Unknown claims stay unresolved. Source reservations remain unchanged; staging is additionally bounded by the
+local media limits. A read-only rekey/backup is not a custody cutover or a writer-authority recovery mechanism.
+The current 1 GiB catalog proof cap includes control and transfer metadata. A domain whose complete catalog
+exceeds that cap is explicitly rejected; it is never truncated and its original business quota is not enlarged.

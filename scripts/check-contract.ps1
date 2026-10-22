@@ -52,7 +52,7 @@ if ($SourceRoot) {
     $SourceRoot = (Resolve-Path -LiteralPath $SourceRoot).Path
     $gitSource = Test-Path -LiteralPath (Join-Path $SourceRoot '.git')
     if ($gitSource) {
-        Write-Output 'Upstream comparison: exact Git blobs at each locked sourceRevision (or the manifest default); runtime fixture HEAD checks remain separate.'
+        Write-Output 'Upstream comparison: locked Git blobs plus explicitly marked sourceWorktreeSnapshot filesystem bytes; snapshot entries do not assert Git provenance. Runtime fixture HEAD checks remain separate.'
     }
     else {
         Write-Output 'Upstream comparison: supplied filesystem snapshot bytes only; no Git revision provenance is asserted.'
@@ -68,7 +68,7 @@ foreach ($entry in $manifest.files) {
     }
     if ($SourceRoot -and $entry.source) {
         $source = Resolve-ContractPath $SourceRoot $entry.source
-        if ($gitSource) {
+        if ($gitSource -and $entry.sourceWorktreeSnapshot -ne $true) {
             $revision = if ($entry.PSObject.Properties['sourceRevision']) { [string]$entry.sourceRevision } else { [string]$manifest.sourceRevision }
             $sourceHash = Get-PinnedGitHash $SourceRoot $revision $entry.source
         }

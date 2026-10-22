@@ -34,9 +34,23 @@ public sealed class WindowsTerminalPersistenceHost
         TerminalPersistenceContract.DefinitionDigest, InvokeAsync)
     { RequireEncryptedJournal = true };
 
-    private async Task<JsonElement> InvokeAsync(JsonElement input, WindowsBusinessToolContext context, CancellationToken ct)
+    /// <summary>Explicit optional migration profile; a complete imported catalog never grants writer authority itself.</summary>
+    public WindowsBusinessTool CreateCustodyTool()
     {
-        ValidateInvocation(input, context.Operation);
+        if (store is not ITerminalPersistenceCustodyStore custody || !custody.CustodyHandoffEnabled) throw new ExecutionRejectedException("ENOTSUP");
+        return new WindowsBusinessTool(PersistenceCustodyContract.ToolName, PersistenceCustodyContract.DefinitionDigest, InvokeCustodyAsync)
+        { RequireEncryptedJournal = true };
+    }
+
+    private Task<JsonElement> InvokeCustodyAsync(JsonElement input, WindowsBusinessToolContext context, CancellationToken ct)
+        => InvokeCoreAsync(input, context, ct, true);
+
+    private Task<JsonElement> InvokeAsync(JsonElement input, WindowsBusinessToolContext context, CancellationToken ct)
+        => InvokeCoreAsync(input, context, ct, false);
+
+    private async Task<JsonElement> InvokeCoreAsync(JsonElement input, WindowsBusinessToolContext context, CancellationToken ct, bool custody)
+    {
+        ValidateInvocation(input, context.Operation, custody);
         ct.ThrowIfCancellationRequested();
         await context.GuardAsync(ct).ConfigureAwait(false);
         ct.ThrowIfCancellationRequested();
@@ -49,7 +63,9 @@ public sealed class WindowsTerminalPersistenceHost
         JsonElement response;
         try
         {
-            response = await store.ExecuteAsync(input.Clone(), owner, ct).ConfigureAwait(false);
+            response = custody
+                ? await ((ITerminalPersistenceCustodyStore)store).ExecuteCustodyAsync(input.Clone(), owner, ct).ConfigureAwait(false)
+                : await store.ExecuteAsync(input.Clone(), owner, ct).ConfigureAwait(false);
         }
         catch (MemoryPublicationRejectedException error)
         {
@@ -71,13 +87,13 @@ public sealed class WindowsTerminalPersistenceHost
         {
             await context.GuardAsync(ct).ConfigureAwait(false);
             ct.ThrowIfCancellationRequested();
-            TerminalPersistenceContract.Validate("Response", response);
-            ValidateResponse(input, response);
+            if (custody) PersistenceCustodyContract.ValidateResponse(input, response);
+            else { TerminalPersistenceContract.Validate("Response", response); ValidateResponse(input, response); }
         }
         catch (Exception error) { throw new IOException("terminal_persistence_outcome_unconfirmed", error); }
         // 已耐久的拒绝仍走工具错误接缝；query 只观察原终态，必须保留其完整响应。
         string action = Text(input, "action");
-        if ((action == "begin" || action == "put" || action == "commit") &&
+        if (!custody && (action == "begin" || action == "put" || action == "commit") &&
             Text(response.GetProperty("transfer"), "status") == "rejected")
         {
             string code = Text(response.GetProperty("transfer").GetProperty("rejection"), "code");
@@ -128,7 +144,7 @@ public sealed class WindowsTerminalPersistenceHost
         }
     }
 
-    private void ValidateInvocation(JsonElement input, JsonElement operation)
+    private void ValidateInvocation(JsonElement input, JsonElement operation, bool custody)
     {
         // 直接宿主调用也保留原摘要和精确 profile 验证，不只依赖外层调度已做过检查。
         ExecutionJson.Operation(operation);
@@ -138,13 +154,22 @@ public sealed class WindowsTerminalPersistenceHost
             Text(scope, "applicationScopeId") != Text(expectedScope, "applicationScopeId") || Text(scope, "endUserId") != Text(expectedScope, "endUserId"))
             throw new ExecutionRejectedException("EACCES");
         var args = request.GetProperty("args");
-        if (Text(args, "name") != TerminalPersistenceContract.ToolName ||
-            Text(args, "definitionDigest") != TerminalPersistenceContract.DefinitionDigest ||
+        if (Text(args, "name") != (custody ? PersistenceCustodyContract.ToolName : TerminalPersistenceContract.ToolName) ||
+            Text(args, "definitionDigest") != (custody ? PersistenceCustodyContract.DefinitionDigest : TerminalPersistenceContract.DefinitionDigest) ||
             WireJson.CanonicalString(WireJson.Parse(Encoding.UTF8.GetBytes(Text(args, "argsJson")), 32768)) != WireJson.CanonicalString(input))
             throw new ExecutionRejectedException("EACCES");
-        TerminalPersistenceContract.Validate("Request", input);
-        if (Text(input, "sourceId") != Text(identity, "sourceId") || Text(input, "sourceGeneration") != Text(identity, "sourceGeneration") ||
-            Text(input, "domainKey") != Text(identity, "domainKey")) throw new ExecutionRejectedException("EACCES");
+        if (custody)
+        {
+            if (store is not ITerminalPersistenceCustodyStore custodyStore || !custodyStore.CustodyHandoffEnabled) throw new ExecutionRejectedException("ENOTSUP");
+            PersistenceCustodyContract.Validate("Request", input);
+            if (!PersistenceCustodyContract.Equal(input.GetProperty("identity"), identity)) throw new ExecutionRejectedException("EACCES");
+        }
+        else
+        {
+            TerminalPersistenceContract.Validate("Request", input);
+            if (Text(input, "sourceId") != Text(identity, "sourceId") || Text(input, "sourceGeneration") != Text(identity, "sourceGeneration") ||
+                Text(input, "domainKey") != Text(identity, "domainKey")) throw new ExecutionRejectedException("EACCES");
+        }
     }
 
     private static string Text(JsonElement value, string name) => value.GetProperty(name).GetString()!;

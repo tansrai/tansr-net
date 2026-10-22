@@ -1,8 +1,8 @@
 {
   "format": "tansr-api-manifest-v1",
   "contract": "unified-v1",
-  "revision": 13,
-  "schemaHash": "35fb881d52c49e6b5123ced2a6ae74e128c10de24b1dfa53f7bf03fec2e83d38",
+  "revision": 14,
+  "schemaHash": "b792dc53f45ca2b8fdc8438bd5b50d6d6c8a3eb08ac29920215d75a470349faf",
   "families": [
     {
       "id": "agent-session-v1",
@@ -472,6 +472,79 @@
       ]
     },
     {
+      "id": "persistence-custody-handoff-v1",
+      "domains": [
+        "terminal"
+      ],
+      "status": "additive",
+      "rfc": "doc/rfc/PST-SERVE-01-记忆域托管交接-2026-10-21.md",
+      "source": "doc/rfc/persistence-custody-handoff-v1.schema.json",
+      "sha256": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9",
+      "golden": {
+        "doc/rfc/persistence-custody-handoff-v1.golden.json": "c9319eb931970c140d88aef6e453c89bf94d65d13f8a1d0d5b51ac731d4333ac"
+      },
+      "generated": [
+        "packages/protocol/src/persistence-custody.generated.ts",
+        "packages/api-client/src/terminal/custody-wire-schema-generated.ts",
+        "packages/api-client/src/terminal/custody-wire-types-generated.ts",
+        "packages/server/src/v2/persistence-custody-contract.generated.ts"
+      ],
+      "legacyEntries": [
+        "/v3/terminal/persistence/custody/capabilities",
+        "/v3/terminal/persistence/custody/operations/:id"
+      ],
+      "apiEntries": [
+        "/api/terminal/persistence/custody/capabilities",
+        "/api/terminal/persistence/custody/operations/:id"
+      ],
+      "clients": [
+        {
+          "client": "node",
+          "repo": "tansr-cli",
+          "lock": "generated",
+          "observed": "2026-10-01",
+          "drift": false
+        },
+        {
+          "client": "csharp",
+          "repo": "tansr-net",
+          "file": "contract/persistence-custody-handoff-v1.schema.json",
+          "lock": "hand-written",
+          "observed": "2026-10-01",
+          "drift": false
+        },
+        {
+          "client": "go",
+          "repo": "tansr-go",
+          "lock": "absent",
+          "observed": "2026-10-01",
+          "drift": false
+        },
+        {
+          "client": "android",
+          "repo": "tansr-android",
+          "lock": "absent",
+          "observed": "2026-10-01",
+          "drift": false
+        },
+        {
+          "client": "ios",
+          "repo": "tansr-ios",
+          "lock": "absent",
+          "observed": "2026-10-01",
+          "drift": false
+        },
+        {
+          "client": "harmony",
+          "repo": "tansr-harmony",
+          "lock": "absent",
+          "observed": "2026-10-01",
+          "drift": false
+        }
+      ],
+      "requestIdPath": null
+    },
+    {
       "id": "terminal-observation-v1",
       "domains": [
         "terminal-observation"
@@ -651,9 +724,9 @@
       "status": "candidate",
       "rfc": "doc/rfc/RFC-UAPI-1-统一信封与canonical单模块.md",
       "source": "doc/rfc/unified-v1.schema.json",
-      "sha256": "af4679affd29b83520d314eb60fb04543c5cfc22a5fb3b785d6fae967ac3ab78",
+      "sha256": "fa72c7f383489f8261aae52abce71818e5a6e1989a43339f25e6f7fba971fdf6",
       "golden": {
-        "doc/rfc/unified-v1.golden.json": "e05e4e2a191b0e43348c88689bd077c478b81d11b12edf2b6f267b210aa39044"
+        "doc/rfc/unified-v1.golden.json": "f5ad381edd569847b03d83f3ff6e8b5a8e5cdf99d2f0777b658b8fa02f8b162d"
       },
       "generated": [],
       "legacyEntries": [],
@@ -2199,6 +2272,52 @@
         "contract"
       ],
       "notes": null,
+      "etagPath": null,
+      "expectedRevision": null
+    },
+    {
+      "name": "terminal.custody.capabilities",
+      "domain": "terminal",
+      "family": "persistence-custody-handoff-v1",
+      "method": "GET",
+      "apiPath": "/api/terminal/persistence/custody/capabilities",
+      "aliases": [],
+      "legacyPath": "/v3/terminal/persistence/custody/capabilities",
+      "legacyOffloadPath": null,
+      "kind": "read",
+      "sse": false,
+      "request": null,
+      "response": "persistence-custody-handoff-v1#CapabilitiesResponse",
+      "query": [
+        "contract"
+      ],
+      "notes": "显式可选托管交接；installed 由共同控制权威及完整目录适配器实际装配决定。",
+      "etagPath": null,
+      "expectedRevision": null
+    },
+    {
+      "name": "terminal.custody.query",
+      "domain": "terminal",
+      "family": "persistence-custody-handoff-v1",
+      "method": "GET",
+      "apiPath": "/api/terminal/persistence/custody/operations/:id",
+      "aliases": [],
+      "legacyPath": "/v3/terminal/persistence/custody/operations/:id",
+      "legacyOffloadPath": null,
+      "kind": "read",
+      "sse": false,
+      "request": null,
+      "response": "persistence-custody-handoff-v1#QueryResponse",
+      "query": [
+        "contract",
+        "applicationScopeId",
+        "endUserId",
+        "sourceId",
+        "sourceGeneration",
+        "domainKey",
+        "intentSha256"
+      ],
+      "notes": ":id = 原operationId；只读原键查询，不接受终端自报成为writer或释放unknown。",
       "etagPath": null,
       "expectedRevision": null
     },
