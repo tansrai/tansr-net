@@ -358,7 +358,7 @@ internal sealed class NativeOperationConsent : IDisposable
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token); token = linked.Token;
         var key = operation.GetProperty("operationId").GetString()!;
         var identity = WireJson.Sha256(System.Text.Encoding.UTF8.GetBytes(WireJson.CanonicalString(operation)));
-        Entry entry; bool owner = false;
+        Entry entry; bool owner = false; bool decision;
         try
         {
             token.ThrowIfCancellationRequested(); var authority = await validate(token).ConfigureAwait(false);
@@ -389,19 +389,20 @@ internal sealed class NativeOperationConsent : IDisposable
                     lock (gate)
                     {
                         if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
-                        if (!allowed) throw new ExecutionRejectedException("EACCES");
                     }
-                    observe();
-                    lock (gate) { if (closed || entry.Revoked) throw new ExecutionRejectedException("ESTALE"); entry.Completion.TrySetResult(true); }
+                    if (allowed) observe();
+                    // 用户拒绝是该原操作的稳定决定，不等同于配置或身份撤销。
+                    lock (gate) { if (closed || entry.Revoked) throw new ExecutionRejectedException("ESTALE"); entry.Completion.TrySetResult(allowed); }
                 }
                 catch (Exception error) { lock (gate) { entry.Revoked = true; entry.Completion.TrySetException(error); } }
             }
-            await WaitAsync(entry.Completion.Task, token).ConfigureAwait(false);
+            decision = await WaitAsync(entry.Completion.Task, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             if (await validate(token).ConfigureAwait(false) != authority) throw new ExecutionRejectedException("ESTALE");
             lock (gate) if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
         }
         catch { Revoke(operation); throw; }
+        if (!decision) throw new ExecutionRejectedException("EACCES");
     }
 
     internal void Revoke(JsonElement operation)

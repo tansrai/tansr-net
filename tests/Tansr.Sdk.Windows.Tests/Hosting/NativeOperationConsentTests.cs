@@ -101,10 +101,44 @@ public sealed class NativeOperationConsentTests
         using var consent = new NativeOperationConsent(2); var approvals = 0; var observations = 0;
         Task Guard(string id, bool allow) => consent.EnsureAsync(Operation(id), _ => Task.FromResult("authority"), _ => { approvals++; return Task.FromResult(allow); }, () => observations++, default);
         Assert.Equal("EACCES", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard("denied", false))).Code);
-        await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard("denied", true));
+        Assert.Equal("EACCES", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard("denied", true))).Code);
         await Guard("allowed", true);
         Assert.Equal("local_approval_capacity", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard("overflow", true))).Code);
         Assert.Equal(2, approvals); Assert.Equal(1, observations);
+    }
+
+    [Fact]
+    public async Task ConcurrentDenialSharesOneDecisionButRechecksCurrentAuthority()
+    {
+        using var consent = new NativeOperationConsent(); var approvals = 0; var checks = 0; var observed = 0;
+        var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task Guard() => consent.EnsureAsync(Operation(), _ => { Interlocked.Increment(ref checks); return Task.FromResult("authority"); },
+            _ => { approvals++; return answer.Task; }, () => observed++, default);
+        var guards = Enumerable.Range(0, 3).Select(_ => Guard()).ToArray(); answer.SetResult(false);
+        foreach (var guard in guards) Assert.Equal("EACCES", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => guard)).Code);
+        Assert.Equal("EACCES", (await Assert.ThrowsAsync<ExecutionRejectedException>(Guard)).Code);
+        Assert.Equal(1, approvals); Assert.Equal(0, observed); Assert.True(checks >= 8);
+    }
+
+    [Theory]
+    [InlineData("binding")]
+    [InlineData("digest")]
+    [InlineData("scope")]
+    [InlineData("authority")]
+    [InlineData("revoke")]
+    public async Task CachedDenialCannotHideIdentityChangeOrRevocation(string changed)
+    {
+        using var consent = new NativeOperationConsent(); var revision = "one"; var approvals = 0; var observed = 0;
+        Task Guard(JsonElement operation) => consent.EnsureAsync(operation, _ => Task.FromResult(revision),
+            _ => { approvals++; return Task.FromResult(false); }, () => observed++, default);
+        Assert.Equal("EACCES", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard(Operation()))).Code);
+        if (changed == "authority") revision = "two";
+        if (changed == "revoke") consent.Revoke(Operation());
+        var altered = changed is "binding" or "digest" or "scope" ? Operation(changed: changed) : Operation();
+        Assert.Equal("ESTALE", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard(altered))).Code);
+        revision = "one";
+        Assert.Equal("ESTALE", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => Guard(Operation()))).Code);
+        Assert.Equal(1, approvals); Assert.Equal(0, observed);
     }
 
     [Fact]

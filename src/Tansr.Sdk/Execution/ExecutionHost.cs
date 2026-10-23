@@ -268,6 +268,12 @@ public sealed class ExecutionHost : IDisposable
 
     private async Task GuardAsync(JsonElement operation, CancellationToken token)
     {
+        var rejection = await AuthorizeAsync(operation, token).ConfigureAwait(false);
+        if (rejection != null) throw rejection;
+    }
+
+    private async Task<ExecutionRejectedException?> AuthorizeAsync(JsonElement operation, CancellationToken token)
+    {
         token.ThrowIfCancellationRequested();
         var connection = Current();
         EnsureLive(connection);
@@ -278,18 +284,21 @@ public sealed class ExecutionHost : IDisposable
             ExecutionJson.Text(target, "executorId") == ExecutionJson.Text(connection, "executorId") &&
             ExecutionJson.Text(target, "connectionId") == ExecutionJson.Text(connection, "connectionId") &&
             ExecutionJson.Text(target, "connectionRevision") == ExecutionJson.Text(connection, "connectionRevision"));
-        await _authorize(operation.Clone(), token).ConfigureAwait(false);
+        ExecutionRejectedException? rejection = null;
+        try { await _authorize(operation.Clone(), token).ConfigureAwait(false); }
+        catch (ExecutionRejectedException error) when (error.Code == "EACCES") { rejection = error; }
+        // 明确拒绝同样需要通过当前身份和有效期检查；撤权、过期或协议错误不可变成业务拒绝。
         token.ThrowIfCancellationRequested();
         EnsureLive(Current());
         EnsureLive(operation);
         ExecutionJson.Check(ExecutionJson.Equal(scope, _client.ReadScope()) &&
             ExecutionJson.Text(Current(), "connectionRevision") == ExecutionJson.Text(connection, "connectionRevision"));
+        return rejection;
     }
 
     private async Task<JsonElement> ExecuteAsync(JsonElement operation, CancellationToken token)
     {
         ExecutionJson.Operation(operation);
-        await GuardAsync(operation, token).ConfigureAwait(false);
         var request = operation.GetProperty("request");
         var target = operation.GetProperty("binding").GetProperty("target");
         var operationName = ExecutionJson.Text(request, "operation");
@@ -305,6 +314,7 @@ public sealed class ExecutionHost : IDisposable
         if (operationName == "process.exec")
             ExecutionJson.Check(ExecutionJson.Equal(_registration.GetProperty("interpreter"), request.GetProperty("args").GetProperty("interpreter")));
 
+        var rejection = await AuthorizeAsync(operation, token).ConfigureAwait(false);
         var claim = await _journal.ClaimAsync(operation, token).ConfigureAwait(false);
         if (claim.Status == ExecutorJournalClaimStatus.Completed)
         {
@@ -317,6 +327,13 @@ public sealed class ExecutionHost : IDisposable
             var unknown = ExecutionJson.ReceiptFor(operation, "unknown", null, "execution_outcome_unknown");
             await _journal.CompleteAsync(operation, unknown, CancellationToken.None).ConfigureAwait(false);
             return unknown;
+        }
+        if (rejection != null)
+        {
+            // 仅首次认领、确定未执行的拒绝可结算失败；原回执和未决副作用仍由上面的账本分支处理。
+            var denied = ExecutionJson.ReceiptFor(operation, "failed", null, rejection.Code);
+            await _journal.CompleteAsync(operation, denied, CancellationToken.None).ConfigureAwait(false);
+            return denied;
         }
 
         JsonElement receipt;

@@ -1,8 +1,10 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Threading.Channels;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Execution;
+using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Tests.Execution;
@@ -341,6 +343,129 @@ public sealed class ExecutionHostTests
     }
 
     [Fact]
+    public async Task FirstApprovalDenialSettlesOnceAndKeepsTheDeviceAvailable()
+    {
+        var denied = ExecutionFixture.Operation("denied-operation");
+        var next = ExecutionFixture.Operation("next-operation");
+        var client = new FakeClient(); var journal = new FakeJournal(); var backend = new FakeBackend();
+        client.Enqueue(denied); client.Enqueue(denied); client.Enqueue(next);
+        using var host = new ExecutionHost(client, backend, journal, (operation, token) =>
+        {
+            token.ThrowIfCancellationRequested();
+            if (operation.GetProperty("operationId").GetString() == "denied-operation")
+                throw new ExecutionRejectedException("EACCES");
+            return Task.CompletedTask;
+        });
+        var run = host.RunAsync();
+        try
+        {
+            var first = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            var replay = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            var allowed = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.Equal("failed", first.GetProperty("status").GetString());
+            Assert.Equal("EACCES", first.GetProperty("errorCode").GetString());
+            Assert.True(ExecutionFixture.Same(first, replay));
+            Assert.Equal("completed", allowed.GetProperty("status").GetString());
+            Assert.Equal(1, backend.SideEffects); Assert.Equal(2, journal.Completions.Count);
+            Assert.False(run.IsCompleted);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+    }
+
+    [Theory]
+    [InlineData("completed")]
+    [InlineData("pending")]
+    [InlineData("unknown")]
+    public async Task ApprovalDenialDoesNotReplaceAnExistingOutcome(string outcome)
+    {
+        var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
+        await journal.ClaimAsync(operation);
+        var original = ExecutionFixture.Receipt(operation, outcome == "pending" ? "unknown" : outcome);
+        if (outcome != "pending") await journal.CompleteAsync(operation, original);
+        var client = new FakeClient(); client.Enqueue(operation); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, backend, journal, (_, _) => throw new ExecutionRejectedException("EACCES"));
+        var run = host.RunAsync();
+        try
+        {
+            var receipt = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.True(ExecutionFixture.Same(original, receipt));
+            Assert.Equal(0, backend.SideEffects); Assert.Single(journal.Completions);
+        }
+        finally { await host.StopAsync().WaitAsync(Deadline); await run.WaitAsync(Deadline); }
+    }
+
+    [Theory]
+    [InlineData("unconfirmed_or_active")]
+    [InlineData("pending")]
+    public async Task ApprovalDenialCannotCompleteAnUnconfirmedCloudClaim(string disposition)
+    {
+        var failure = new CloudJournalClaimUnavailableException(disposition);
+        var journal = new FakeJournal { ClaimFailure = failure }; var backend = new FakeBackend();
+        var client = new FakeClient(); client.Enqueue(ExecutionFixture.Operation());
+        using var host = new ExecutionHost(client, backend, journal, (_, _) => throw new ExecutionRejectedException("EACCES"));
+        Assert.Same(failure, await Assert.ThrowsAsync<CloudJournalClaimUnavailableException>(() => host.RunAsync().WaitAsync(Deadline)));
+        Assert.Empty(journal.Completions); Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Theory]
+    [InlineData("scope")]
+    [InlineData("workspace")]
+    [InlineData("digest")]
+    [InlineData("definitionDigest")]
+    public async Task ApprovalDenialCannotHideInvalidOperationAuthority(string invalid)
+    {
+        var operation = ExecutionFixture.Operation(user: invalid == "scope" ? "foreign" : "user",
+            workspace: invalid == "workspace" ? "foreign" : "workspace-1");
+        var backend = new FakeBackend(); var approvals = 0;
+        if (invalid == "digest") operation = ExecutionFixture.Set(operation, "digest", JsonSerializer.SerializeToElement(new string('0', 64)));
+        if (invalid == "definitionDigest")
+        {
+            var registration = JsonNode.Parse(backend.Registration.GetRawText())!.AsObject();
+            registration["operations"] = new JsonArray("tool.invoke");
+            registration["tools"] = JsonSerializer.SerializeToNode(new[] { new { name = "custom", definitionDigest = new string('1', 64) } });
+            backend.Registered = JsonSerializer.SerializeToElement(registration);
+            var body = JsonNode.Parse(operation.GetRawText())!.AsObject(); body.Remove("digest"); body["toolName"] = "custom";
+            body["request"] = JsonSerializer.SerializeToNode(new { operation = "tool.invoke", args = new { name = "custom", definitionDigest = new string('2', 64), argsJson = "{}" } });
+            body["digest"] = WireJson.DomainDigest("tansr.sdk2.execution.v1", WireJson.EncodeControl(JsonSerializer.SerializeToElement(body), 1048576));
+            operation = JsonSerializer.SerializeToElement(body);
+        }
+        var client = new FakeClient(); client.Enqueue(operation); var journal = new FakeJournal();
+        using var host = new ExecutionHost(client, backend, journal, (_, _) => { approvals++; throw new ExecutionRejectedException("EACCES"); });
+        await Assert.ThrowsAsync<InvalidDataException>(() => host.RunAsync().WaitAsync(Deadline));
+        Assert.Equal(0, approvals); Assert.Equal(0, journal.ClaimCalls);
+        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Fact]
+    public async Task ScopeChangedDuringDenialDoesNotCreateAClaim()
+    {
+        var client = new FakeClient(); client.Enqueue(ExecutionFixture.Operation());
+        var journal = new FakeJournal(); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, backend, journal, (_, _) =>
+        {
+            client.Scope = ExecutionFixture.Scope(revision: "2");
+            throw new ExecutionRejectedException("EACCES");
+        });
+        await Assert.ThrowsAsync<InvalidDataException>(() => host.RunAsync().WaitAsync(Deadline));
+        Assert.Equal(0, journal.ClaimCalls); Assert.Empty(journal.Completions);
+        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ExistingReceiptCannotBypassCurrentAuthorityRevocation(bool hasReceipt)
+    {
+        var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
+        if (hasReceipt) { await journal.ClaimAsync(operation); await journal.CompleteAsync(operation, ExecutionFixture.Receipt(operation)); }
+        var claims = journal.ClaimCalls; var client = new FakeClient(); client.Enqueue(operation); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, backend, journal, (_, _) => throw new ExecutionRejectedException("ESTALE"));
+        Assert.Equal("ESTALE", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.RunAsync().WaitAsync(Deadline))).Code);
+        Assert.Equal(claims, journal.ClaimCalls); Assert.Equal(hasReceipt ? 1 : 0, journal.Completions.Count);
+        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Fact]
     public async Task RepeatedDeliverySubmitsTheSameReceiptWithoutRepeatingSideEffects()
     {
         var operation = ExecutionFixture.Operation();
@@ -661,7 +786,8 @@ public sealed class ExecutionHostTests
 
     private sealed class FakeBackend : IExecutionBackend
     {
-        public JsonElement Registration => ExecutionFixture.Registration();
+        public JsonElement? Registered;
+        public JsonElement Registration => Registered ?? ExecutionFixture.Registration();
         public int SideEffects;
         public Func<JsonElement, Func<CancellationToken, Task>, CancellationToken, Task<JsonElement>>? Execute;
         public async Task<JsonElement> ExecuteAsync(JsonElement operation, Func<CancellationToken, Task> guard, CancellationToken cancellationToken)
@@ -721,10 +847,12 @@ public sealed class ExecutionHostTests
         public ConcurrentQueue<CancellationToken> CompletionTokens { get; } = new();
         public Action? BeforeComplete;
         public Func<Task>? WaitBeforeComplete;
+        public Exception? ClaimFailure;
         public int ClaimCalls;
         public Task<ExecutorJournalClaim> ClaimAsync(JsonElement operation, CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested(); Interlocked.Increment(ref ClaimCalls);
+            if (ClaimFailure != null) throw ClaimFailure;
             lock (_records)
             {
                 var id = operation.GetProperty("operationId").GetString()!;
