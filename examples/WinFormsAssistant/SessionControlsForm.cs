@@ -45,7 +45,7 @@ internal sealed class SessionControlsForm : Form
                 }
                 else { var result = await controls.ExecuteAsync(actions.SelectedIndex, input.Text, lifetime.Token); if (!IsDisposed) output.Text = result.GetRawText() + "\r\n\r\n" + controls.DescribePending(); }
             }
-            catch (Exception error) { if (!IsDisposed) output.Text = (error is TansrException sdk ? sdk.Code : error is InvalidOperationException ? error.Message : error.GetType().Name) + "\r\n发送前已持久保存的原操作保留；配置没有单独回执GET。"; }
+            catch (Exception error) { if (!IsDisposed) output.Text = (error is TansrException sdk ? FamilyFacts.Display(sdk) : error is InvalidOperationException ? error.Message : error.GetType().Name) + "\r\n发送前已持久保存的原操作保留；配置没有单独回执GET。"; }
             finally { if (!IsDisposed) execute.Enabled = applyModel.Enabled = !lifetime.IsCancellationRequested; }
         };
         applyModel.Click += async (_, _) =>
@@ -56,7 +56,7 @@ internal sealed class SessionControlsForm : Form
                 if (models.SelectedValue is not string model) throw new InvalidOperationException("select_authorized_model");
                 var result = await controls.ExecuteAsync(1, model, lifetime.Token); if (!IsDisposed) output.Text = result.GetRawText();
             }
-            catch (Exception error) { if (!IsDisposed) output.Text = error is TansrException sdk ? sdk.Code : error is InvalidOperationException ? error.Message : error.GetType().Name; }
+            catch (Exception error) { if (!IsDisposed) output.Text = error is TansrException sdk ? FamilyFacts.Display(sdk) : error is InvalidOperationException ? error.Message : error.GetType().Name; }
             finally { if (!IsDisposed) execute.Enabled = applyModel.Enabled = !lifetime.IsCancellationRequested; }
         };
     }

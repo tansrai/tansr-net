@@ -5,6 +5,7 @@ using Tansr.Examples;
 using Tansr.Sdk.Api;
 using Tansr.Sdk.Client;
 using Tansr.Sdk.Protocol;
+using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Tests.Api;
 
 namespace Tansr.Sdk.Windows.Tests.Hosting;
@@ -44,6 +45,17 @@ public sealed class ExampleConnectionTests
         Assert.Equal(new[] { ApiRoutes.SessionCapabilities.Path(), ApiRoutes.ExecutionInitialize.Path(id: "keep-original") }, handler.Requests);
     }
 
+    [Fact]
+    public async Task RejectedCreationIsSentOnceWithTheOriginalRequestKeyAndNeverInitialized()
+    {
+        using var handler = new Handler { RejectCreation = true }; using var http = UnifiedStamp.Client(handler); using var client = Client(http);
+        var error = await Assert.ThrowsAsync<UnifiedApiException>(() => client.CreateSessionAsync(new CreateSessionOptions { RequestId = "original-create-key" }));
+        Assert.Equal("conflict", error.Code);
+        Assert.Equal("resume_unavailable", error.Detail.DomainCode);
+        Assert.Equal(new[] { ApiRoutes.SessionCapabilities.Path(), ApiRoutes.SessionCreate.Path() }, handler.Requests);
+        Assert.Equal("original-create-key", Assert.Single(handler.Bodies).GetProperty("requestId").GetString());
+    }
+
     private static TansrClient Client(HttpClient http, SessionContract contract = SessionContract.Sdk2OffloadV1) => new(new TansrClientOptions
     {
         BaseUri = new Uri("https://serve.test"), TokenProvider = _ => Task.FromResult("synthetic-ticket"),
@@ -55,6 +67,7 @@ public sealed class ExampleConnectionTests
     private sealed class Handler : HttpMessageHandler
     {
         internal bool Disconnect;
+        internal bool RejectCreation;
         internal List<string> Requests { get; } = new();
         internal List<JsonElement> Bodies { get; } = new();
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
@@ -63,6 +76,15 @@ public sealed class ExampleConnectionTests
             if (request.RequestUri.AbsolutePath == ApiRoutes.SessionCapabilities.Path())
                 return Response("{\"protocol\":\"sdk2-ext-v1\",\"contracts\":[{\"contract\":\"sdk1\",\"availability\":\"legacy-complete\"},{\"contract\":\"sdk2-offload-v1\",\"availability\":\"source-required\"}]}");
             var body = Json(await request.Content!.ReadAsStringAsync(cancellationToken)); Bodies.Add(body);
+            if (RejectCreation && request.RequestUri.AbsolutePath == ApiRoutes.SessionCreate.Path())
+            {
+                var rejected = new HttpResponseMessage(HttpStatusCode.Conflict)
+                {
+                    Content = new StringContent("{\"contract\":\"unified-v1\",\"traceId\":\"synthetic-trace\",\"requestId\":\"original-create-key\",\"code\":\"conflict\",\"status\":409,\"retryAction\":\"none\",\"message\":\"synthetic conflict\",\"detail\":{\"domainCode\":\"resume_unavailable\",\"domainStatus\":409}}", Encoding.UTF8, "application/json")
+                };
+                rejected.Headers.TryAddWithoutValidation("x-request-id", "synthetic-trace");
+                return rejected;
+            }
             if (Disconnect) throw new HttpRequestException("synthetic disconnect after initialization was sent");
             var response = "{\"protocol\":\"sdk2-ext-v1\",\"sessionId\":" + JsonSerializer.Serialize(body.GetProperty("sessionId").GetString()) +
                 ",\"platform\":" + body.GetProperty("platform").GetRawText() + ",\"capabilityRevision\":\"" + new string('a', 64) + "\",\"effectiveTools\":[],\"binding\":null}";

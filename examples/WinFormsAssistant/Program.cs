@@ -611,7 +611,7 @@ internal sealed class AssistantForm : Form
         return done.Task;
     }
     private static string Get(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var field) && field.ValueKind == JsonValueKind.String ? field.GetString() ?? "" : "";
-    private static string ErrorText(Exception error) => error is TansrException sdk ? sdk.Code : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
+    private static string ErrorText(Exception error) => error is TansrException sdk ? FamilyFacts.Display(sdk) : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
     private sealed class RequestItem(SessionRequestView request)
     { public SessionRequestView Request { get; } = request; public string Label => Request.Kind + ": " + Request.Id; }
     private sealed class QuestionEditor

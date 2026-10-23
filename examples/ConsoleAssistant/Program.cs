@@ -378,6 +378,6 @@ internal static class Program
     }
 
     private static string Required(string name) => Environment.GetEnvironmentVariable(name) is { Length: > 0 } value ? value : throw new InvalidOperationException("missing_" + name);
-    private static string ErrorCode(Exception error) => error is TansrException sdk ? sdk.Code : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
+    private static string ErrorCode(Exception error) => error is TansrException sdk ? FamilyFacts.Display(sdk) : error is StorageException storage ? storage.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
     private static void Write(string value) { lock (OutputLock) Console.WriteLine(value); }
 }

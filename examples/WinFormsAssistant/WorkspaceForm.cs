@@ -47,5 +47,5 @@ internal sealed class WorkspaceForm : Form
         });
         FormClosed += (_, _) => { lifetime.Cancel(); lifetime.Dispose(); };
     }
-    private static string Error(Exception error) => error is TansrException sdk ? sdk.Code : error is InvalidOperationException ? error.Message : error.GetType().Name;
+    private static string Error(Exception error) => error is TansrException sdk ? FamilyFacts.Display(sdk) : error is InvalidOperationException ? error.Message : error.GetType().Name;
 }
