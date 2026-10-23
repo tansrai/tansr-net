@@ -11,6 +11,8 @@ public sealed partial class SessionView
     /// Does not restore permission tickets, token accounting, or infer the current running turn.
     /// The installed history clears the presentation gap, not missing runtime facts;
     /// local accepted inputs must be tracked separately by the host.
+    /// An already observed terminal at the same log watermark is retained. History
+    /// ahead of or behind that watermark, or any replay gap, cannot prove current state.
     /// </summary>
     public long RestoreHistory(JsonElement history, string expectedSessionId)
     {
@@ -34,10 +36,16 @@ public sealed partial class SessionView
         Update(() =>
         {
             if (_sessionId != null && _sessionId != expectedSessionId) throw new InvalidOperationException("history_session_mismatch");
+            // A settlement read can replace messages after the terminal was delivered.
+            // Keep that original event's projection only at the same known log position;
+            // never infer a terminal from messages or carry one into another epoch.
+            var keepTerminal = !_epochLost && !_gap && !_runtimeUnknown && !_running &&
+                _observedTerminalSequence.HasValue && _lastSequence == sequence;
             _sessionId = expectedSessionId; _lastSequence = sequence; _epochLost = false; _gap = false;
             _messages.Clear(); _tools.Clear(); _blocks.Clear(); _requests.Clear(); _agents.Clear(); _todos.Clear();
-            _current = null; _structuredBytes = 0; _running = false; _runtimeUnknown = true; _failed = false; _compacting = false;
-            _sealed = false; _error = null;
+            _current = null; _structuredBytes = 0; _running = false; _runtimeUnknown = !keepTerminal; _compacting = false;
+            _sealed = false;
+            if (!keepTerminal) { _failed = false; _error = null; _observedTerminalSequence = null; }
             var calls = new Dictionary<string, Tool>(StringComparer.Ordinal);
             foreach (var source in messages.EnumerateArray().Skip(Math.Max(0, messages.GetArrayLength() - _options.MaximumMessages)))
             {

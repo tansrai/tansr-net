@@ -26,6 +26,7 @@ public sealed partial class SessionView : IDisposable
     private SessionViewSnapshot _snapshot;
     private long _structuredBytes, _turn, _nextTool, _version, _nextMessage, _turnTokens, _sessionTokens, _usageRequests;
     private long? _lastSequence;
+    private long? _observedTerminalSequence;
     private string? _sessionId;
     private bool _running, _failed, _compacting, _sealed, _gap, _truncated, _disposed, _runtimeUnknown;
 
@@ -143,6 +144,7 @@ public sealed partial class SessionView : IDisposable
             if (type == "server.replay.gap")
             {
                 _gap = true;
+                _observedTerminalSequence = null;
                 _runtimeUnknown = true; _requests.Clear();
                 Notice(type, String(data, "reason"), false, data.Clone());
                 // 新日志纪元必须重建，旧快照不与新序号拼接。
@@ -160,12 +162,15 @@ public sealed partial class SessionView : IDisposable
                 if (_lastSequence.HasValue && _lastSequence.Value != long.MaxValue && sequence.Value > _lastSequence.Value + 1)
                 {
                     _gap = true;
+                    _observedTerminalSequence = null;
                     Notice("event_sequence_gap", (_lastSequence.Value + 1).ToString(CultureInfo.InvariantCulture) + ".." + (sequence.Value - 1).ToString(CultureInfo.InvariantCulture));
                 }
                 _lastSequence = sequence;
             }
             var payload = Property(data, "payload");
             Reduce(type, type.StartsWith("server.", StringComparison.Ordinal) && payload?.ValueKind == JsonValueKind.Object ? payload.Value : data);
+            if (type is "turn.completed" or "turn.aborted") _observedTerminalSequence = sequence;
+            else if (type == "session.ended") _observedTerminalSequence = null;
             return true;
         });
     }
@@ -196,7 +201,11 @@ public sealed partial class SessionView : IDisposable
         if (_compacting && type != "session.compacted" && type != "session.microcompacted") _compacting = false;
         switch (type)
         {
+            case "session.created":
+                _observedTerminalSequence = null;
+                break;
             case "turn.started":
+                _observedTerminalSequence = null;
                 _turn++; _running = true; _runtimeUnknown = false; _failed = false; _error = null; _turnTokens = 0; _current = null; _blocks.Clear(); _sealed = false;
                 break;
             case "turn.completed":
@@ -214,7 +223,7 @@ public sealed partial class SessionView : IDisposable
             case "server.platform.warning":
                 Notice(String(data, "code") ?? type, String(data, "message")); break;
             case "session.events_dropped":
-                _gap = true; Notice(type, String(data, "reason"), false, data.Clone()); break;
+                _gap = true; _observedTerminalSequence = null; Notice(type, String(data, "reason"), false, data.Clone()); break;
             case "session.compacted":
             case "session.microcompacted": _compacting = true; break;
             case "msg.block.start": StartBlock(data); break;

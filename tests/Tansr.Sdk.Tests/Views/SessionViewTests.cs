@@ -153,6 +153,84 @@ public sealed class SessionViewTests
     }
 
     [Fact]
+    public void SettlementHistoryAtObservedTerminalWatermarkKeepsErrorForQueuedUi()
+    {
+        using var view = new SessionView();
+        var context = new QueuedContext();
+        var rendered = new List<string>();
+        using var ui = view.Subscribe(snapshot => rendered.Add(SessionViewTextFormatter.Format(snapshot)), context);
+        view.Apply(Event("""{"sessionId":"s","type":"turn.started","seq":10}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"server.permission.request","seq":11,"payload":{"requestId":"old","name":"Shell"}}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"turn.error","seq":12,"errorKind":"internal_error","scope":"kernel","recoverable":false,"message":"Archive spool: reconciliation_required"}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"turn.aborted","seq":13,"reason":"internal_error"}"""));
+
+        using var history = JsonDocument.Parse("""{"sessionId":"s","lastSeq":13,"messages":[]}""");
+        view.RestoreHistory(history.RootElement, "s");
+        context.Run();
+
+        Assert.Equal("error", view.Snapshot.Status);
+        Assert.Equal("Archive spool: reconciliation_required", view.Snapshot.LastError?.Message);
+        Assert.Contains("reconciliation_required", Assert.Single(rendered));
+        Assert.Empty(view.Snapshot.PendingRequests);
+        Assert.Equal(13, view.Snapshot.LastSequence);
+        Assert.Equal(0, view.Snapshot.UsageRequests);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(4)]
+    public void DifferentHistoryWatermarkCannotCarryObservedTerminal(int historySequence)
+    {
+        using var view = FailedTurn();
+        using var history = JsonDocument.Parse(JsonSerializer.Serialize(new { sessionId = "s", lastSeq = historySequence, messages = Array.Empty<object>() }));
+        view.RestoreHistory(history.RootElement, "s");
+        Assert.Equal("unknown", view.Snapshot.Status);
+        Assert.Null(view.Snapshot.LastError);
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"server.replay.gap\",\"reason\":\"evicted\"}", 3)]
+    [InlineData("{\"type\":\"server.replay.gap\",\"reason\":\"ahead_of_log\"}", 3)]
+    [InlineData("{\"type\":\"session.events_dropped\",\"seq\":4}", 4)]
+    [InlineData("{\"type\":\"server.platform.warning\",\"seq\":5}", 5)]
+    [InlineData("{\"type\":\"turn.started\",\"seq\":4}", 4)]
+    [InlineData("{\"type\":\"session.created\",\"seq\":4}", 4)]
+    public void GapOrNewIncarnationCannotCarryObservedTerminal(string nextEvent, int historySequence)
+    {
+        using var view = FailedTurn();
+        view.Apply(Event(nextEvent));
+        using var history = JsonDocument.Parse(JsonSerializer.Serialize(new { sessionId = "s", lastSeq = historySequence, messages = Array.Empty<object>() }));
+        view.RestoreHistory(history.RootElement, "s");
+        Assert.Equal("unknown", view.Snapshot.Status);
+        Assert.Null(view.Snapshot.LastError);
+        Assert.Empty(view.Snapshot.PendingRequests);
+    }
+
+    [Fact]
+    public void ObservedCancellationStaysSettledButHistoryAloneCannotInventIt()
+    {
+        using var view = new SessionView();
+        view.Apply(Event("""{"sessionId":"s","type":"turn.started","seq":1}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"turn.aborted","seq":2,"reason":"aborted_streaming"}"""));
+        using var history = JsonDocument.Parse("""{"sessionId":"s","lastSeq":2,"messages":[]}""");
+        view.RestoreHistory(history.RootElement, "s");
+        Assert.Equal("idle", view.Snapshot.Status);
+        Assert.Null(view.Snapshot.LastError);
+        using var fresh = new SessionView();
+        fresh.RestoreHistory(history.RootElement, "s");
+        Assert.Equal("unknown", fresh.Snapshot.Status);
+    }
+
+    private static SessionView FailedTurn()
+    {
+        var view = new SessionView();
+        view.Apply(Event("""{"sessionId":"s","type":"turn.started","seq":1}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"turn.error","seq":2,"recoverable":false,"message":"failed"}"""));
+        view.Apply(Event("""{"sessionId":"s","type":"turn.aborted","seq":3,"reason":"internal_error"}"""));
+        return view;
+    }
+
+    [Fact]
     public void MultipleSubscribersAreIndependentAndSlowUiQueueIsBounded()
     {
         using var view = new SessionView();

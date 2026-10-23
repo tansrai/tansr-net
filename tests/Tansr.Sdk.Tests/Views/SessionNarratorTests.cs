@@ -162,6 +162,43 @@ public sealed class SessionNarratorTests
     }
 
     [Fact]
+    public void AuthoritativeHistoryResetsNarratorEpochWithoutRenarratingOldFacts()
+    {
+        var lines = new List<string>();
+        using var narrator = new SessionNarrator(lines.Add, new SessionNarratorOptions { InitialSequence = 100 });
+        narrator.Apply(Event("""{"type":"server.replay.gap","reason":"ahead_of_log"}""", 101));
+        narrator.Apply(Event("""{"type":"turn.started"}""", 1));
+        Assert.Single(lines);
+
+        using var history = JsonDocument.Parse("""{"sessionId":"sess-narr","lastSeq":5,"messages":[{"role":"assistant","blocks":[{"t":"text","text":"historical text"}]}]}""");
+        Assert.Equal(5, narrator.RestoreHistory(history.RootElement, "sess-narr"));
+        narrator.Apply(Event("""{"type":"turn.completed","reason":"completed"}""", 5));
+        Assert.Single(lines);
+        narrator.Apply(Event("""{"type":"turn.started"}""", 6));
+        narrator.Apply(Event("""{"type":"turn.error","scope":"kernel","message":"failed","recoverable":false}""", 7));
+        narrator.Apply(Event("""{"type":"turn.aborted","reason":"internal_error"}""", 8));
+
+        Assert.Equal(4, lines.Count);
+        Assert.Contains(lines, line => line.Contains("turn error [kernel]: failed"));
+        Assert.EndsWith("turn aborted (internal_error)", lines.Last());
+        Assert.DoesNotContain(lines, line => line.Contains("historical text") || line.Contains("turn completed"));
+    }
+
+    [Fact]
+    public void InvalidNarratorHistoryCannotClearEpochBoundary()
+    {
+        var lines = new List<string>();
+        using var narrator = new SessionNarrator(lines.Add);
+        narrator.Apply(Event("""{"type":"server.replay.gap","reason":"ahead_of_log"}""", 10));
+        using var wrong = JsonDocument.Parse("""{"sessionId":"other","lastSeq":0,"messages":[]}""");
+        Assert.Throws<Tansr.Sdk.Client.TansrProtocolException>(() => narrator.RestoreHistory(wrong.RootElement, "sess-narr"));
+        narrator.Apply(Event("""{"type":"turn.started"}""", 1));
+        Assert.Single(lines);
+        narrator.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => narrator.RestoreHistory(wrong.RootElement, "sess-narr"));
+    }
+
+    [Fact]
     public void DeliveryChangesAffectOnlyNewBlocksWithoutRebuildingHistory()
     {
         using var view = new SessionView(new SessionViewOptions { ThinkingDelivery = ThinkingDeliveryMode.Off });

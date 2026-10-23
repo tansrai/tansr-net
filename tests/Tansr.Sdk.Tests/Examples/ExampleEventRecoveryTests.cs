@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Views;
 
 namespace Tansr.Sdk.Tests.Examples;
 
@@ -157,6 +158,43 @@ public sealed class ExampleEventRecoveryTests
         Assert.False(await recovery.ObserveTerminalAsync(Terminal(80), CancellationToken.None));
         Assert.Equal(1, reads);
         Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task TerminalSettlementKeepsObservedErrorAndRecoversNarratorInSameInstall()
+    {
+        using var view = new SessionView();
+        var lines = new List<string>();
+        using var narrator = new SessionNarrator(lines.Add);
+        var gap = new AgentEvent("server.replay.gap", null,
+            Json("""{"sessionId":"s","type":"server.replay.gap","reason":"ahead_of_log"}"""));
+        view.Apply(gap); narrator.Apply(gap);
+        var reads = new Queue<JsonElement>(new[] { History(5), History(8) });
+        var recovery = new ExampleEventRecovery("s", _ => Task.FromResult(reads.Dequeue()),
+            _ => Task.FromResult(Metadata("running", 6)), history =>
+            {
+                view.RestoreHistory(history, "s");
+                narrator.RestoreHistory(history, "s");
+                return Task.CompletedTask;
+            }, () => true);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        var started = Event("turn.started", 6);
+        var error = new AgentEvent("turn.error", "7",
+            Json("""{"sessionId":"s","type":"turn.error","seq":7,"scope":"kernel","recoverable":false,"message":"reconciliation_required"}"""));
+        var aborted = new AgentEvent("turn.aborted", "8",
+            Json("""{"sessionId":"s","type":"turn.aborted","seq":8,"reason":"internal_error"}"""));
+        foreach (var item in new[] { started, error, aborted }) { view.Apply(item); narrator.Apply(item); }
+
+        Assert.True(await recovery.ObserveTerminalAsync(aborted, CancellationToken.None));
+
+        Assert.False(recovery.Required);
+        Assert.Equal("error", view.Snapshot.Status);
+        Assert.Equal("reconciliation_required", view.Snapshot.LastError?.Message);
+        Assert.Equal(4, lines.Count);
+        Assert.Contains(lines, line => line.Contains("turn error [kernel]"));
+        Assert.Contains(lines, line => line.Contains("turn aborted (internal_error)"));
+        Assert.Empty(view.Snapshot.PendingRequests);
+        Assert.Equal(0, view.Snapshot.UsageRequests);
     }
 
     private static ExampleEventRecovery Recovery(Func<CancellationToken, Task<JsonElement>> history, JsonElement metadata,

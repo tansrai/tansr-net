@@ -75,6 +75,19 @@ public sealed class SessionNarrator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Reconciles this observer with the same authoritative history installed by its host.
+    /// Clears a lost log epoch without narrating old messages or inventing runtime events.
+    /// </summary>
+    public long RestoreHistory(JsonElement history, string expectedSessionId)
+    {
+        lock (_gate)
+        {
+            if (_view == null) throw new ObjectDisposedException(nameof(SessionNarrator));
+            return _view.RestoreHistory(history, expectedSessionId);
+        }
+    }
+
     private string? Narrate(string type, JsonElement data, SessionViewSnapshot before, NarrationBlock? block, string id, string? arguments)
     {
         var name = before.Tools.LastOrDefault(tool => tool.Id == id && tool.IsActive)?.Name ??

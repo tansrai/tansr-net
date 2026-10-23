@@ -70,6 +70,7 @@ internal sealed class AssistantWindow : Window
     private string? _closeFailure;
     private bool _busy, _closing, _closed;
     private bool _eventRecovery;
+    private string _eventReceived = "尚未收到事件", _eventHandled = "尚未处理事件", _eventConnection = "未连接";
 
     internal AssistantWindow()
     {
@@ -210,6 +211,8 @@ internal sealed class AssistantWindow : Window
             throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
         }
         _eventRecovery = false;
+        _eventReceived = _eventHandled = "尚未收到事件";
+        _eventConnection = "连接中";
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         var savedInput = sessionLocal.Snapshot.Endpoint == endpoint ? sessionLocal.Snapshot.Input : null;
         _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
@@ -231,7 +234,14 @@ internal sealed class AssistantWindow : Window
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
             ThinkingDelivery = (ThinkingDeliveryMode)_thinkingMode.SelectedIndex,
         });
-        _subscription = _view.Subscribe(snapshot => { if (IsCurrentPresentation(session, sessionLocal, endpoint)) Render(snapshot); }, new DispatcherSynchronizationContext(Dispatcher));
+        _subscription = _view.Subscribe(snapshot => { if (IsCurrentPresentation(session, sessionLocal, endpoint)) Render(snapshot); },
+            new DispatcherSynchronizationContext(Dispatcher), error => Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (!IsCurrentPresentation(session, sessionLocal, endpoint)) return;
+                _eventRecovery = true;
+                _status.Text = "界面呈现失败，暂不可发送；请查状态或断开重连：" + ErrorText(error);
+                SetEnabled();
+            })));
         _narration.Clear();
         _narrator = new SessionNarrator(line => Dispatcher.BeginInvoke(new Action(() =>
         {
@@ -343,6 +353,7 @@ internal sealed class AssistantWindow : Window
                     if (!IsCurrentObservation() || !IsCurrentPresentation(session, local, endpoint))
                         throw new OperationCanceledException("recovery_presentation_replaced", token);
                     view.RestoreHistory(history, session.Id);
+                    narrator?.RestoreHistory(history, session.Id);
                 });
             }, IsCurrentObservation);
         try
@@ -350,6 +361,13 @@ internal sealed class AssistantWindow : Window
             await session.ObserveAsync(async (item, ct) =>
         {
             if (!IsCurrentObservation()) return;
+            // Only keep two bounded metadata watermarks in memory: no payload, token,
+            // archive mirror or per-event disk log. These distinguish a stalled source
+            // from a consumer that is still processing a received event.
+            var eventLabel = item.Name + " #" + (item.Data.TryGetProperty("seq", out var sequence) ? sequence.ToString() : "—") +
+                " @ " + DateTimeOffset.UtcNow.ToString("O");
+            Volatile.Write(ref _eventReceived, eventLabel);
+            Volatile.Write(ref _eventConnection, "观察中");
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
             if (item.Name == "server.replay.gap")
             {
@@ -397,14 +415,23 @@ internal sealed class AssistantWindow : Window
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); }); }
+            if (IsCurrentObservation()) Volatile.Write(ref _eventHandled, eventLabel);
         }, new EventStreamOptions { StopOnGap = false, Reconnect = true }, token);
             if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
+            if (IsCurrentObservation())
+            {
+                Volatile.Write(ref _eventConnection, "已结束");
+                await SetRecoveryAsync(true, "事件观察已结束；请查状态，断开并重新连接后再发送。");
+                QueueCancellationFeedback(cancellation, session, local, endpoint);
+            }
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error)
         {
             if (!IsCurrentObservation()) return;
+            Volatile.Write(ref _eventConnection, "观察失败：" + ErrorText(error));
             view.MarkSourceFailure("event_source", ErrorText(error));
+            await SetRecoveryAsync(true, "事件观察失败，暂不可发送；请更新票据并断开重连：" + ErrorText(error));
             if (cancellation.ObservationFailed(ErrorText(error))) QueueCancellationFeedback(cancellation, session, local, endpoint);
         }
     }
@@ -636,7 +663,9 @@ internal sealed class AssistantWindow : Window
         var session = _session!; var local = _local; var endpoint = _endpoint.Text;
         var metadata = await session.ReadMetadataAsync(_lifetime!.Token);
         if (!IsCurrentPresentation(session, local, endpoint)) return;
-        ShowSessionWindow(new Window { Title = "会话状态 / 上下文", Width = 850, Height = 640, Content = new TextBox { Text = SessionContextText.Format(metadata), IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } });
+        var observation = "\n\n本机事件观察（不代替服务端状态）\n连接：" + Volatile.Read(ref _eventConnection) +
+            "\n最近收到：" + Volatile.Read(ref _eventReceived) + "\n最近处理完成：" + Volatile.Read(ref _eventHandled);
+        ShowSessionWindow(new Window { Title = "会话状态 / 上下文", Width = 850, Height = 640, Content = new TextBox { Text = SessionContextText.Format(metadata) + observation, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } });
     }
     private async Task ShowApplicationPromptAsync()
     {
