@@ -131,12 +131,13 @@ public sealed class SessionSurfaceTests
     public async Task EventFilteringUsesFrozenQueryWithoutFilteringControlLocally()
     {
         using var handler = new Handler(request => request.Path == "/api/sessions" ? Json(Created) :
+            request.Path == "/api/sessions/s" ? Json("{\"sessionId\":\"s\",\"endUserId\":\"user\",\"status\":\"ended\",\"live\":false,\"lastSeq\":0,\"createdAt\":\"2026-10-23T00:00:00Z\",\"lastActivityAt\":\"2026-10-23T00:00:00Z\"}") :
             new(HttpStatusCode.OK) { Content = new StringContent("id: 0\ndata: {\"sessionId\":\"s\",\"seq\":0,\"type\":\"session.ended\"}\n\n", Encoding.UTF8, "text/event-stream") });
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http); var session = await client.CreateSessionAsync(new());
         await session.ObserveAsync((_, _) => Task.CompletedTask, new EventStreamOptions { Exclude = ["msg", "cost"] });
-        Assert.Equal("/api/sessions/s/events?exclude=msg%2Ccost", handler.Requests[^1].Path);
+        Assert.Equal("/api/sessions/s/events?exclude=msg%2Ccost", handler.Requests[1].Path);
         await Assert.ThrowsAsync<ArgumentException>(() => session.ObserveAsync((_, _) => Task.CompletedTask, new EventStreamOptions { Exclude = ["msg.text"] }));
-        Assert.Equal(2, handler.Requests.Count);
+        Assert.Equal(3, handler.Requests.Count);
     }
 
     [Fact]

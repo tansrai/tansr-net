@@ -81,7 +81,7 @@ public sealed class NativeMcpBridgeTests
             await host.DrainAsync(deadline.Token);
             Assert.Equal(0, calls);
             Assert.Equal("native_tool_prior_outcome_unknown", Assert.Single(server.Receipts).GetProperty("message").GetString());
-            Assert.Equal(1, server.MetadataReads);
+            Assert.Equal(2, server.MetadataReads); // initial MCP watermark plus stream termination confirmation
             Assert.Empty(reports); Assert.Empty(server.Errors);
         }
         finally { await connection.CloseAsync(); }
@@ -222,10 +222,14 @@ public sealed class NativeMcpBridgeTests
                     }
                     else if (first[0] == "GET" && first[1] == "/api/sessions/session")
                     {
-                        Assert.True(_resumed); Interlocked.Increment(ref MetadataReads);
+                        Interlocked.Increment(ref MetadataReads);
+                        var ended = Receipts.Count > 0;
+                        if (!ended) Assert.True(_resumed);
                         // The replayed call at seq 0 predates this authoritative watermark. A
                         // live MCP connection never turns its unknown prior outcome into permission to redo it.
-                        await RespondAsync(stream, "{\"sessionId\":\"session\",\"endUserId\":\"bridge-test\",\"live\":true,\"status\":\"idle\",\"lastSeq\":0,\"createdAt\":\"2026-09-27T00:00:00Z\",\"lastActivityAt\":\"2026-09-27T00:00:00Z\"}");
+                        await RespondAsync(stream, "{\"sessionId\":\"session\",\"endUserId\":\"bridge-test\",\"live\":" + (ended ? "false" : "true") +
+                            ",\"status\":\"" + (ended ? "ended" : "idle") + "\",\"lastSeq\":" + (ended ? "2" : "0") +
+                            ",\"createdAt\":\"2026-09-27T00:00:00Z\",\"lastActivityAt\":\"2026-09-27T00:00:00Z\"}");
                     }
                     else if (first[1] == "/api/sessions/session/events")
                     {

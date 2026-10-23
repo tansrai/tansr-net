@@ -32,6 +32,7 @@ public sealed class UnifiedTransportTests
         return response;
     }
     private const string Created = "{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":0}";
+    private const string Ended = "{\"sessionId\":\"s\",\"endUserId\":\"user\",\"status\":\"ended\",\"live\":false,\"lastSeq\":2,\"createdAt\":\"2026-10-23T00:00:00Z\",\"lastActivityAt\":\"2026-10-23T00:00:00Z\"}";
     private static TansrClientOptions Options(bool negotiate = false) => new()
     { BaseUri = new("https://serve.test/"), TokenProvider = _ => Task.FromResult("token"), ReconnectDelay = TimeSpan.Zero, MaxReconnectAttempts = 1, NegotiateEventEnvelope = negotiate };
 
@@ -139,7 +140,8 @@ public sealed class UnifiedTransportTests
     [Fact]
     public async Task EventEnvelopeIsOffByDefaultAndFramesAreReadNatively()
     {
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Json(Created) : Events(Frame(1, "msg.text.delta", ",\"text\":\"a\"") + Frame(2, "session.ended"), echo: false));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Json(Created) : r.RequestUri!.AbsolutePath == "/api/sessions/s" ? Json(Ended) :
+            Events(Frame(1, "msg.text.delta", ",\"text\":\"a\"") + Frame(2, "session.ended"), echo: false));
         using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });
@@ -150,7 +152,8 @@ public sealed class UnifiedTransportTests
     [Fact]
     public async Task NegotiatedEnvelopeIsRequestedEchoedAndUnwrappedToTheFamilyEvent()
     {
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Json(Created) : Events(Enveloped(1, "msg.text.delta", ",\"text\":\"a\"") + Enveloped(2, "session.ended"), echo: true));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Json(Created) : r.RequestUri!.AbsolutePath == "/api/sessions/s" ? Json(Ended) :
+            Events(Enveloped(1, "msg.text.delta", ",\"text\":\"a\"") + Enveloped(2, "session.ended"), echo: true));
         using var http = new HttpClient(handler, false); using var client = new TansrClient(Options(negotiate: true), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });

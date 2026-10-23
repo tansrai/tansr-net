@@ -19,6 +19,7 @@ public sealed partial class TansrClient
     {
         internal string? Id;
         internal long Sequence = -1;
+        internal long EndedSequence = -1;
     }
     private sealed class ObserverFailure : Exception
     {
@@ -79,7 +80,19 @@ public sealed partial class TansrClient
             transport.AssertCurrent(access);
             int count = await ReadEventBytesAsync(stream, bytes, cancellationToken).ConfigureAwait(false);
             transport.AssertCurrent(access);
-            if (count == 0) { decoder.Complete(); return false; }
+            if (count == 0)
+            {
+                decoder.Complete();
+                if (cursor.EndedSequence < 0) return false;
+                // A resumed logical session can replay an older incarnation's ended event.
+                // EOF alone may also be a lost connection before the newer events arrive.
+                // Confirm current termination and that no later events remain unread.
+                var metadata = await session.ReadMetadataAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
+                transport.AssertCurrent(access);
+                return !metadata.IsLive && metadata.Status == SessionStatus.Ended &&
+                    metadata.LastSequence >= cursor.EndedSequence && metadata.LastSequence <= cursor.Sequence;
+            }
             foreach (var frame in decoder.Feed(bytes, count))
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -96,7 +109,7 @@ public sealed partial class TansrClient
                     transport.AssertCurrent(access);
                     if (stopOnGap) throw new TansrProtocolException("event_replay_gap");
                     if (value.TryGetProperty("reason", out var reason) && reason.ValueKind == JsonValueKind.String && reason.GetString() == "ahead_of_log")
-                    { cursor.Sequence = -1; cursor.Id = null; }
+                    { cursor.Sequence = -1; cursor.Id = null; cursor.EndedSequence = -1; }
                     continue;
                 }
                 if (frame.Id is null) throw new TansrProtocolException("invalid_event_id");
@@ -126,7 +139,8 @@ public sealed partial class TansrClient
                 await NotifyAsync(observer, new AgentEvent(name, frame.Id, normalized), cancellationToken).ConfigureAwait(false);
                 transport.AssertCurrent(access);
                 cursor.Sequence = sequence; cursor.Id = frame.Id; session.ObserveSequence(sequence);
-                if (name == "session.ended") return true;
+                if (name == "session.ended") cursor.EndedSequence = sequence;
+                else if (name == "session.created") cursor.EndedSequence = -1;
             }
         }
     }

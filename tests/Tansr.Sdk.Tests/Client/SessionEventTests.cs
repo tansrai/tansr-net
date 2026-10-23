@@ -74,6 +74,9 @@ public sealed class SessionEventTests
     private static HttpResponseMessage Events(string text) => Events(new FragmentedStream(Encoding.UTF8.GetBytes(text)));
     private static string Frame(int seq, string type, string extra = "") => "id: " + seq + "\ndata: {\"sessionId\":\"s\",\"seq\":" + seq + ",\"type\":\"" + type + "\"" + extra + "}\n\n";
     private static HttpResponseMessage Created() => Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":0}");
+    private static HttpResponseMessage Metadata(bool live, int sequence) => Json("{\"sessionId\":\"s\",\"endUserId\":\"user\",\"status\":\"" +
+        (live ? "idle" : "ended") + "\",\"live\":" + (live ? "true" : "false") + ",\"lastSeq\":" + sequence +
+        ",\"createdAt\":\"2026-10-23T00:00:00Z\",\"lastActivityAt\":\"2026-10-23T00:00:00Z\"}");
     private static TansrClientOptions Options() => new()
     {
         BaseUri = new("https://serve.test/"),
@@ -83,10 +86,117 @@ public sealed class SessionEventTests
     };
 
     [Fact]
+    public async Task TerminalReplayDoesNotStopBeforeTheCurrentIncarnation()
+    {
+        var text = Frame(1, "session.ended") + Frame(2, "session.created") + Frame(3, "turn.started") +
+            Frame(4, "msg.text.delta", ",\"text\":\"OK\"") + Frame(5, "turn.completed") + Frame(6, "session.ended");
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(text) : Metadata(false, 6));
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
+
+        await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });
+
+        Assert.Equal(new[] { "1", "2", "3", "4", "5", "6" }, seen.Select(item => item.Id));
+        Assert.Equal("OK", seen[3].Data.GetProperty("text").GetString());
+        Assert.Equal(6, session.LastSequence); Assert.Single(handler.EventCursors);
+        Assert.Equal(1, handler.Paths.Count(path => path == "GET /api/sessions/s"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task TerminalReplayFollowedByEofChecksLivenessAndUnreadWatermark(bool live)
+    {
+        int streams = 0, metadata = 0;
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal)
+                ? Events(++streams == 1 ? Frame(1, "session.ended") : Frame(2, "session.created") + Frame(3, "session.ended"))
+                : Metadata(++metadata == 1 && live, 3));
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<string?>();
+
+        await session.ObserveAsync((item, _) => { seen.Add(item.Id); return Task.CompletedTask; });
+
+        Assert.Equal(new[] { "1", "2", "3" }, seen); Assert.Equal(new string?[] { null, "1" }, handler.EventCursors);
+        Assert.Equal(2, metadata); Assert.Single(handler.Paths, path => path.StartsWith("POST", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(false, 1)]
+    [InlineData(true, 2)]
+    public async Task TerminalReplayWithLiveMetadataRetainsTheReconnectLimit(bool reconnect, int connections)
+    {
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(Frame(1, "session.ended")) : Metadata(true, 1));
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
+        var session = await client.CreateSessionAsync(new()); var seen = new List<string?>();
+
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((item, _) =>
+        { seen.Add(item.Id); return Task.CompletedTask; }, new EventStreamOptions { Reconnect = reconnect }));
+
+        Assert.Equal("event_stream_disconnected", error.Code); Assert.Equal(connections, handler.EventCursors.Count);
+        Assert.Equal("1", Assert.Single(seen));
+    }
+
+    [Theory]
+    [InlineData(403)]
+    [InlineData(404)]
+    public async Task TerminalReplayDoesNotSwallowMetadataRefusal(int status)
+    {
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(Frame(1, "session.ended")) :
+            new HttpResponseMessage((HttpStatusCode)status) { Content = new StringContent("{\"code\":\"not_found\"}", Encoding.UTF8, "application/json") });
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
+        var session = await client.CreateSessionAsync(new());
+
+        var error = await Assert.ThrowsAsync<TansrHttpException>(() => session.ObserveAsync((_, _) => Task.CompletedTask));
+
+        Assert.Equal(status, error.StatusCode); Assert.Single(handler.EventCursors);
+    }
+
+    [Fact]
+    public async Task TerminalReplayMetadataReadRemainsCancelableWithoutInterruptingTheSession()
+    {
+        using var waiting = new WaitingStream();
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(Frame(1, "session.ended")) :
+            new HttpResponseMessage(HttpStatusCode.OK) { Content = new StreamContent(waiting) { Headers = { ContentType = new MediaTypeHeaderValue("application/json") } } });
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
+        var session = await client.CreateSessionAsync(new()); using var cancellation = new CancellationTokenSource();
+
+        var observation = session.ObserveAsync((_, _) => Task.CompletedTask, cancellation.Token);
+        await waiting.Reading.Task.WaitAsync(TimeSpan.FromSeconds(5)); cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => observation.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.True(waiting.Disposed); Assert.Single(handler.EventCursors);
+        Assert.DoesNotContain(handler.Paths, path => path.Contains("interrupt", StringComparison.Ordinal) || path.StartsWith("DELETE", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task TerminalReplayMetadataCannotConfirmTerminationAfterPrincipalChanges()
+    {
+        var principal = "app/user-a"; var options = Options(); options.PrincipalProvider = () => principal;
+        using var handler = new Handler(r =>
+        {
+            if (r.Method == HttpMethod.Post) return Created();
+            if (r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal)) return Events(Frame(1, "session.ended"));
+            principal = "app/user-b"; return Metadata(false, 1);
+        });
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
+        var session = await client.CreateSessionAsync(new());
+
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => session.ObserveAsync((_, _) => Task.CompletedTask));
+
+        Assert.Equal("context_changed", error.Code); Assert.Single(handler.EventCursors);
+    }
+
+    [Fact]
     public async Task EmptyLogSentinelDoesNotSuppressTheFirstEvent()
     {
         using var handler = new Handler(r => r.Method == HttpMethod.Post
-            ? Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}") : Events(Frame(0, "session.ended")));
+            ? Json("{\"sessionId\":\"s\",\"resumed\":false,\"lastSeq\":-1}") :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(Frame(0, "session.ended")) : Metadata(false, 0));
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         Assert.Equal(-1, session.LastSequence);
@@ -100,7 +210,8 @@ public sealed class SessionEventTests
     public async Task Utf8CrlfAndMultilineDataSurviveEveryByteBoundary()
     {
         var text = ": heartbeat\r\n\r\nid: 1\r\ndata: {\"sessionId\":\"s\",\"seq\":1,\r\ndata: \"type\":\"msg.text.delta\",\"text\":\"你😀\"}\r\n\r\n" + Frame(2, "session.ended");
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(text));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(text) : Metadata(false, 2));
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); var seen = new List<AgentEvent>();
         await session.ObserveAsync((item, _) => { seen.Add(item); return Task.CompletedTask; });
@@ -112,7 +223,7 @@ public sealed class SessionEventTests
     public async Task ReconnectUsesLastDeliveredIdAndDeduplicatesReplay()
     {
         int connections = 0;
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : r.RequestUri!.AbsolutePath == "/api/sessions/s" ? Metadata(false, 2) :
             Events(Interlocked.Increment(ref connections) == 1 ? Frame(1, "msg.text.delta", ",\"text\":\"one\"")
                 : Frame(1, "msg.text.delta", ",\"text\":\"one\"") + Frame(2, "session.ended")));
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
@@ -126,7 +237,8 @@ public sealed class SessionEventTests
     [Fact]
     public async Task MultipleObserversReceiveIndependentCompleteStreams()
     {
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(Frame(1, "msg.text.delta") + Frame(2, "session.ended")));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(Frame(1, "msg.text.delta") + Frame(2, "session.ended")) : Metadata(false, 2));
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(Options(), http);
         var session = await client.CreateSessionAsync(new()); int one = 0, two = 0;
         await Task.WhenAll(session.ObserveAsync((_, _) => { one++; return Task.CompletedTask; }), session.ObserveAsync((_, _) => { two++; return Task.CompletedTask; }));
@@ -170,7 +282,8 @@ public sealed class SessionEventTests
     public async Task TicketRefreshForTheSamePrincipalPreservesBufferedEvents()
     {
         var bytes = Encoding.UTF8.GetBytes(Frame(1, "msg.text.delta", ",\"text\":\"one\"") + Frame(2, "session.ended"));
-        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() : Events(new FragmentedStream(bytes, bytes.Length)));
+        using var handler = new Handler(r => r.Method == HttpMethod.Post ? Created() :
+            r.RequestUri!.AbsolutePath.EndsWith("/events", StringComparison.Ordinal) ? Events(new FragmentedStream(bytes, bytes.Length)) : Metadata(false, 2));
         var token = "ticket-original";
         var options = Options(); options.PrincipalProvider = () => "app/user-a"; options.TokenProvider = _ => Task.FromResult(token);
         using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = new TansrClient(options, http);
