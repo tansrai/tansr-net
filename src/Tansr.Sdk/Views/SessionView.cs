@@ -8,7 +8,7 @@ namespace Tansr.Sdk.Views;
 /// 将一条会话事件流投影为有界不可变快照；不发起网络请求，不执行工具，不改变会话事实。
 /// 一个 ObserveAsync 泵调用 Apply，多个订阅者共享快照，不争抢事件流。
 /// </summary>
-public sealed class SessionView : IDisposable
+public sealed partial class SessionView : IDisposable
 {
     private const long MaximumEventSequence = 9007199254740991L;
     private readonly object _gate = new();
@@ -27,7 +27,7 @@ public sealed class SessionView : IDisposable
     private long _structuredBytes, _turn, _nextTool, _version, _nextMessage, _turnTokens, _sessionTokens, _usageRequests;
     private long? _lastSequence;
     private string? _sessionId;
-    private bool _running, _failed, _compacting, _sealed, _gap, _truncated, _disposed;
+    private bool _running, _failed, _compacting, _sealed, _gap, _truncated, _disposed, _runtimeUnknown;
 
     public SessionView(SessionViewOptions? options = null)
     {
@@ -143,6 +143,7 @@ public sealed class SessionView : IDisposable
             if (type == "server.replay.gap")
             {
                 _gap = true;
+                _runtimeUnknown = true; _requests.Clear();
                 Notice(type, String(data, "reason"), false, data.Clone());
                 // 新日志纪元必须重建，旧快照不与新序号拼接。
                 if (String(data, "reason") == "ahead_of_log") _epochLost = true;
@@ -196,12 +197,12 @@ public sealed class SessionView : IDisposable
         switch (type)
         {
             case "turn.started":
-                _turn++; _running = true; _failed = false; _error = null; _turnTokens = 0; _current = null; _blocks.Clear(); _sealed = false;
+                _turn++; _running = true; _runtimeUnknown = false; _failed = false; _error = null; _turnTokens = 0; _current = null; _blocks.Clear(); _sealed = false;
                 break;
             case "turn.completed":
             case "turn.aborted":
             case "session.ended":
-                _running = false; _failed = String(data, "reason") == "model_error" || String(data, "reason") == "internal_error";
+                _running = false; _runtimeUnknown = false; _failed = String(data, "reason") == "model_error" || String(data, "reason") == "internal_error";
                 foreach (var tool in _tools.Values.Where(t => IsActive(t.Status))) tool.Status = "aborted";
                 _current = null; _blocks.Clear(); _requests.Clear();
                 break;
@@ -383,7 +384,7 @@ public sealed class SessionView : IDisposable
 
     private SessionViewSnapshot BuildSnapshot()
     {
-        var status = _failed ? "error" : !_running ? "idle" : _compacting ? "compacting" :
+        var status = _failed ? "error" : _runtimeUnknown ? "unknown" : !_running ? "idle" : _compacting ? "compacting" :
             _requests.Values.Any(x => x.Kind == "permission") || _tools.Values.Any(x => x.Status == "awaiting_permission") ? "awaiting_permission" :
             _requests.Values.Any(x => x.Kind == "question") ? "awaiting_question" :
             _tools.Values.Any(x => IsActive(x.Status)) ? "tooling" :

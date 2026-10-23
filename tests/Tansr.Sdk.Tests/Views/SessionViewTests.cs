@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Views;
 
@@ -94,6 +95,61 @@ public sealed class SessionViewTests
         view.Apply(Event("{\"type\":\"turn.started\",\"seq\":1}"));
         Assert.True(view.Snapshot.HasEventGap);
         Assert.Equal(100, view.Snapshot.LastSequence);
+    }
+
+    [Fact]
+    public void AuthoritativeHistoryRestoresGapWithoutRestoringRuntimeFacts()
+    {
+        using var view = new SessionView();
+        view.Apply(Event("{\"type\":\"server.replay.gap\",\"reason\":\"evicted\",\"requestedAfterSeq\":1,\"droppedEvents\":2}"));
+        using var history = JsonDocument.Parse("{\"sessionId\":\"s\",\"lastSeq\":42,\"messages\":[{\"role\":\"user\",\"blocks\":[{\"t\":\"text\",\"text\":\"old\"}]}]}");
+        Assert.Equal(42, view.RestoreHistory(history.RootElement, "s"));
+        Assert.False(view.Snapshot.HasEventGap);
+        Assert.Equal(42, view.Snapshot.LastSequence);
+        Assert.Equal("old", Assert.Single(Assert.Single(view.Snapshot.Messages).Parts).Text);
+        Assert.Equal("unknown", view.Snapshot.Status);
+        Assert.Empty(view.Snapshot.PendingRequests);
+    }
+
+    [Fact]
+    public void PartialHistoryCannotClearAReplayGap()
+    {
+        using var view = new SessionView();
+        view.Apply(Event("{\"type\":\"server.replay.gap\",\"reason\":\"evicted\"}"));
+        using var history = JsonDocument.Parse("{\"sessionId\":\"s\",\"lastSeq\":4,\"offset\":0,\"total\":2,\"messages\":[{\"role\":\"user\",\"blocks\":[]}]}");
+        Assert.Throws<TansrProtocolException>(() => view.RestoreHistory(history.RootElement, "s"));
+        Assert.True(view.Snapshot.HasEventGap);
+    }
+
+    [Fact]
+    public void RestoredHistoryFiltersCoveredTextButAcceptsNewPermissionAndTerminal()
+    {
+        using var view = new SessionView();
+        using var history = JsonDocument.Parse("{\"sessionId\":\"s\",\"lastSeq\":42,\"messages\":[{\"role\":\"assistant\",\"blocks\":[{\"t\":\"text\",\"text\":\"answer\"}]}]}");
+        view.RestoreHistory(history.RootElement, "s");
+        view.Apply(Event("{\"type\":\"msg.block.start\",\"seq\":40,\"index\":0,\"blockType\":\"text\"}"));
+        view.Apply(Event("{\"type\":\"msg.text.delta\",\"seq\":41,\"index\":0,\"text\":\"answer\"}"));
+        view.Apply(Event("{\"type\":\"turn.completed\",\"seq\":42}"));
+        Assert.Single(view.Snapshot.Messages);
+        Assert.Equal("unknown", view.Snapshot.Status);
+        view.Apply(Event("{\"type\":\"server.permission.request\",\"seq\":43,\"payload\":{\"requestId\":\"new\",\"digest\":\"d\",\"name\":\"Shell\"}}"));
+        Assert.Equal("new", Assert.Single(view.Snapshot.PendingRequests).Id);
+        view.Apply(Event("{\"type\":\"turn.aborted\",\"seq\":44}"));
+        Assert.Empty(view.Snapshot.PendingRequests);
+        Assert.Equal("idle", view.Snapshot.Status);
+        Assert.Equal(0, view.Snapshot.SessionTokens);
+    }
+
+    [Fact]
+    public void MalformedHistoryDoesNotPartiallyReplacePresentation()
+    {
+        using var view = new SessionView();
+        view.AppendUserMessage("keep");
+        view.Apply(Event("{\"type\":\"server.replay.gap\",\"reason\":\"evicted\"}"));
+        using var history = JsonDocument.Parse("{\"sessionId\":\"s\",\"lastSeq\":42,\"messages\":[{\"role\":\"assistant\",\"blocks\":[null]}]}");
+        Assert.Throws<TansrProtocolException>(() => view.RestoreHistory(history.RootElement, "s"));
+        Assert.True(view.Snapshot.HasEventGap);
+        Assert.Equal("keep", Assert.Single(Assert.Single(view.Snapshot.Messages).Parts).Text);
     }
 
     [Fact]

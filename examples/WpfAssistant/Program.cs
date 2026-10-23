@@ -35,6 +35,8 @@ internal sealed class AssistantWindow : Window
     private readonly TextBlock _requestSummary = new() { TextWrapping = TextWrapping.Wrap };
     private readonly List<QuestionEditor> _questionEditors = new();
     private readonly List<Button> _sessionButtons = new();
+    private readonly HashSet<Button> _recoveryButtons = new();
+    private readonly Dictionary<Button, string> _requestButtons = new();
     private readonly ComboBox _textMode = new() { Width = 85, ItemsSource = new[] { "stream", "final" }, SelectedIndex = 0 };
     private readonly ComboBox _thinkingMode = new() { Width = 85, ItemsSource = new[] { "stream", "final", "off" }, SelectedIndex = 0 };
     private readonly ComboBox _narratorMode = new() { Width = 90, ItemsSource = new[] { "quiet", "normal", "verbose" }, SelectedIndex = 1 };
@@ -67,6 +69,7 @@ internal sealed class AssistantWindow : Window
     private readonly TextBox _terminalOutput = new() { IsReadOnly = true, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.Wrap };
     private string? _closeFailure;
     private bool _busy, _closing, _closed;
+    private bool _eventRecovery;
 
     internal AssistantWindow()
     {
@@ -78,11 +81,11 @@ internal sealed class AssistantWindow : Window
         top.Children.Add(Row(Label("恢复会话 ID（可空）"), _resume, Label("新会话模型（可空）"), _model,
             _connect, Button("更新票据", UpdateTokenAsync, false)));
         top.Children.Add(Row(Label("正文呈现"), _textMode, Label("思考呈现"), _thinkingMode,
-            Button("历史", ShowHistoryAsync),
-            Button("状态", ShowMetadataAsync),
+            Button("历史", ShowHistoryAsync, allowDuringRecovery: true),
+            Button("状态", ShowMetadataAsync, allowDuringRecovery: true),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())),
             Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
-            Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync), Button("仅断开本机连接", DetachAsync)));
+            Button("媒体 / 转写 / 朗读", OpenMediaAsync), Button("快照管理", ManageCheckpointsAsync), Button("关闭会话", CloseConnectionAsync, allowDuringRecovery: true), Button("仅断开本机连接", DetachAsync, allowDuringRecovery: true)));
         top.Children.Add(Row(Button("配置 / 记忆（preview）", OpenControlsAsync), Button("提示词来源", ShowApplicationPromptAsync)));
         top.Children.Add(Row(Button("会话工作台 / 能力 / Task", OpenWorkspaceAsync), Button("撤销本机 Skills / MCP", RevokeExtensionsAsync), Label("叙述"), _narratorMode, Button("运行叙述", ShowNarrationAsync)));
         top.Children.Add(Row(Button("启动设备记忆宿主", StartMemoryDeviceAsync, false), Button("设备记忆状态", MemoryDeviceStatusAsync, false), Button("停止设备（不保证远端排空）", StopMemoryDeviceAsync, false)));
@@ -99,7 +102,7 @@ internal sealed class AssistantWindow : Window
         var bottom = new StackPanel(); DockPanel.SetDock(bottom, Dock.Bottom); layout.Children.Add(bottom);
         bottom.Children.Add(_draft);
         bottom.Children.Add(Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
-            Button("取消当前工作", CancelCurrentAsync),
+            Button("取消当前工作", CancelCurrentAsync, allowDuringRecovery: true),
             new TextBlock { Text = "失败或结果未知时保留草稿；请先查历史，避免重复发送。", VerticalAlignment = VerticalAlignment.Center }));
         bottom.Children.Add(Row(Button("同轮插入草稿", InsertAsync), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync)));
         bottom.Children.Add(_status);
@@ -107,11 +110,11 @@ internal sealed class AssistantWindow : Window
         DockPanel.SetDock(requestPanel, Dock.Right); layout.Children.Add(requestPanel);
         requestPanel.Children.Add(Label("待处理请求（服务器终态决定是否仍有效）")); requestPanel.Children.Add(_requests);
         requestPanel.Children.Add(_requestSummary);
-        requestPanel.Children.Add(Row(Button("批准", () => ApproveAsync(true)), Button("拒绝", () => ApproveAsync(false))));
+        requestPanel.Children.Add(Row(Button("批准", () => ApproveAsync(true), allowDuringRecovery: true, requestKind: "permission"), Button("拒绝", () => ApproveAsync(false), allowDuringRecovery: true, requestKind: "permission")));
         requestPanel.Children.Add(new ScrollViewer { Content = _questions, MaxHeight = 300, VerticalScrollBarVisibility = ScrollBarVisibility.Auto });
-        requestPanel.Children.Add(Button("提交问题答案", AnswerAsync));
+        requestPanel.Children.Add(Button("提交问题答案", AnswerAsync, allowDuringRecovery: true, requestKind: "question"));
         layout.Children.Add(_conversation);
-        _requests.SelectionChanged += (_, _) => RenderRequest();
+        _requests.SelectionChanged += (_, _) => { RenderRequest(); SetEnabled(); };
         _textMode.SelectionChanged += (_, _) => UpdateDelivery();
         _thinkingMode.SelectionChanged += (_, _) => UpdateDelivery();
         _draft.TextChanged += (_, _) => { _draftRevision++; _saveTimer.Start(); };
@@ -143,11 +146,13 @@ internal sealed class AssistantWindow : Window
     private static WrapPanel Row(params UIElement[] elements)
     { var panel = new WrapPanel { Margin = new Thickness(0, 3, 0, 3) }; foreach (var element in elements) panel.Children.Add(element); return panel; }
 
-    private Button Button(string text, Func<Task> action, bool needsSession = true)
+    private Button Button(string text, Func<Task> action, bool needsSession = true, bool allowDuringRecovery = false, string? requestKind = null)
     {
         var button = new Button { Content = text, Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(3) };
         AutomationProperties.SetAutomationId(button, text);
         if (needsSession) _sessionButtons.Add(button);
+        if (allowDuringRecovery) _recoveryButtons.Add(button);
+        if (requestKind != null) _requestButtons.Add(button, requestKind);
         button.Click += async (_, _) => await RunAsync(action);
         return button;
     }
@@ -164,7 +169,9 @@ internal sealed class AssistantWindow : Window
 
     private void SetEnabled()
     {
-        foreach (var button in _sessionButtons) button.IsEnabled = !_busy && _session != null;
+        foreach (var button in _sessionButtons)
+            button.IsEnabled = !_busy && _session != null && (!_eventRecovery || _recoveryButtons.Contains(button)) &&
+                (!_requestButtons.TryGetValue(button, out var kind) || CurrentRequest(kind) != null);
         if (_connect != null) _connect.IsEnabled = !_busy && _session == null;
         _textMode.IsEnabled = _thinkingMode.IsEnabled = !_closing;
         _narratorMode.IsEnabled = _session == null;
@@ -202,6 +209,7 @@ internal sealed class AssistantWindow : Window
             await connection.CloseAsync();
             throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
         }
+        _eventRecovery = false;
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         var savedInput = sessionLocal.Snapshot.Endpoint == endpoint ? sessionLocal.Snapshot.Input : null;
         _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
@@ -314,21 +322,88 @@ internal sealed class AssistantWindow : Window
     {
         var storage = _storage; var narrator = _narrator; var nativeTools = _nativeTools;
         var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
+        bool IsCurrentObservation() => !token.IsCancellationRequested && ReferenceEquals(_session, session) &&
+            ReferenceEquals(_view, view) && ReferenceEquals(_local, local);
+        async Task SetRecoveryAsync(bool recovering, string? message = null)
+        {
+            await Dispatcher.InvokeAsync(() =>
+            {
+                if (!IsCurrentObservation() || !IsCurrentPresentation(session, local, endpoint)) return;
+                _eventRecovery = recovering;
+                if (message != null) _status.Text = message;
+                SetEnabled();
+            });
+        }
+        var recovery = new ExampleEventRecovery(session.Id,
+            ct => session.GetHistoryAsync(ct), ct => session.GetMetadataAsync(ct),
+            async history =>
+            {
+                await Dispatcher.InvokeAsync(() =>
+                {
+                    if (!IsCurrentObservation() || !IsCurrentPresentation(session, local, endpoint))
+                        throw new OperationCanceledException("recovery_presentation_replaced", token);
+                    view.RestoreHistory(history, session.Id);
+                });
+            }, IsCurrentObservation);
         try
         {
             await session.ObserveAsync(async (item, ct) =>
         {
+            if (!IsCurrentObservation()) return;
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
+            if (item.Name == "server.replay.gap")
+            {
+                // A gap is a recovery signal, not a terminal error. Keep this SSE alive,
+                // rebuild the bounded presentation from the same session's authoritative
+                // history, then let the stream deliver newer events. History never creates
+                // approval tickets or completion/usage facts.
+                await SetRecoveryAsync(true, "事件断档，正在恢复权威历史；暂不可发送，可取消或断开。");
+                try
+                {
+                    await recovery.RecoverGapAsync(ct).ConfigureAwait(false);
+                    await SetRecoveryAsync(recovery.Required, !recovery.Required ? "权威历史已恢复；会话空闲，运行呈现以实时事件为准。" :
+                        "权威历史已恢复，等待实时事件收口；可处理新收到的审批、取消或断开。");
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    if (!IsCurrentObservation()) return;
+                    view.MarkSourceFailure("history_recovery", ErrorText(error));
+                    await SetRecoveryAsync(true, "权威历史恢复失败：" + ErrorText(error) + "；可取消或断开后重连。");
+                }
+            }
+            if (!IsCurrentObservation()) return;
             if (cancellation.Observe(item)) QueueCancellationFeedback(cancellation, session, local, endpoint);
+            if ((item.Name is "turn.completed" or "turn.aborted") && recovery.Required)
+            {
+                try
+                {
+                    var restored = await recovery.ObserveTerminalAsync(item, ct).ConfigureAwait(false);
+                    if (restored)
+                    {
+                        await SetRecoveryAsync(false, "权威历史已补齐本轮正文；本轮终态已由服务端事件确认。");
+                        QueueCancellationFeedback(cancellation, session, local, endpoint);
+                    }
+                    else await SetRecoveryAsync(true, "历史尚未确认完整，仍可审批、取消或断开；请稍后重连查阅。");
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                catch (Exception error)
+                {
+                    if (!IsCurrentObservation()) return;
+                    view.MarkSourceFailure("history_recovery", ErrorText(error));
+                    await SetRecoveryAsync(true, "历史补齐未确认：" + ErrorText(error) + "；可取消或断开后重连。");
+                }
+            }
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); }); }
-        }, token);
+        }, new EventStreamOptions { StopOnGap = false, Reconnect = true }, token);
             if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error)
         {
+            if (!IsCurrentObservation()) return;
             view.MarkSourceFailure("event_source", ErrorText(error));
             if (cancellation.ObservationFailed(ErrorText(error))) QueueCancellationFeedback(cancellation, session, local, endpoint);
         }
@@ -340,12 +415,12 @@ internal sealed class AssistantWindow : Window
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.ScrollToEnd();
         _saveTimer.Start();
         var selected = (_requests.SelectedItem as RequestItem)?.Request.Id;
-        var keys = snapshot.PendingRequests.Select(x => x.Id).ToArray();
-        if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request.Id).SequenceEqual(keys))
+        if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request).SequenceEqual(snapshot.PendingRequests))
         {
             _requests.ItemsSource = snapshot.PendingRequests.Select(x => new RequestItem(x)).ToArray();
             _requests.SelectedItem = _requests.Items.Cast<RequestItem>().FirstOrDefault(x => x.Request.Id == selected) ?? _requests.Items.Cast<RequestItem>().FirstOrDefault();
         }
+        SetEnabled();
     }
 
     private Task OpenMediaAsync()
@@ -533,17 +608,25 @@ internal sealed class AssistantWindow : Window
         }
     }
 
+    private SessionRequestView? CurrentRequest(string kind)
+    {
+        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != kind || _view == null) return null;
+        // Only the current event projection can supply a ticket. History never does;
+        // a queued UI selection must not outlive a close/gap or replacement request.
+        return _view.Snapshot.PendingRequests.FirstOrDefault(request => ReferenceEquals(request, item.Request));
+    }
+
     private async Task ApproveAsync(bool allow)
     {
-        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "permission") throw new InvalidOperationException("select_permission_request");
-        await _session!.PermissionAsync(item.Request.Id, Get(item.Request.Data, "digest"), allow);
+        var request = CurrentRequest("permission") ?? throw new InvalidOperationException("select_current_permission_request");
+        await _session!.PermissionAsync(request.Id, Get(request.Data, "digest"), allow);
         _status.Text = "审批回执已受理，等待服务端关闭该请求。";
     }
 
     private async Task AnswerAsync()
     {
-        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "question") throw new InvalidOperationException("select_question_request");
-        await _session!.AnswerAsync(item.Request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
+        var request = CurrentRequest("question") ?? throw new InvalidOperationException("select_current_question_request");
+        await _session!.AnswerAsync(request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
         _status.Text = "答案已提交，等待服务端关闭该请求。";
     }
 
@@ -616,6 +699,7 @@ internal sealed class AssistantWindow : Window
         _nativeTools?.Dispose(); _nativeTools = null; _narrator?.Dispose(); _narrator = null; _subscription?.Dispose(); _view?.Dispose();
         if (_connection != null) await _connection.CloseAsync(); _connection = null;
         _lifetime?.Dispose(); _lifetime = null;
+        _eventRecovery = false;
         _session = null; _client = null; _view = null; _controls = null; _status.Text = (settled?.Completed == true ? "核心资源已确认排空；未删除历史。" : "会话关闭请求已受理；旧合同未提供远端排空证明，未删除历史。") + _localSaveFailure;
     }
 
@@ -643,7 +727,7 @@ internal sealed class AssistantWindow : Window
         _lifetime?.Dispose(); _lifetime = null;
         try { if (_connection != null) await _connection.CloseAsync(); }
         catch (Exception error) { cleanupFailure = ErrorText(error); }
-        finally { _connection = null; _session = null; _client = null; _view = null; }
+        finally { _connection = null; _session = null; _client = null; _view = null; _eventRecovery = false; }
         _status.Text = (ownedLocalServe ? (cleanupFailure == null ? "已断开并回收本实例启动的本地 Serve；未删除历史。" : "已断开本机连接；本地 Serve 或 MCP 收尾未确认，可退出，未删除历史。") : "已断开本机连接，可正常退出；未关闭或删除远端会话，远端工作可能继续。") +
             (_closeFailure == null ? "" : " 上次远端关闭未确认：" + _closeFailure) +
             (cleanupFailure == null ? "" : " 本机工具收尾未确认：" + cleanupFailure) + _localSaveFailure;
