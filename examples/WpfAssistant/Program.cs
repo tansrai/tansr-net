@@ -226,7 +226,7 @@ internal sealed class AssistantWindow : Window
             createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools));
             session = await MeasureConnectionStageAsync("CreateResume · 能力发现与创建 / 恢复会话", () => client.CreateSessionAsync(createOptions, connectToken));
         }
-        catch { await connection.CloseAsync(); throw; }
+        catch (Exception error) { await CleanupFailedConnectionAsync(connection.CloseAsync, error); throw; }
         // Serve 已接受建会后，先保留真实 ID；初始化失败不能把重连变成另一笔新建。
         _resume.Text = session.Id;
         try
@@ -238,7 +238,7 @@ internal sealed class AssistantWindow : Window
         }
         catch (Exception error)
         {
-            await connection.CloseAsync();
+            await CleanupFailedConnectionAsync(connection.CloseAsync, error);
             throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
         }
         _eventRecovery = false;
@@ -263,7 +263,7 @@ internal sealed class AssistantWindow : Window
             await MeasureConnectionStageAsync("NativeReady · 核对原生工具恢复水位", () => _nativeTools.Ready.WaitAsync(connectToken));
             connectToken.ThrowIfCancellationRequested();
         }
-        catch { await DetachAsync(); throw; }
+        catch (Exception error) { await CleanupFailedConnectionAsync(DetachAsync, error); throw; }
         _view = new SessionView(new SessionViewOptions
         {
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
@@ -294,7 +294,7 @@ internal sealed class AssistantWindow : Window
     }
 
     // 仅记录本机界面耗时，最多保留十二段；不记录正文、票据或逐事件轨迹，也不重试请求。
-    private async Task<T> MeasureConnectionStageAsync<T>(string stage, Func<Task<T>> action, Func<bool>? isCurrent = null)
+    private async Task<T> MeasureConnectionStageAsync<T>(string stage, Func<Task<T>> action, Func<bool>? isCurrent = null, Exception? precedingError = null)
     {
         var elapsed = Stopwatch.StartNew();
         DispatcherTimer? timer = null;
@@ -304,15 +304,17 @@ internal sealed class AssistantWindow : Window
             void ShowWaiting()
             {
                 if (isCurrent == null || isCurrent())
-                    _status.Text = stage + "，已等待 " + elapsed.Elapsed.TotalSeconds.ToString("F1") + " 秒；这不是模型生成耗时。";
+                    _status.Text = (precedingError == null ? "" : "接入失败：" + ErrorText(precedingError) + "；") +
+                        stage + "，已等待 " + elapsed.Elapsed.TotalSeconds.ToString("F1") + " 秒；这不是模型生成耗时。";
             }
             timer.Tick += (_, _) => ShowWaiting();
             ShowWaiting(); timer.Start();
         });
         var outcome = "完成";
+        Exception? stageError = null;
         try { return await action(); }
-        catch (OperationCanceledException) { outcome = "取消 / 超时"; throw; }
-        catch { outcome = "失败"; throw; }
+        catch (OperationCanceledException error) { outcome = "取消 / 超时"; stageError = error; throw; }
+        catch (Exception error) { outcome = "失败"; stageError = error; throw; }
         finally
         {
             elapsed.Stop();
@@ -323,14 +325,26 @@ internal sealed class AssistantWindow : Window
                 var summary = stage + "：" + outcome + "，" + elapsed.Elapsed.TotalMilliseconds.ToString("F0") + " ms";
                 if (_connectionStages.Count >= 12) _connectionStages.Dequeue();
                 _connectionStages.Enqueue(summary);
-                _status.Text = summary;
+                // 请求错误立即展示，不等后续本机资源释放；诊断队列仍只保存阶段和耗时。
+                var displayedError = precedingError ?? stageError;
+                _status.Text = summary + (displayedError == null ? "" : "；" + ErrorText(displayedError));
             });
         }
     }
 
-    private async Task MeasureConnectionStageAsync(string stage, Func<Task> action, Func<bool>? isCurrent = null)
+    private async Task MeasureConnectionStageAsync(string stage, Func<Task> action, Func<bool>? isCurrent = null, Exception? precedingError = null)
     {
-        await MeasureConnectionStageAsync(stage, async () => { await action(); return true; }, isCurrent);
+        await MeasureConnectionStageAsync(stage, async () => { await action(); return true; }, isCurrent, precedingError);
+    }
+
+    private async Task CleanupFailedConnectionAsync(Func<Task> cleanup, Exception requestError)
+    {
+        try { await MeasureConnectionStageAsync("Cleanup · 释放本机接入资源", cleanup, precedingError: requestError); }
+        catch (Exception cleanupError)
+        {
+            // 清理失败不能替换原接入错误，也不因此关闭或重建远端会话。
+            throw new InvalidOperationException("接入失败：" + ErrorText(requestError) + "；本机清理未确认：" + ErrorText(cleanupError), requestError);
+        }
     }
 
     private bool IsCurrentPresentation(AgentSession session, LocalConversationState local, string endpoint)
