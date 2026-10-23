@@ -52,6 +52,7 @@ internal sealed class AssistantForm : Form
     private IDisposable? _subscription;
     private CancellationTokenSource? _lifetime;
     private Task? _observation;
+    private ExampleCancellationFeedback? _cancellation;
     private NativeToolHost? _nativeTools;
     private LocalConversationState _local = null!;
     private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 750 };
@@ -95,7 +96,7 @@ internal sealed class AssistantForm : Form
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 200 };
         var actions = Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
             Button("同轮插入草稿", InsertAsync), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync),
-            Button("取消当前工作", async () => { await _session!.CancelAsync(); _status.Text = "取消请求已接纳，等待运行终态。"; }));
+            Button("取消当前工作", CancelCurrentAsync));
         actions.Dock = DockStyle.Bottom; bottom.Controls.Add(_draft); bottom.Controls.Add(actions); bottom.Controls.Add(_status);
         var right = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 320, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
         right.Controls.Add(Label("待处理请求")); right.Controls.Add(_requests); right.Controls.Add(_requestSummary);
@@ -270,6 +271,7 @@ internal sealed class AssistantForm : Form
         }, new SessionNarratorOptions { Verbosity = (NarratorVerbosity)_narratorMode.SelectedIndex });
         _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
         _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
+        _cancellation = new ExampleCancellationFeedback(session.Id);
         _observation = ObserveAsync(session, _view, _lifetime.Token);
         _status.Text = "已连接 " + session.Id + "；恢复会话可用“历史”查阅权威记录。";
         TrySaveForExit();
@@ -279,21 +281,57 @@ internal sealed class AssistantForm : Form
         _view?.SetDelivery(_textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream, (ThinkingDeliveryMode)_thinkingMode.SelectedIndex);
     }
 
+    private async Task CancelCurrentAsync()
+    {
+        var session = _session!; var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
+        var attempt = cancellation.Begin();
+        RenderCancellationFeedback(cancellation, session, local, endpoint);
+        try
+        {
+            await session.CancelAsync(_lifetime!.Token);
+            cancellation.Acknowledge(attempt);
+        }
+        catch (Exception error)
+        {
+            // Keep the request error alongside any independently observed terminal fact.
+            cancellation.Fail(attempt, ErrorText(error));
+        }
+        RenderCancellationFeedback(cancellation, session, local, endpoint);
+    }
+
+    private void RenderCancellationFeedback(ExampleCancellationFeedback cancellation, AgentSession session, LocalConversationState local, string endpoint)
+    {
+        if (!ReferenceEquals(_cancellation, cancellation) || !IsCurrentPresentation(session, local, endpoint)) return;
+        if (cancellation.Text is string text) _status.Text = text;
+    }
+
+    private void QueueCancellationFeedback(ExampleCancellationFeedback cancellation, AgentSession session, LocalConversationState local, string endpoint)
+    {
+        if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(() => RenderCancellationFeedback(cancellation, session, local, endpoint)));
+    }
+
     private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
     {
         var storage = _storage; var narrator = _narrator; var nativeTools = _nativeTools;
+        var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
         try
         {
             await session.ObserveAsync(async (item, ct) =>
         {
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
+            if (cancellation.Observe(item)) QueueCancellationFeedback(cancellation, session, local, endpoint);
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { if (!IsDisposed) BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); })); }
         }, token);
+            if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception error) { view.MarkSourceFailure("event_source", ErrorText(error)); }
+        catch (Exception error)
+        {
+            view.MarkSourceFailure("event_source", ErrorText(error));
+            if (cancellation.ObservationFailed(ErrorText(error))) QueueCancellationFeedback(cancellation, session, local, endpoint);
+        }
     }
     private void Render(SessionViewSnapshot snapshot)
     {
@@ -328,6 +366,7 @@ internal sealed class AssistantForm : Form
     private async Task SendAsync()
     {
         var text = _draft.Text; var revision = _draftRevision; if (string.IsNullOrWhiteSpace(text)) return;
+        _cancellation?.Dismiss();
         SaveLocal(); await _session!.SendAsync(text); _view!.AppendUserMessage(text); if (_draftRevision == revision) _draft.Clear(); SaveLocal(); _status.Text = "输入已接纳，等待模型与存储终态。";
     }
     private async Task SendImageAsync()
@@ -341,6 +380,7 @@ internal sealed class AssistantForm : Form
         if (!string.IsNullOrWhiteSpace(text)) blocks.Add(MessageBlock.Text(text));
         var bytes = await BoundedFiles.ReadAsync(picker.FileName, 8 * 1024 * 1024);
         blocks.Add(MessageBlock.Image(mime, Convert.ToBase64String(bytes)));
+        _cancellation?.Dismiss();
         SaveLocal(); await _session!.SendBlocksAsync(blocks); _view!.AppendUserMessage(text + "\n[image: " + info.Name + "]"); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
     }
     private void SaveLocal() => _local.Save(_endpoint.Text, _session?.Id ?? _resume.Text, _draft.Text, _conversation.Text);
@@ -547,6 +587,7 @@ internal sealed class AssistantForm : Form
         var settled = _connection?.Observation == null ? null : await _connection.Observation.WaitForResourcesAsync(_session.Id, TimeSpan.FromSeconds(10), sessionContract: _connection.Contract, cancellationToken: timeout.Token);
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
         await StopTerminalDeviceAsync();
+        _cancellation?.Detach(); _cancellation = null;
         _lifetime!.Cancel(); CloseSessionWindows(); if (_observation != null) await _observation;
         if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
         _storage = null;
@@ -559,6 +600,7 @@ internal sealed class AssistantForm : Form
     private async Task DetachAsync()
     {
         TrySaveForExit();
+        _cancellation?.Detach(); _cancellation = null;
         var ownedLocalServe = _connection?.OwnsLocalServe == true;
         using var storageTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         try { if (_storage != null) await _storage.FlushAsync(storageTimeout.Token); }
