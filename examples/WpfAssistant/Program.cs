@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Windows;
@@ -43,6 +44,10 @@ internal sealed class AssistantWindow : Window
     private readonly TextBox _narration = new() { IsReadOnly = true, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.Wrap };
     private SessionNarrator? _narrator;
     private Button _connect = null!;
+    private Button _cancelConnect = null!;
+    private CancellationTokenSource? _connecting;
+    private Task? _connectionAttempt;
+    private readonly Queue<string> _connectionStages = new();
     private string _currentToken = "";
     private AgentSession? _session;
     private TansrClient? _client;
@@ -79,8 +84,16 @@ internal sealed class AssistantWindow : Window
         var top = new StackPanel(); DockPanel.SetDock(top, Dock.Top); layout.Children.Add(top);
         top.Children.Add(Row(Label("Serve 地址"), _endpoint, Label("短期票据"), _token, _loopback));
         _connect = Button("连接 / 创建", ConnectAsync, false);
+        _cancelConnect = new Button { Content = "取消连接等待", Padding = new Thickness(9, 5, 9, 5), Margin = new Thickness(3) };
+        AutomationProperties.SetAutomationId(_cancelConnect, "CancelConnectionWait");
+        _cancelConnect.Click += (_, _) =>
+        {
+            _connecting?.Cancel();
+            _status.Text = "正在取消本机连接等待；已经受理的会话不会被关闭或重建，请按原会话 ID 查询。";
+            SetEnabled();
+        };
         top.Children.Add(Row(Label("恢复会话 ID（可空）"), _resume, Label("新会话模型（可空）"), _model,
-            _connect, Button("更新票据", UpdateTokenAsync, false)));
+            _connect, _cancelConnect, Button("更新票据", UpdateTokenAsync, false)));
         top.Children.Add(Row(Label("正文呈现"), _textMode, Label("思考呈现"), _thinkingMode,
             Button("历史", ShowHistoryAsync, allowDuringRecovery: true),
             Button("状态", ShowMetadataAsync, allowDuringRecovery: true),
@@ -160,7 +173,7 @@ internal sealed class AssistantWindow : Window
 
     private async Task RunAsync(Func<Task> action)
     {
-        if (_busy) return;
+        if (_busy || _closing) return;
         _busy = true; SetEnabled();
         try { await action(); }
         catch (OperationCanceledException) { _status.Text = "操作取消或超时；可能已受理的工作须先查询状态。"; }
@@ -171,15 +184,26 @@ internal sealed class AssistantWindow : Window
     private void SetEnabled()
     {
         foreach (var button in _sessionButtons)
-            button.IsEnabled = !_busy && _session != null && (!_eventRecovery || _recoveryButtons.Contains(button)) &&
+            button.IsEnabled = !_busy && !_closing && _session != null && (!_eventRecovery || _recoveryButtons.Contains(button)) &&
                 (!_requestButtons.TryGetValue(button, out var kind) || CurrentRequest(kind) != null);
-        if (_connect != null) _connect.IsEnabled = !_busy && _session == null;
+        if (_connect != null) _connect.IsEnabled = !_busy && !_closing && _session == null;
+        if (_cancelConnect != null) _cancelConnect.IsEnabled = !_closing && _connecting is { IsCancellationRequested: false };
         _textMode.IsEnabled = _thinkingMode.IsEnabled = !_closing;
-        _narratorMode.IsEnabled = _session == null;
-        _endpoint.IsEnabled = _resume.IsEnabled = _session == null && !_busy;
+        _narratorMode.IsEnabled = _session == null && !_closing;
+        _endpoint.IsEnabled = _resume.IsEnabled = _session == null && !_busy && !_closing;
     }
 
     private async Task ConnectAsync()
+    {
+        using var connecting = new CancellationTokenSource();
+        _connecting = connecting;
+        _connectionStages.Clear();
+        SetEnabled();
+        try { _connectionAttempt = ConnectCoreAsync(connecting.Token); await _connectionAttempt; }
+        finally { _connectionAttempt = null; _connecting = null; SetEnabled(); }
+    }
+
+    private async Task ConnectCoreAsync(CancellationToken connectToken)
     {
         var requestedResume = _resume.Text;
         BindLocalState(newConnection: true);
@@ -188,22 +212,29 @@ internal sealed class AssistantWindow : Window
         Volatile.Write(ref _currentToken, _token.Password);
         var sessionLocal = _local;
         var endpoint = _endpoint.Text;
-        var connection = await ExampleConnection.ConnectAsync(endpoint, _ =>
+        var connection = await MeasureConnectionStageAsync("Connect · 准备接入与可选扩展", () => ExampleConnection.ConnectAsync(endpoint, _ =>
         {
             if (!sessionLocal.IsCurrent(endpoint)) throw new InvalidOperationException("local_state_identity_changed");
             return Task.FromResult(Volatile.Read(ref _currentToken));
-        }, _loopback.IsChecked == true);
+        }, _loopback.IsChecked == true, connectToken));
         var client = connection.Client;
         AgentSession session;
         CreateSessionOptions createOptions;
-        try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
+        try
+        {
+            connectToken.ThrowIfCancellationRequested();
+            createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools));
+            session = await MeasureConnectionStageAsync("CreateResume · 能力发现与创建 / 恢复会话", () => client.CreateSessionAsync(createOptions, connectToken));
+        }
         catch { await connection.CloseAsync(); throw; }
         // Serve 已接受建会后，先保留真实 ID；初始化失败不能把重连变成另一笔新建。
         _resume.Text = session.Id;
         try
         {
             SaveLocal();
-            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id);
+            connectToken.ThrowIfCancellationRequested();
+            await MeasureConnectionStageAsync("Initialize · 声明平台能力", () => ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id, connectToken));
+            connectToken.ThrowIfCancellationRequested();
         }
         catch (Exception error)
         {
@@ -227,7 +258,11 @@ internal sealed class AssistantWindow : Window
                 Title = title;
             }, DispatcherPriority.Normal, ct);
         }, code => Dispatcher.BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, endpoint)) _status.Text = code; })), connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
-        try { await _nativeTools.Ready; }
+        try
+        {
+            await MeasureConnectionStageAsync("NativeReady · 核对原生工具恢复水位", () => _nativeTools.Ready.WaitAsync(connectToken));
+            connectToken.ThrowIfCancellationRequested();
+        }
         catch { await DetachAsync(); throw; }
         _view = new SessionView(new SessionViewOptions
         {
@@ -256,6 +291,46 @@ internal sealed class AssistantWindow : Window
         _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。" +
             (connection.Contract == SessionContract.Sdk2OffloadV1 ? "SDK2 客户端已初始化；本机工具仍需显式连接设备并获授权。" : "");
         TrySaveForExit();
+    }
+
+    // 仅记录本机界面耗时，最多保留十二段；不记录正文、票据或逐事件轨迹，也不重试请求。
+    private async Task<T> MeasureConnectionStageAsync<T>(string stage, Func<Task<T>> action, Func<bool>? isCurrent = null)
+    {
+        var elapsed = Stopwatch.StartNew();
+        DispatcherTimer? timer = null;
+        await Dispatcher.InvokeAsync(() =>
+        {
+            timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            void ShowWaiting()
+            {
+                if (isCurrent == null || isCurrent())
+                    _status.Text = stage + "，已等待 " + elapsed.Elapsed.TotalSeconds.ToString("F1") + " 秒；这不是模型生成耗时。";
+            }
+            timer.Tick += (_, _) => ShowWaiting();
+            ShowWaiting(); timer.Start();
+        });
+        var outcome = "完成";
+        try { return await action(); }
+        catch (OperationCanceledException) { outcome = "取消 / 超时"; throw; }
+        catch { outcome = "失败"; throw; }
+        finally
+        {
+            elapsed.Stop();
+            await Dispatcher.InvokeAsync(() =>
+            {
+                timer?.Stop();
+                if (isCurrent != null && !isCurrent()) return;
+                var summary = stage + "：" + outcome + "，" + elapsed.Elapsed.TotalMilliseconds.ToString("F0") + " ms";
+                if (_connectionStages.Count >= 12) _connectionStages.Dequeue();
+                _connectionStages.Enqueue(summary);
+                _status.Text = summary;
+            });
+        }
+    }
+
+    private async Task MeasureConnectionStageAsync(string stage, Func<Task> action, Func<bool>? isCurrent = null)
+    {
+        await MeasureConnectionStageAsync(stage, async () => { await action(); return true; }, isCurrent);
     }
 
     private bool IsCurrentPresentation(AgentSession session, LocalConversationState local, string endpoint)
@@ -345,7 +420,8 @@ internal sealed class AssistantWindow : Window
             });
         }
         var recovery = new ExampleEventRecovery(session.Id,
-            ct => session.GetHistoryAsync(ct), ct => session.GetMetadataAsync(ct),
+            ct => MeasureConnectionStageAsync("History · 读取权威历史", () => session.GetHistoryAsync(ct), IsCurrentObservation),
+            ct => MeasureConnectionStageAsync("Metadata · 核对恢复后的运行状态", () => session.GetMetadataAsync(ct), IsCurrentObservation),
             async history =>
             {
                 await Dispatcher.InvokeAsync(() =>
@@ -664,7 +740,8 @@ internal sealed class AssistantWindow : Window
         var metadata = await session.ReadMetadataAsync(_lifetime!.Token);
         if (!IsCurrentPresentation(session, local, endpoint)) return;
         var observation = "\n\n本机事件观察（不代替服务端状态）\n连接：" + Volatile.Read(ref _eventConnection) +
-            "\n最近收到：" + Volatile.Read(ref _eventReceived) + "\n最近处理完成：" + Volatile.Read(ref _eventHandled);
+            "\n最近收到：" + Volatile.Read(ref _eventReceived) + "\n最近处理完成：" + Volatile.Read(ref _eventHandled) +
+            "\n\n最近连接 / 恢复分段（仅本机耗时）\n" + string.Join("\n", _connectionStages);
         ShowSessionWindow(new Window { Title = "会话状态 / 上下文", Width = 850, Height = 640, Content = new TextBox { Text = SessionContextText.Format(metadata) + observation, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, VerticalScrollBarVisibility = ScrollBarVisibility.Auto } });
     }
     private async Task ShowApplicationPromptAsync()
@@ -766,17 +843,36 @@ internal sealed class AssistantWindow : Window
     {
         if (_closed) return; e.Cancel = true; if (_closing) return;
         if (_memoryDevice != null) { _status.Text = "设备仍领取记忆操作。请先在控制端核对记忆工作，再显式停止设备后退出；窗口关闭不冒充远端排空。"; return; }
-        if (_busy) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
+        var closingConnectionAttempt = _connecting != null;
+        var connectionAttempt = _connectionAttempt;
+        if (_busy && !closingConnectionAttempt) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
         _closing = true;
+        SetEnabled();
         try
         {
-            // An already detached/closed session can finish cleanup synchronously.
-            // Leave this cancelled Closing callback before asking WPF to close again.
+            _connecting?.Cancel();
+            // 已断开的会话可能同步完成清理；先离开本次取消的 Closing 回调再请求关闭。
             await System.Windows.Threading.Dispatcher.Yield(DispatcherPriority.Background);
-            await CloseConnectionAsync(); _saveTimer.Stop(); _closed = true; Close();
+            if (closingConnectionAttempt)
+            {
+                if (connectionAttempt != null)
+                {
+                    try { await connectionAttempt.WaitAsync(TimeSpan.FromSeconds(5)); }
+                    catch (TimeoutException)
+                    {
+                        _status.Text = "连接取消已请求，但本机收尾尚未完成；窗口保持打开，请稍后重试关闭。远端会话未关闭。";
+                        return;
+                    }
+                    // 原连接操作由 RunAsync 呈现错误；此处只等待其本机清理，不把取消当远端关闭。
+                    catch (Exception) { }
+                }
+                await DetachAsync();
+            }
+            else await CloseConnectionAsync();
+            _saveTimer.Stop(); _closed = true; Close();
         }
         catch (Exception error) { _status.Text = "关闭未确认，可重试或选择“仅断开本机连接”后退出：" + ErrorText(error); }
-        finally { _closing = false; }
+        finally { _closing = false; SetEnabled(); }
     }
 
     private static string? Empty(string value) => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
