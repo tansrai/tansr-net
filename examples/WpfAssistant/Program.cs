@@ -189,6 +189,18 @@ internal sealed class AssistantWindow : Window
         CreateSessionOptions createOptions;
         try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
         catch { await connection.CloseAsync(); throw; }
+        // Serve 已接受建会后，先保留真实 ID；初始化失败不能把重连变成另一笔新建。
+        _resume.Text = session.Id;
+        try
+        {
+            SaveLocal();
+            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id);
+        }
+        catch (Exception error)
+        {
+            await connection.CloseAsync();
+            throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
+        }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _closeFailure = null;
         var savedInput = sessionLocal.Snapshot.Endpoint == endpoint ? sessionLocal.Snapshot.Input : null;
         _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
@@ -221,7 +233,8 @@ internal sealed class AssistantWindow : Window
         _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
         _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
         _observation = ObserveAsync(session, _view, _lifetime.Token);
-        _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。";
+        _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。" +
+            (connection.Contract == SessionContract.Sdk2OffloadV1 ? "SDK2 客户端已初始化；本机工具仍需显式连接设备并获授权。" : "");
         TrySaveForExit();
     }
 

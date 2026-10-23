@@ -45,6 +45,8 @@ Console.WriteLine($"{result.TurnId}: {result.Reason}; aborted={result.WasAborted
 
 SDK 默认保留 SDK1 合同；SDK2 档案卸载使用显式 `SessionContract.Sdk2OffloadV1`、可信主体/scope 与已发现能力。协议发现失败不能静默换成 SDK1 或换存储方式。[终端服务](terminal-services.md)说明候选能力协商；[设备记忆](device-memory.md)说明可信装配及 create/reopen。
 
+WPF 示例在 SDK2 建会或恢复后，用现有 `ExecutionClient.InitializeAsync` 声明客户端平台，然后开放消息操作；初始化不登记执行器、不绑定设备，也不改已有 `requestedTools`。初始化失败会保留实际会话 ID，按原 ID 重连，不自动新建或删除远端会话。SDK2 的 `application_info`、`set_window_title` 使用同一个设备执行管道：点击“连接本机设备工具”，并由受信 Serve 策略、应用 `execution.boundDevice.tools.customTools` 和设备配置 `allowedTools` 明确允许这些名称，已有执行器会登记原函数和定义摘要。仅建会或只声明函数不代表可调用；不回退旧 SDK1 工具桥。
+
 ## 工具、记忆和界面
 
 Serve/kernel 管理循环、上下文、权限与记忆决策。终端使用 `DeviceSessionHost`、Windows 后端、耐久执行日志和已有执行通知接线处理已授权本机操作，不需要应用自己写 polling、SSE、心跳或 ACK 状态机。SDK不执行模型提供的程序集路径、反射类型或任意代码。

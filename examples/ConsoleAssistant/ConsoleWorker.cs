@@ -126,6 +126,7 @@ internal static class ConsoleWorker
             options.Labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["worker.job"] = job.Id };
             session = await client.CreateSessionAsync(options, stop).ConfigureAwait(false);
             output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "session", state = "created" });
+            await ExampleConnection.InitializeSessionAsync(client, sessionContract, session.Id, stop).ConfigureAwait(false);
             // 无 UI 服务不能竞争共享控制台标题；原生业务工具明确返回不可用，仍提交一次原回执。
             tools = new NativeToolHost(session, "Tansr.Console.Worker",
                 (_, ct) => { ct.ThrowIfCancellationRequested(); throw new InvalidOperationException("window_title_unavailable_in_worker"); },

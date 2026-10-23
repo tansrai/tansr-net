@@ -119,6 +119,8 @@ internal static class Program
             var createOptions = ExampleSessionOptions.Create(Environment.GetEnvironmentVariable("TANSR_MODEL"),
                 Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"), NativeToolHost.GetDeclarations(connection.NativeTools));
             session = await client.CreateSessionAsync(createOptions, stop.Token);
+            SaveLocal(); Write("session=" + session.Id);
+            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id, stop.Token);
             var active = session;
             var input = new TurnInputEditor(session, saved.Endpoint == localEndpoint ? saved.Input : null, local.SaveInput);
             var controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl,
@@ -141,7 +143,6 @@ internal static class Program
                 Console.Title = title; return Task.CompletedTask;
             }, Write, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
             await nativeTools.Ready;
-            Write("session=" + session.Id);
             if (once)
             {
                 var prompt = string.Join(" ", args.Skip(1));

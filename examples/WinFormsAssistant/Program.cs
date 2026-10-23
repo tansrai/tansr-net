@@ -224,6 +224,17 @@ internal sealed class AssistantForm : Form
         CreateSessionOptions createOptions;
         try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
         catch { await connection.CloseAsync(); throw; }
+        _resume.Text = session.Id;
+        try
+        {
+            SaveLocal();
+            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id);
+        }
+        catch (Exception error)
+        {
+            await connection.CloseAsync();
+            throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
+        }
         _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _lifetime = new CancellationTokenSource(); _closeFailure = null;
         var sessionLocal = _local;
         var sessionEndpoint = _endpoint.Text;

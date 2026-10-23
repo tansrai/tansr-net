@@ -45,6 +45,8 @@ Reuse the session for subsequent turns. Low-level `SendAsync` acknowledges accep
 
 The default retains SDK1. SDK2 archive offload requires explicit `SessionContract.Sdk2OffloadV1`, trusted identity/scope and discovered capabilities. Discovery failure must not silently switch protocols or storage. See [terminal services](terminal-services.md) and [device memory](device-memory.md).
 
+After SDK2 creation or resume, the WPF example declares its client platform through the existing `ExecutionClient.InitializeAsync` before enabling messages. This does not register or bind an executor or change existing `requestedTools`. If initialization fails, the actual session ID remains available for an explicit resume; the example does not create another session or delete the remote one. SDK2 `application_info` and `set_window_title` use the same device execution pipeline: explicitly connect the local device, and allow their names in the trusted Serve policy and device `allowedTools`, with the application's `execution.boundDevice.tools.customTools` enabled. The existing executor registers the original delegates and definition digests. Creating a session or declaring a function does not make it available; there is no fallback to the old SDK1 tool bridge.
+
 ## Tools, storage and presentation
 
 Serve/kernel owns the agent loop, context assembly, authorization, memory decisions and metering. `DeviceSessionHost`, the Windows backend, durable journals and execution notifications handle authorized terminal operations. Applications do not need to implement their own polling, SSE, heartbeat or ACK state machines. Never interpret model data as an assembly path, reflection type or trusted host code.

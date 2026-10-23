@@ -1,4 +1,8 @@
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text.Json;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Execution;
 using Tansr.Sdk.Terminal;
 #if WINDOWS || NETFRAMEWORK
 using Tansr.Sdk.Windows.Execution;
@@ -93,6 +97,24 @@ internal sealed class ExampleConnection
         await Task.CompletedTask;
         throw new PlatformNotSupportedException("本地 Serve 启动需要 ConsoleAssistant 的 net10.0-windows 目标；跨平台 net10.0 可直接连接远端 Serve。");
 #endif
+    }
+    internal static async Task InitializeSessionAsync(TansrClient client, SessionContract contract, string sessionId, CancellationToken ct = default)
+    {
+        if (contract != SessionContract.Sdk2OffloadV1) return;
+        // UI 接入只声明平台，不替代设备登记/绑定，也不改变恢复会话的工具收窄。
+        // requestedTools 必须省略；[] 会关闭已有工具，列出本机声明则会扩改原请求范围。
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject(); writer.WriteString("protocol", "sdk2-ext-v1"); writer.WriteString("sessionId", sessionId);
+            writer.WriteStartObject("platform");
+            writer.WriteString("platform", RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "windows" : RuntimeInformation.IsOSPlatform(OSPlatform.OSX) ? "macos" : "linux");
+            writer.WriteString("arch", RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
+            writer.WriteString("language", "csharp"); writer.WriteString("runtimeVersion", Environment.Version.ToString()); writer.WriteString("adapterVersion", "dotnet-v1");
+            writer.WriteEndObject(); writer.WriteEndObject();
+        }
+        using var document = JsonDocument.Parse(stream.ToArray());
+        await new ExecutionClient(client).InitializeAsync(document.RootElement, ct).ConfigureAwait(false);
     }
     internal async Task CloseAsync()
     {
