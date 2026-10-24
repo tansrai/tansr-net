@@ -49,6 +49,8 @@ internal sealed class AssistantWindow : Window
     private Task? _connectionAttempt;
     private readonly Queue<string> _connectionStages = new();
     private string _currentToken = "";
+    private ExampleTokenSource? _tokenSource;
+    private string? _tokenSourceFailure;
     private AgentSession? _session;
     private TansrClient? _client;
     private ExampleConnection? _connection;
@@ -136,6 +138,8 @@ internal sealed class AssistantWindow : Window
         if (Environment.GetEnvironmentVariable("TANSR_SERVE_URL") is { Length: > 0 } endpoint) _endpoint.Text = endpoint;
         if (Environment.GetEnvironmentVariable("TANSR_SESSION_TOKEN") is { Length: > 0 } token) _token.Password = token;
         _loopback.IsChecked = Environment.GetEnvironmentVariable("TANSR_ALLOW_HTTP_LOOPBACK") == "1";
+        try { _tokenSource = ExampleTokenSource.FromEnvironment(_endpoint.Text, _token.Password, _loopback.IsChecked == true); }
+        catch (Exception error) { _tokenSourceFailure = "自动续票配置未受理：" + ErrorText(error) + "；请重新登录，或显式更新手工票据。"; }
         try
         {
             _local = LocalConversationState.ForApplication("wpf", _endpoint.Text, TrustedExampleScope.CurrentPresentationIdentity);
@@ -153,6 +157,7 @@ internal sealed class AssistantWindow : Window
         AutomationProperties.SetAutomationId(_narratorMode, "NarratorVerbosity");
         AutomationProperties.SetAutomationId(_narration, "SessionNarration");
         Closing += OnClosing;
+        Closed += (_, _) => Interlocked.Exchange(ref _tokenSource, null)?.Dispose();
         SetEnabled();
     }
 
@@ -212,10 +217,18 @@ internal sealed class AssistantWindow : Window
         Volatile.Write(ref _currentToken, _token.Password);
         var sessionLocal = _local;
         var endpoint = _endpoint.Text;
-        var connection = await MeasureConnectionStageAsync("Connect · 准备接入与可选扩展", () => ExampleConnection.ConnectAsync(endpoint, _ =>
+        if (_tokenSourceFailure != null) throw new InvalidOperationException(_tokenSourceFailure);
+        var connection = await MeasureConnectionStageAsync("Connect · 准备接入与可选扩展", () => ExampleConnection.ConnectAsync(endpoint, async ct =>
         {
-            if (!sessionLocal.IsCurrent(endpoint)) throw new InvalidOperationException("local_state_identity_changed");
-            return Task.FromResult(Volatile.Read(ref _currentToken));
+            if (!sessionLocal.IsCurrent(endpoint))
+            { Volatile.Read(ref _tokenSource)?.Invalidate(); throw new InvalidOperationException("local_state_identity_changed"); }
+            var source = Volatile.Read(ref _tokenSource);
+            if (source == null) return Volatile.Read(ref _currentToken);
+            var access = await source.GetTokenAsync(endpoint, ct).ConfigureAwait(false);
+            if (!ReferenceEquals(source, Volatile.Read(ref _tokenSource))) throw new InvalidOperationException("login_source_changed");
+            // Automatic tickets stay inside their source. They never write the
+            // manual fallback or overwrite a ticket the user is currently typing.
+            return access;
         }, _loopback.IsChecked == true, connectToken));
         var client = connection.Client;
         AgentSession session;
@@ -371,6 +384,10 @@ internal sealed class AssistantWindow : Window
 
     private async Task UpdateTokenAsync()
     {
+        // An explicit replacement owns the new credential. Never allow a late
+        // refresh from the preceding login to overwrite it or replay a request.
+        Interlocked.Exchange(ref _tokenSource, null)?.Dispose();
+        _tokenSourceFailure = null;
         if (_local == null || !_local.HasTrustedIdentity || !_local.IsCurrent(_endpoint.Text))
         {
             if (_session != null) await DetachAsync();
@@ -380,7 +397,7 @@ internal sealed class AssistantWindow : Window
             return;
         }
         Volatile.Write(ref _currentToken, _token.Password);
-        _status.Text = "同一主体的内存票据已更新；原会话和草稿保留。";
+        _status.Text = "同一主体的手工票据已更新，自动续票已停用；原会话和草稿保留。已结束的观察或设备需显式重连，未知请求不重发。";
     }
 
     private void UpdateDelivery()
