@@ -664,8 +664,17 @@ internal sealed class AssistantWindow : Window
         var picker = new OpenFileDialog { Title = "选择本机会话受信设备配置", Filter = "受信配置|*.json" };
         if (picker.ShowDialog(this) != true) return;
         var session = _session!; var local = _local; var endpoint = _endpoint.Text;
-        _terminalDevice = await NativeTerminalDeviceHost.StartAsync(picker.FileName, session.Id, _connection!.Endpoint,
-            ApproveDeviceAsync, text => Dispatcher.BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, local, endpoint)) AppendTerminalOutput(text); })), _lifetime!.Token, _connection.Client, _connection.Contract, _nativeTools);
+        try
+        {
+            _terminalDevice = await NativeTerminalDeviceHost.StartAsync(picker.FileName, session.Id, _connection!.Endpoint,
+                ApproveDeviceAsync, text => Dispatcher.BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, local, endpoint)) AppendTerminalOutput(text); })), _lifetime!.Token, _connection.Client, _connection.Contract, _nativeTools);
+        }
+        catch (Exception error) when (error is not OperationCanceledException)
+        {
+            var message = "本机设备工具连接失败，尚未就绪。请开发者核对应用 execution（bound-device-v1）能力配置、工具权限与受信设备配置后重新连接；普通聊天仍可用，本机工具暂不可执行。原因：" + ErrorText(error);
+            AppendTerminalOutput("[device.connect.failed] " + message);
+            throw new InvalidOperationException(message, error);
+        }
         _status.Text = _terminalDevice.Status; _ = WatchTerminalDeviceAsync(_terminalDevice);
     }
     private Task<bool> ApproveDeviceAsync(string description, CancellationToken ct)

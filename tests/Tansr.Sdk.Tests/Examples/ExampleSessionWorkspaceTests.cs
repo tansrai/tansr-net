@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Tansr.Examples;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Protocol;
 using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Views;
@@ -50,7 +51,35 @@ public sealed class ExampleSessionWorkspaceTests
         using var declaration = JsonDocument.Parse("[]");
         var options = ExampleSessionOptions.Create(" large ", " original ", declaration.RootElement, key => values.GetValueOrDefault(key));
         Assert.Equal("approved-orders", options.Profile); Assert.Equal("large", options.Model); Assert.Equal("original", options.ResumeSessionId);
-        Assert.Null(options.ClientTools); Assert.Equal(128, options.ThinkingBudget); Assert.Equal(2048, options.MaxTokens); Assert.Equal(0.25m, options.MaxUsd);
+        Assert.Equal(declaration.RootElement.GetRawText(), options.ClientTools!.Value.GetRawText()); Assert.Equal(128, options.ThinkingBudget); Assert.Equal(2048, options.MaxTokens); Assert.Equal(0.25m, options.MaxUsd);
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task PublicResumeRequestReannouncesCurrentHostToolsWithoutChangingSessionIdentity(bool sdk2, bool coldResume)
+    {
+        var declarations = NativeToolHost.GetDeclarations(null);
+        var options = ExampleSessionOptions.Create(null, " original-session ", declarations,
+            key => key == "TANSR_SESSION_CONTRACT" && sdk2 ? "sdk2-offload-v1" : null);
+        using var handler = new ResumeHandler(sdk2, coldResume);
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler));
+        using var client = new TansrClient(new TansrClientOptions
+        {
+            BaseUri = new Uri("https://example.invalid"),
+            TokenProvider = _ => Task.FromResult("fixture"),
+            PrincipalProvider = () => "app/user",
+            SessionContract = sdk2 ? SessionContract.Sdk2OffloadV1 : SessionContract.Sdk1
+        }, http);
+        var session = await client.CreateSessionAsync(options);
+        Assert.Equal("original-session", session.Id); Assert.Equal(coldResume, session.Resumed);
+        var body = Assert.Single(handler.Creates);
+        Assert.Equal("original-session", body.GetProperty("resume").GetProperty("sessionId").GetString());
+        Assert.Equal(WireJson.EncodeControl(declarations), WireJson.EncodeControl(body.GetProperty("clientTools")));
+        Assert.False(body.TryGetProperty("requestId", out _));
+        Assert.False(body.TryGetProperty("tools", out _));
     }
 
     [Theory]
@@ -135,6 +164,22 @@ public sealed class ExampleSessionWorkspaceTests
         var second = approvals.RequestAsync("second", default); var secondId = messages[1].Split('\n')[0].Substring("device_approval=".Length);
         Assert.True(approvals.Answer(firstId, true)); Assert.False(approvals.Answer(firstId, false)); Assert.True(await first);
         Assert.False(second.IsCompleted); Assert.True(approvals.Answer(secondId, false)); Assert.False(await second);
+    }
+
+    private sealed class ResumeHandler(bool sdk2, bool coldResume) : HttpMessageHandler
+    {
+        internal readonly List<JsonElement> Creates = [];
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
+        {
+            if (request.RequestUri!.AbsolutePath == "/api/capabilities/sessions")
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"contracts\":[{\"availability\":\"legacy-complete\",\"contract\":\"sdk1\"},{\"availability\":\"source-required\",\"contract\":\"sdk2-offload-v1\"}],\"protocol\":\"sdk2-ext-v1\"}", Encoding.UTF8, "application/json") };
+            Assert.Equal(HttpMethod.Post, request.Method); Assert.Equal("/api/sessions", request.RequestUri.AbsolutePath);
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct));
+            Creates.Add(body.RootElement.Clone());
+            var response = new Dictionary<string, object> { ["sessionId"] = "original-session", ["resumed"] = coldResume, ["lastSeq"] = 41 };
+            if (sdk2) { response["contract"] = "sdk2-offload-v1"; response["availability"] = "source-required"; }
+            return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(Encoding.UTF8.GetString(WireJson.EncodeControl(JsonSerializer.SerializeToElement(response))), Encoding.UTF8, "application/json") };
+        }
     }
 
     private sealed class Fixture : IDisposable

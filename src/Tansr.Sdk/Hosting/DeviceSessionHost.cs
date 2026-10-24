@@ -80,9 +80,13 @@ public sealed class DeviceSessionHost : IDisposable
         _execution = new ExecutionHost(deviceClient, controllerClient, backend, journal, async (operation, ct) =>
         {
             GuardBoundOperation(operation);
-            await authorize(operation, ct).ConfigureAwait(false);
-            ct.ThrowIfCancellationRequested();
-            GuardBoundOperation(operation);
+            try { await authorize(operation, ct).ConfigureAwait(false); }
+            finally
+            {
+                // 用户拒绝也要复核控制主体与绑定；失效身份不能作为业务拒绝领取执行记录。
+                ct.ThrowIfCancellationRequested();
+                GuardBoundOperation(operation);
+            }
         }, new ExecutionHostOptions
         {
             NotificationSourceFactory = _notificationFactory == null ? null : (_, _) =>
@@ -235,7 +239,7 @@ public sealed class DeviceSessionHost : IDisposable
         if (!scope.HasValue || !binding.HasValue || ExecutionJson.Text(operation, "sessionId") != _sessionId ||
             !ExecutionJson.Equal(scope.Value, _client.ReadScope()) || !ExecutionJson.Equal(scope.Value, _deviceClient.ReadScope()) ||
             !ExecutionJson.Equal(scope.Value, operation.GetProperty("scope")) ||
-            !ExecutionJson.Equal(binding.Value, operation.GetProperty("binding"))) throw new ExecutionRejectedException("EACCES");
+            !ExecutionJson.Equal(binding.Value, operation.GetProperty("binding"))) throw new ExecutionRejectedException("ESTALE");
     }
 
     private void VerifyCapabilities(JsonElement value, JsonElement scope)

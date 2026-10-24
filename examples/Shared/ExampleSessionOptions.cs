@@ -22,7 +22,8 @@ internal static class ExampleSessionOptions
         {
             Model = Empty(model),
             ResumeSessionId = Empty(resume),
-            ClientTools = Empty(resume) == null ? clientTools : null,
+            // 冷恢复按本次申报重建工具，活跃附着由 Serve 忽略；声明不代替应用与设备授权。
+            ClientTools = clientTools,
             Profile = Empty(read("TANSR_PROFILE")),
             CapabilitiesProfile = Empty(read("TANSR_CAPABILITIES_PROFILE")),
             Cwd = Empty(read("TANSR_SESSION_CWD")),

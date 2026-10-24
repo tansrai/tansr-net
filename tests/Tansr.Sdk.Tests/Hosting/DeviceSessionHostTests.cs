@@ -217,12 +217,15 @@ public sealed class DeviceSessionHostTests
     {
         var client = new Client { PollOperation = ExecutionFixture.Operation(workspace: "workspace-2") };
         var backend = new Backend { ExtraWorkspace = true };
+        var journal = new Journal();
         var authorized = 0;
-        using var host = new DeviceSessionHost(client, backend, new Journal(),
+        using var host = new DeviceSessionHost(client, backend, journal,
             new DeviceSessionOptions { SessionId = "session-1", WorkspaceId = "workspace-1" },
             (_, _) => { authorized++; return Task.CompletedTask; });
         await host.StartAsync();
-        await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.Completion);
+        var error = await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.Completion);
+        Assert.Equal("ESTALE", error.Code);
+        Assert.Equal(0, journal.ClaimCalls); Assert.Equal(0, journal.CompleteCalls);
         Assert.Equal(0, authorized);
         Assert.Equal(DeviceSessionState.Failed, host.State);
     }
@@ -231,9 +234,33 @@ public sealed class DeviceSessionHostTests
     public async Task ANewLoginCannotTakeOverTheOldDeviceHostEvenWithMatchingCurrentOperationScope()
     {
         var client = new Client { PollOperation = ExecutionFixture.Operation(user: "other"), ChangeIdentityAtPoll = true };
-        using var host = New(client);
+        var journal = new Journal();
+        using var host = New(client, journal);
         await host.StartAsync();
-        await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.Completion);
+        var error = await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.Completion);
+        Assert.Equal("ESTALE", error.Code);
+        Assert.Equal(0, journal.ClaimCalls); Assert.Equal(0, journal.CompleteCalls);
+        Assert.Equal(DeviceSessionState.Failed, host.State);
+    }
+
+    [Fact]
+    public async Task ControllerIdentityChangedDuringUserDenialNeverCreatesAClaim()
+    {
+        var controller = new Client();
+        var executor = new Client { PollOperation = ExecutionFixture.Operation() };
+        var journal = new Journal();
+        var authorized = 0;
+        using var host = new DeviceSessionHost(controller, executor, new Backend(), journal,
+            new DeviceSessionOptions { SessionId = "session-1", WorkspaceId = "workspace-1" },
+            (_, _) =>
+            {
+                authorized++; controller.ChangePrincipal();
+                throw new ExecutionRejectedException("EACCES");
+            });
+        await host.StartAsync();
+        var error = await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.Completion);
+        Assert.Equal("ESTALE", error.Code); Assert.Equal(1, authorized);
+        Assert.Equal(0, journal.ClaimCalls); Assert.Equal(0, journal.CompleteCalls);
         Assert.Equal(DeviceSessionState.Failed, host.State);
     }
 
@@ -273,6 +300,7 @@ public sealed class DeviceSessionHostTests
         public JsonElement? Target, BindingRequest;
         private string user = "user";
         private string capabilityRevision = new('a', 64);
+        public void ChangePrincipal() => user = "other";
         public JsonElement ReadScope() => ExecutionFixture.Scope(user);
         public async Task<JsonElement> InitializeAsync(JsonElement input, CancellationToken ct)
         {
@@ -331,8 +359,11 @@ public sealed class DeviceSessionHostTests
     private sealed class Journal : IExecutorJournal
     {
         public bool Closed;
-        public Task<ExecutorJournalClaim> ClaimAsync(JsonElement operation, CancellationToken ct = default) => throw new NotSupportedException();
-        public Task CompleteAsync(JsonElement operation, JsonElement receipt, CancellationToken ct = default) => throw new NotSupportedException();
+        public int ClaimCalls, CompleteCalls;
+        public Task<ExecutorJournalClaim> ClaimAsync(JsonElement operation, CancellationToken ct = default)
+        { ClaimCalls++; throw new NotSupportedException(); }
+        public Task CompleteAsync(JsonElement operation, JsonElement receipt, CancellationToken ct = default)
+        { CompleteCalls++; throw new NotSupportedException(); }
         public Task<JsonElement?> ReceiptAsync(JsonElement operation, CancellationToken ct = default) => throw new NotSupportedException();
         public Task<IReadOnlyList<JsonElement>> OperationsAsync(string? afterOperationId = null, CancellationToken ct = default) => throw new NotSupportedException();
         public Task CloseAsync() { Closed = true; return Task.CompletedTask; }
