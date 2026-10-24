@@ -303,7 +303,7 @@ public sealed class UnifiedGoldenTests
         var schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json")));
         var fenced = schema.RootElement.GetProperty("definitions").GetProperty("CapabilityClosure").GetProperty("properties").GetProperty("operations").GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray();
         Assert.Equal(fenced, UnifiedCapabilityClosure.Operations.Select(o => o.Name).ToArray());
-        // Frozen unified-v1 revision 14 adds the two execution journal operations to the closure catalogue.
+        // Frozen unified-v1 revision 14 includes terminal.custody.capabilities and terminal.custody.query in the closure catalogue.
         Assert.Equal(87, fenced.Length);
     }
 
