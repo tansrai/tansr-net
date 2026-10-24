@@ -303,7 +303,8 @@ public sealed class UnifiedGoldenTests
         var schema = JsonDocument.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "unified-v1.schema.json")));
         var fenced = schema.RootElement.GetProperty("definitions").GetProperty("CapabilityClosure").GetProperty("properties").GetProperty("operations").GetProperty("properties").EnumerateObject().Select(p => p.Name).ToArray();
         Assert.Equal(fenced, UnifiedCapabilityClosure.Operations.Select(o => o.Name).ToArray());
-        Assert.Equal(85, fenced.Length);
+        // Frozen unified-v1 revision 14 adds the two execution journal operations to the closure catalogue.
+        Assert.Equal(87, fenced.Length);
     }
 
     /// <summary>Vectors the runtime does not replay, each with its status. Manifest negatives marked <c>generator-validated</c> have
