@@ -23,6 +23,17 @@ public sealed class NativeToolHostTests
     private static TansrClient Client(HttpClient http) => new(new TansrClientOptions { BaseUri = new Uri("https://serve.test"), TokenProvider = _ => Task.FromResult("fixture") }, http);
 
     [Fact]
+    public void BuiltInDeclarationsUseServeTimeoutDefaultAndPreserveExplicitOptionalTimeout()
+    {
+        var binding = new NativeToolBinding(Declaration, (_, _) => Task.FromResult(Receipt));
+        var declarations = NativeToolHost.GetDeclarations(new[] { binding });
+        Assert.Equal(new[] { "application_info", "set_window_title", "mcp_echo" }, declarations.EnumerateArray().Select(x => x.GetProperty("name").GetString()));
+        Assert.False(declarations[0].TryGetProperty("timeoutMs", out _));
+        Assert.False(declarations[1].TryGetProperty("timeoutMs", out _));
+        Assert.Equal(10000, declarations[2].GetProperty("timeoutMs").GetInt32());
+    }
+
+    [Fact]
     public void OptionalFixedDeclarationCannotReplaceBuiltInTools()
     {
         var binding = new NativeToolBinding(Declaration, (_, _) => Task.FromResult(Receipt));

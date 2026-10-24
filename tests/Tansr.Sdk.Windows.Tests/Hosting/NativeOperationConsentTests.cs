@@ -150,13 +150,49 @@ public sealed class NativeOperationConsentTests
         Assert.Equal(0, observed);
     }
 
-    private static JsonElement Operation(string id = "operation", string changed = "") => JsonSerializer.SerializeToElement(new
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task PendingPromptExpiryOrRevocationCancelsAllWaitersAndLateAllowCannotObserve(bool revoke)
+    {
+        using var consent = new NativeOperationConsent(); var observed = 0; var prompts = 0;
+        var answer = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var promptCancelled = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var operation = Operation(expires: revoke ? null : DateTimeOffset.UtcNow.AddMilliseconds(700));
+        async Task<bool> Approve(CancellationToken token)
+        {
+            Interlocked.Increment(ref prompts);
+            using var registration = token.Register(() => promptCancelled.TrySetResult(true));
+            return await answer.Task;
+        }
+        Task Guard() => consent.EnsureAsync(operation, _ => Task.FromResult("authority"), Approve, () => observed++, default);
+        var first = Guard(); var second = Guard();
+        try
+        {
+            Assert.Equal(1, prompts); if (revoke) consent.Revoke(operation);
+            await promptCancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var firstError = await Record.ExceptionAsync(() => first.WaitAsync(TimeSpan.FromSeconds(3)));
+            var secondError = await Record.ExceptionAsync(() => second.WaitAsync(TimeSpan.FromSeconds(3)));
+            Assert.NotNull(firstError); Assert.IsNotType<TimeoutException>(firstError);
+            Assert.NotNull(secondError); Assert.IsNotType<TimeoutException>(secondError);
+            answer.TrySetResult(true);
+            await Assert.ThrowsAnyAsync<Exception>(Guard);
+            Assert.Equal(0, observed); Assert.Equal(1, prompts);
+        }
+        finally
+        {
+            answer.TrySetResult(true); consent.Dispose();
+            _ = await Record.ExceptionAsync(() => first); _ = await Record.ExceptionAsync(() => second);
+        }
+    }
+
+    private static JsonElement Operation(string id = "operation", string changed = "", DateTimeOffset? expires = null) => JsonSerializer.SerializeToElement(new
     {
         operationId = id,
         digest = changed == "digest" ? "new-digest" : "digest",
         scope = new { authorizationRevision = changed == "scope" ? "2" : "1" },
         binding = new { bindingId = changed == "binding" ? "other" : "binding" },
-        expiresAt = "2099-01-01T00:00:00.000Z"
+        expiresAt = expires?.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture) ?? "2099-01-01T00:00:00.000Z"
     });
 
     private sealed class ListHandler : HttpMessageHandler

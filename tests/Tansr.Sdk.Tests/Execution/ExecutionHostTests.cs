@@ -436,19 +436,28 @@ public sealed class ExecutionHostTests
         Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
     }
 
-    [Fact]
-    public async Task ScopeChangedDuringDenialDoesNotCreateAClaim()
+    [Theory]
+    [InlineData("revision")]
+    [InlineData("user")]
+    [InlineData("application")]
+    public async Task ScopeChangedDuringDenialSettlesFailureOnlyWithinTheOriginalPrincipal(string changed)
     {
-        var client = new FakeClient(); client.Enqueue(ExecutionFixture.Operation());
+        var operation = ExecutionFixture.Operation(); var client = new FakeClient(); client.Enqueue(operation);
         var journal = new FakeJournal(); var backend = new FakeBackend();
         using var host = new ExecutionHost(client, backend, journal, (_, _) =>
         {
-            client.Scope = ExecutionFixture.Scope(revision: "2");
+            client.Scope = ChangedScope(changed);
             throw new ExecutionRejectedException("EACCES");
         });
-        await Assert.ThrowsAsync<InvalidDataException>(() => host.RunAsync().WaitAsync(Deadline));
-        Assert.Equal(0, journal.ClaimCalls); Assert.Empty(journal.Completions);
-        Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+        var run = host.RunAsync();
+        try
+        {
+            await Task.WhenAny(run, client.PollAfterFirst.Task).WaitAsync(Deadline);
+            Assert.Equal(1, journal.ClaimCalls); AssertCanceledBeforeExecution(operation, journal);
+            Assert.Equal(0, backend.SideEffects); Assert.Equal(changed == "revision" ? 1 : 0, client.SubmitCalls);
+            if (changed != "revision") await Assert.ThrowsAsync<InvalidDataException>(() => run);
+        }
+        finally { _ = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); }
     }
 
     [Theory]
@@ -457,12 +466,43 @@ public sealed class ExecutionHostTests
     public async Task ExistingReceiptCannotBypassCurrentAuthorityRevocation(bool hasReceipt)
     {
         var operation = ExecutionFixture.Operation(); var journal = new FakeJournal();
-        if (hasReceipt) { await journal.ClaimAsync(operation); await journal.CompleteAsync(operation, ExecutionFixture.Receipt(operation)); }
+        await journal.ClaimAsync(operation);
+        if (hasReceipt) await journal.CompleteAsync(operation, ExecutionFixture.Receipt(operation));
         var claims = journal.ClaimCalls; var client = new FakeClient(); client.Enqueue(operation); var backend = new FakeBackend();
         using var host = new ExecutionHost(client, backend, journal, (_, _) => throw new ExecutionRejectedException("ESTALE"));
         Assert.Equal("ESTALE", (await Assert.ThrowsAsync<ExecutionRejectedException>(() => host.RunAsync().WaitAsync(Deadline))).Code);
-        Assert.Equal(claims, journal.ClaimCalls); Assert.Equal(hasReceipt ? 1 : 0, journal.Completions.Count);
+        Assert.Equal(claims + 1, journal.ClaimCalls); Assert.Equal(hasReceipt ? 1 : 0, journal.Completions.Count);
         Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+    }
+
+    [Fact]
+    public async Task CompletedReceiptSlowApprovalDoesNotTreatHistoricalCompletionAsActiveCancellation()
+    {
+        var operation = ExecutionFixture.Operation(); var original = ExecutionFixture.Receipt(operation);
+        var journal = new FakeJournal(); await journal.ClaimAsync(operation); await journal.CompleteAsync(operation, original);
+        var entered = Signal(); var answer = Signal(); CancellationToken approvalToken = default; var approvals = 0;
+        var client = new FakeClient { Status = (_, _) => ExecutionFixture.Status(operation, original) }; client.Enqueue(operation);
+        var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, backend, journal, async (_, token) =>
+        {
+            approvalToken = token; Interlocked.Increment(ref approvals); entered.TrySetResult(true);
+            await answer.Task.WaitAsync(token);
+        });
+        var run = host.RunAsync();
+        try
+        {
+            await entered.Task.WaitAsync(Deadline);
+            // Keep approval pending across the original one-second status-monitor interval.
+            await Task.Delay(1500);
+            Assert.False(approvalToken.IsCancellationRequested); Assert.False(run.IsCompleted);
+            Assert.Equal(0, client.SubmitCalls); Assert.Equal(0, backend.SideEffects);
+            answer.TrySetResult(true);
+            var replay = await client.Submissions.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            Assert.True(ExecutionFixture.Same(original, replay)); Assert.Single(journal.Completions);
+            Assert.True(ExecutionFixture.Same(original, journal.Completions.Single()));
+            Assert.Equal(1, approvals); Assert.Equal(2, journal.ClaimCalls); Assert.Equal(0, backend.SideEffects);
+        }
+        finally { answer.TrySetResult(true); _ = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); }
     }
 
     [Fact]
@@ -585,19 +625,140 @@ public sealed class ExecutionHostTests
         Assert.Equal(0, client.SubmitCalls);
     }
 
-    [Fact]
-    public async Task ScopeChangedWhileAwaitingApprovalDoesNotCreateAClaim()
+    [Theory]
+    [InlineData("revision")]
+    [InlineData("user")]
+    [InlineData("application")]
+    public async Task ScopeChangedWhileAwaitingApprovalSettlesFailureOnlyWithinTheOriginalPrincipal(string changed)
     {
-        var client = new FakeClient(); client.Enqueue(ExecutionFixture.Operation());
+        var operation = ExecutionFixture.Operation(); var client = new FakeClient(); client.Enqueue(operation);
         var journal = new FakeJournal(); var backend = new FakeBackend();
         using var host = new ExecutionHost(client, backend, journal, (_, _) =>
         {
-            client.Scope = ExecutionFixture.Scope(revision: "2");
+            client.Scope = ChangedScope(changed);
             return Task.CompletedTask;
         });
-        await Assert.ThrowsAsync<InvalidDataException>(() => host.RunAsync().WaitAsync(Deadline));
-        Assert.Equal(0, journal.ClaimCalls);
-        Assert.Equal(0, backend.SideEffects);
+        var run = host.RunAsync();
+        try
+        {
+            await Task.WhenAny(run, client.PollAfterFirst.Task).WaitAsync(Deadline);
+            Assert.Equal(1, journal.ClaimCalls); AssertCanceledBeforeExecution(operation, journal);
+            Assert.Equal(0, backend.SideEffects); Assert.Equal(changed == "revision" ? 1 : 0, client.SubmitCalls);
+            if (changed != "revision") await Assert.ThrowsAsync<InvalidDataException>(() => run);
+        }
+        finally { _ = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); }
+    }
+
+    private static JsonElement ChangedScope(string changed) => ExecutionFixture.Scope(
+        user: changed == "user" ? "other-user" : "user", revision: changed == "revision" ? "2" : "1", application: changed == "application" ? "other-app" : "app");
+
+    [Fact]
+    public async Task ApprovalExpiryCancelsPendingPromptAndLateAllowSettlesOnlyTheOriginalClaim()
+    {
+        var operation = ExpiringOperation(TimeSpan.FromMilliseconds(700));
+        var entered = Signal(); var cancelled = Signal(); var answer = Signal();
+        var client = new FakeClient { Status = (_, _) => ExecutionFixture.Status(operation, null) }; client.Enqueue(operation);
+        var journal = new FakeJournal(); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, backend, journal, async (_, token) =>
+        {
+            using var registration = token.Register(() => cancelled.TrySetResult(true));
+            entered.TrySetResult(true); await answer.Task;
+        });
+        var run = host.RunAsync();
+        try
+        {
+            await entered.Task.WaitAsync(Deadline);
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            answer.TrySetResult(true);
+            await Task.WhenAny(run, client.PollAfterFirst.Task).WaitAsync(Deadline);
+            Assert.Equal(1, journal.ClaimCalls); Assert.Equal(0, backend.SideEffects);
+            AssertCanceledBeforeExecution(operation, journal); Assert.Equal(1, client.SubmitCalls);
+            Assert.True(ExecutionFixture.Same(journal.Completions.Single(), await client.Submissions.Reader.ReadAsync()));
+        }
+        finally { answer.TrySetResult(true); await host.StopAsync().WaitAsync(Deadline); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ApprovalNotificationReconcilesWhilePromptingAndLateAllowCannotExecute(bool forbidden)
+    {
+        var operation = ExecutionFixture.Operation(); var entered = Signal(); var cancelled = Signal(); var answer = Signal();
+        var source = new FakeNotifications(); var stopped = false;
+        source.Status = value => stopped
+            ? forbidden ? throw new TansrHttpException(403, "forbidden") : ExecutionFixture.Status(value, ExecutionFixture.Receipt(value, "unknown"))
+            : ExecutionFixture.Status(value, null);
+        var client = new FakeClient(); client.Enqueue(operation); var journal = new FakeJournal(); var backend = new FakeBackend();
+        using var host = new ExecutionHost(client, client, backend, journal, async (_, token) =>
+        {
+            using var registration = token.Register(() => cancelled.TrySetResult(true));
+            entered.TrySetResult(true); await answer.Task;
+        }, source.Options());
+        var run = host.RunAsync();
+        try
+        {
+            await source.Opened.Reader.ReadAsync().AsTask().WaitAsync(Deadline);
+            await entered.Task.WaitAsync(Deadline);
+            await source.EmitAsync(Notification("1", "operation-cancelled", operation)).WaitAsync(Deadline);
+            Assert.False(cancelled.Task.IsCompleted); Assert.True(source.StatusReads > 0);
+            stopped = true;
+            // Forbidden is an authoritative withdrawal, not an instruction to retry the side effect.
+            _ = await Record.ExceptionAsync(() => source.EmitAsync(Notification("2", "operation-cancelled", operation)).WaitAsync(Deadline));
+            await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3)); answer.TrySetResult(true);
+            await Task.WhenAny(run, client.PollAfterFirst.Task).WaitAsync(Deadline);
+            Assert.Equal(1, journal.ClaimCalls); Assert.Equal(0, backend.SideEffects);
+            AssertCanceledBeforeExecution(operation, journal); Assert.Equal(forbidden ? 0 : 1, client.SubmitCalls);
+            var stopError = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline));
+            Assert.IsNotType<TimeoutException>(stopError);
+            var runError = await Record.ExceptionAsync(() => run.WaitAsync(Deadline)); Assert.IsNotType<TimeoutException>(runError);
+        }
+        finally { answer.TrySetResult(true); _ = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); }
+    }
+
+    [Fact]
+    public async Task ApprovalClaimExpiryLeavesUnconfirmedJournalPendingWithoutForgedCompletion()
+    {
+        var operation = ExpiringOperation(TimeSpan.FromMilliseconds(700)); var entered = Signal(); var cancelled = Signal();
+        var client = new FakeClient { Status = (_, _) => ExecutionFixture.Status(operation, null) }; client.Enqueue(operation);
+        var journal = new FakeJournal
+        {
+            WaitAfterClaim = async token =>
+            {
+                using var registration = token.Register(() => cancelled.TrySetResult(true));
+                entered.TrySetResult(true); await Task.Delay(Timeout.Infinite, token);
+            }
+        };
+        var backend = new FakeBackend(); using var host = new ExecutionHost(client, backend, journal, Allow); var run = host.RunAsync();
+        try
+        {
+            await entered.Task.WaitAsync(Deadline); await cancelled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await Task.WhenAny(run, client.PollAfterFirst.Task).WaitAsync(Deadline);
+            var stopError = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); Assert.IsNotType<TimeoutException>(stopError);
+            var runError = await Record.ExceptionAsync(() => run.WaitAsync(Deadline)); Assert.IsNotType<TimeoutException>(runError);
+            Assert.Equal(1, journal.ClaimCalls); Assert.Null(await journal.ReceiptAsync(operation));
+            Assert.Single(await journal.OperationsAsync()); Assert.Empty(journal.Completions);
+            Assert.Equal(0, backend.SideEffects); Assert.Equal(0, client.SubmitCalls);
+        }
+        finally { _ = await Record.ExceptionAsync(() => host.StopAsync().WaitAsync(Deadline)); }
+    }
+
+    private static JsonElement ExpiringOperation(TimeSpan duration)
+    {
+        var body = JsonNode.Parse(ExecutionFixture.Operation().GetRawText())!.AsObject(); body.Remove("digest");
+        body["expiresAt"] = DateTimeOffset.UtcNow.Add(duration).ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+        body["digest"] = WireJson.DomainDigest("tansr.sdk2.execution.v1", WireJson.EncodeControl(JsonSerializer.SerializeToElement(body), 1048576));
+        var operation = JsonSerializer.SerializeToElement(body); WireJson.ValidateNamed("ExecutionOperation", operation); return operation;
+    }
+
+    private static void AssertCanceledBeforeExecution(JsonElement operation, FakeJournal journal)
+    {
+        var receipt = Assert.Single(journal.Completions);
+        Assert.Equal(operation.GetProperty("operationId").GetString(), receipt.GetProperty("operationId").GetString());
+        Assert.Equal(operation.GetProperty("digest").GetString(), receipt.GetProperty("digest").GetString());
+        Assert.Equal("failed", receipt.GetProperty("status").GetString());
+        Assert.Equal("ECANCELED", receipt.GetProperty("errorCode").GetString());
+        Assert.Equal(JsonValueKind.Null, receipt.GetProperty("result").ValueKind);
+        Assert.False(journal.CompletionTokens.Single().CanBeCanceled);
     }
 
     [Fact]
@@ -804,6 +965,7 @@ public sealed class ExecutionHostTests
         private readonly Channel<JsonElement> _batches = Channel.CreateUnbounded<JsonElement>();
         public Channel<JsonElement> Submissions { get; } = Channel.CreateUnbounded<JsonElement>();
         public TaskCompletionSource<bool> StatusObserved { get; } = Signal();
+        public TaskCompletionSource<bool> PollAfterFirst { get; } = Signal();
         public JsonElement Scope = ExecutionFixture.Scope();
         public JsonElement Connection = ExecutionFixture.Connection();
         public TaskCompletionSource<bool> HeartbeatObserved { get; } = Signal();
@@ -819,7 +981,7 @@ public sealed class ExecutionHostTests
         { cancellationToken.ThrowIfCancellationRequested(); HeartbeatObserved.TrySetResult(true); return Task.FromResult(Connection.Clone()); }
         public async Task<JsonElement> PollAsync(JsonElement connection, CancellationToken cancellationToken)
         {
-            Interlocked.Increment(ref PollCalls);
+            if (Interlocked.Increment(ref PollCalls) > 1) PollAfterFirst.TrySetResult(true);
             return Poll == null ? await _batches.Reader.ReadAsync(cancellationToken) : await Poll(cancellationToken);
         }
         public Task<JsonElement> SubmitAsync(JsonElement receipt, CancellationToken cancellationToken)
@@ -847,6 +1009,7 @@ public sealed class ExecutionHostTests
         public ConcurrentQueue<CancellationToken> CompletionTokens { get; } = new();
         public Action? BeforeComplete;
         public Func<Task>? WaitBeforeComplete;
+        public Func<CancellationToken, Task>? WaitAfterClaim;
         public Exception? ClaimFailure;
         public int ClaimCalls;
         public Task<ExecutorJournalClaim> ClaimAsync(JsonElement operation, CancellationToken cancellationToken = default)
@@ -862,8 +1025,13 @@ public sealed class ExecutionHostTests
                     return Task.FromResult(existing.Receipt.HasValue ? ExecutorJournalClaim.Completed(existing.Receipt.Value) : ExecutorJournalClaim.Pending());
                 }
                 _records.Add(id, (operation.Clone(), null));
-                return Task.FromResult(ExecutorJournalClaim.Claimed());
+                return FinishClaimAsync(cancellationToken);
             }
+        }
+        private async Task<ExecutorJournalClaim> FinishClaimAsync(CancellationToken cancellationToken)
+        {
+            if (WaitAfterClaim != null) await WaitAfterClaim(cancellationToken);
+            return ExecutorJournalClaim.Claimed();
         }
         public async Task CompleteAsync(JsonElement operation, JsonElement receipt, CancellationToken cancellationToken = default)
         {

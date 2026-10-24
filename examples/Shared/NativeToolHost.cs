@@ -63,7 +63,7 @@ internal sealed class NativeToolHost : IDisposable
     {
         get
         {
-            using var document = JsonDocument.Parse("[{\"name\":\"application_info\",\"description\":\"读取当前原生示例应用名称、版本和运行环境；不读取用户文件或凭据。\",\"readOnly\":true,\"timeoutMs\":10000},{\"name\":\"set_window_title\",\"description\":\"设置当前原生应用窗口标题。只影响本应用窗口。\",\"parameters\":{\"title\":{\"type\":\"string\",\"description\":\"不超过120字符的窗口标题\"}},\"readOnly\":false,\"timeoutMs\":10000}]");
+            using var document = JsonDocument.Parse("[{\"name\":\"application_info\",\"description\":\"读取当前原生示例应用名称、版本和运行环境；不读取用户文件或凭据。\",\"readOnly\":true},{\"name\":\"set_window_title\",\"description\":\"设置当前原生应用窗口标题。只影响本应用窗口。\",\"parameters\":{\"title\":{\"type\":\"string\",\"description\":\"不超过120字符的窗口标题\"}},\"readOnly\":false}]");
             return document.RootElement.Clone();
         }
     }

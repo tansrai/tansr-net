@@ -365,7 +365,8 @@ internal sealed class NativeOperationConsent : IDisposable
             lock (gate)
             {
                 if (closed) throw new ExecutionRejectedException("ESTALE");
-                foreach (var expired in entries.Where(item => item.Value.Expires <= DateTimeOffset.UtcNow && item.Value.Completion.Task.IsCompleted).Select(item => item.Key).ToArray()) entries.Remove(expired);
+                foreach (var expired in entries.Where(item => item.Value.Expires <= DateTimeOffset.UtcNow && item.Value.Completion.Task.IsCompleted).Select(item => item.Key).ToArray())
+                { entries[expired].Stop.Dispose(); entries.Remove(expired); }
                 if (entries.TryGetValue(key, out var retained))
                 {
                     entry = retained;
@@ -379,34 +380,66 @@ internal sealed class NativeOperationConsent : IDisposable
                     entry = new Entry(identity, authority, expires); entries.Add(key, entry); owner = true;
                 }
             }
-            if (owner)
+            using var approval = CancellationTokenSource.CreateLinkedTokenSource(token, entry.Stop.Token);
+            token = approval.Token;
+            var expiry = CancelAtExpiryAsync(entry.Expires, approval);
+            try
             {
-                try
+                if (owner)
                 {
-                    var allowed = await WaitAsync(approve(token), token).ConfigureAwait(false);
-                    token.ThrowIfCancellationRequested();
-                    if (await validate(token).ConfigureAwait(false) != authority) throw new ExecutionRejectedException("ESTALE");
-                    lock (gate)
+                    try
                     {
-                        if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
+                        token.ThrowIfCancellationRequested();
+                        var allowed = await WaitAsync(approve(token), token).ConfigureAwait(false);
+                        token.ThrowIfCancellationRequested();
+                        if (await validate(token).ConfigureAwait(false) != authority) throw new ExecutionRejectedException("ESTALE");
+                        lock (gate)
+                        {
+                            if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
+                        }
+                        if (allowed) observe();
+                        // 用户拒绝是该原操作的稳定决定，不等同于配置或身份撤销。
+                        lock (gate) { if (closed || entry.Revoked) throw new ExecutionRejectedException("ESTALE"); entry.Completion.TrySetResult(allowed); }
                     }
-                    if (allowed) observe();
-                    // 用户拒绝是该原操作的稳定决定，不等同于配置或身份撤销。
-                    lock (gate) { if (closed || entry.Revoked) throw new ExecutionRejectedException("ESTALE"); entry.Completion.TrySetResult(allowed); }
+                    catch (Exception error) { lock (gate) { entry.Revoked = true; entry.Completion.TrySetException(error); } }
                 }
-                catch (Exception error) { lock (gate) { entry.Revoked = true; entry.Completion.TrySetException(error); } }
+                decision = await WaitAsync(entry.Completion.Task, token).ConfigureAwait(false);
+                token.ThrowIfCancellationRequested();
+                if (await validate(token).ConfigureAwait(false) != authority) throw new ExecutionRejectedException("ESTALE");
+                lock (gate) if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
             }
-            decision = await WaitAsync(entry.Completion.Task, token).ConfigureAwait(false);
-            token.ThrowIfCancellationRequested();
-            if (await validate(token).ConfigureAwait(false) != authority) throw new ExecutionRejectedException("ESTALE");
-            lock (gate) if (closed || entry.Revoked || entry.Expires <= DateTimeOffset.UtcNow) throw new ExecutionRejectedException("ESTALE");
+            finally { approval.Cancel(); await expiry.ConfigureAwait(false); }
         }
         catch { Revoke(operation); throw; }
         if (!decision) throw new ExecutionRejectedException("EACCES");
     }
 
     internal void Revoke(JsonElement operation)
-    { lock (gate) if (entries.TryGetValue(operation.GetProperty("operationId").GetString()!, out var entry)) entry.Revoked = true; }
+    {
+        Entry? revoked;
+        lock (gate)
+        {
+            entries.TryGetValue(operation.GetProperty("operationId").GetString()!, out revoked);
+            if (revoked != null) revoked.Revoked = true;
+        }
+        try { revoked?.Stop.Cancel(); }
+        catch (ObjectDisposedException) { } // The same revoked entry has already been retired.
+    }
+
+    private static async Task CancelAtExpiryAsync(DateTimeOffset expires, CancellationTokenSource waiting)
+    {
+        try
+        {
+            while (!waiting.IsCancellationRequested)
+            {
+                var remaining = expires - DateTimeOffset.UtcNow;
+                if (remaining <= TimeSpan.Zero) { waiting.Cancel(); return; }
+                // Delay's platform timer range is not a new approval deadline.
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(int.MaxValue) ? remaining : TimeSpan.FromMilliseconds(int.MaxValue), waiting.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (waiting.IsCancellationRequested) { }
+    }
 
     private static async Task<T> WaitAsync<T>(Task<T> work, CancellationToken token)
     {
@@ -422,20 +455,24 @@ internal sealed class NativeOperationConsent : IDisposable
 
     public void Dispose()
     {
+        Entry[] retired;
         lock (gate)
         {
             if (closed) return;
             closed = true;
-            foreach (var entry in entries.Values) { entry.Revoked = true; entry.Completion.TrySetException(new ExecutionRejectedException("ESTALE")); }
+            retired = entries.Values.ToArray();
+            foreach (var entry in retired) { entry.Revoked = true; entry.Completion.TrySetException(new ExecutionRejectedException("ESTALE")); }
             entries.Clear();
         }
         lifetime.Cancel(); lifetime.Dispose();
+        foreach (var entry in retired) { entry.Stop.Cancel(); entry.Stop.Dispose(); }
     }
     private sealed class Entry(string identity, string authority, DateTimeOffset expires)
     {
         internal readonly string Identity = identity, Authority = authority;
         internal readonly DateTimeOffset Expires = expires;
         internal readonly TaskCompletionSource<bool> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly CancellationTokenSource Stop = new();
         internal bool Revoked;
     }
 }

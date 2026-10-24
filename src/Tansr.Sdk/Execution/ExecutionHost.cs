@@ -272,7 +272,7 @@ public sealed class ExecutionHost : IDisposable
         if (rejection != null) throw rejection;
     }
 
-    private async Task<ExecutionRejectedException?> AuthorizeAsync(JsonElement operation, CancellationToken token)
+    private JsonElement ValidateOperationAuthority(JsonElement operation, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
         var connection = Current();
@@ -284,6 +284,13 @@ public sealed class ExecutionHost : IDisposable
             ExecutionJson.Text(target, "executorId") == ExecutionJson.Text(connection, "executorId") &&
             ExecutionJson.Text(target, "connectionId") == ExecutionJson.Text(connection, "connectionId") &&
             ExecutionJson.Text(target, "connectionRevision") == ExecutionJson.Text(connection, "connectionRevision"));
+        return connection;
+    }
+
+    private async Task<ExecutionRejectedException?> AuthorizeAsync(JsonElement operation, CancellationToken token)
+    {
+        var connection = ValidateOperationAuthority(operation, token);
+        var scope = _client.ReadScope();
         ExecutionRejectedException? rejection = null;
         try { await _authorize(operation.Clone(), token).ConfigureAwait(false); }
         catch (ExecutionRejectedException error) when (error.Code == "EACCES") { rejection = error; }
@@ -314,30 +321,7 @@ public sealed class ExecutionHost : IDisposable
         if (operationName == "process.exec")
             ExecutionJson.Check(ExecutionJson.Equal(_registration.GetProperty("interpreter"), request.GetProperty("args").GetProperty("interpreter")));
 
-        var rejection = await AuthorizeAsync(operation, token).ConfigureAwait(false);
-        var claim = await _journal.ClaimAsync(operation, token).ConfigureAwait(false);
-        if (claim.Status == ExecutorJournalClaimStatus.Completed)
-        {
-            var stored = claim.Receipt ?? throw new InvalidDataException("耐久回执缺失。");
-            ExecutionJson.Receipt(operation, stored);
-            return stored;
-        }
-        if (claim.Status == ExecutorJournalClaimStatus.Pending)
-        {
-            var unknown = ExecutionJson.ReceiptFor(operation, "unknown", null, "execution_outcome_unknown");
-            await _journal.CompleteAsync(operation, unknown, CancellationToken.None).ConfigureAwait(false);
-            return unknown;
-        }
-        if (rejection != null)
-        {
-            // 仅首次认领、确定未执行的拒绝可结算失败；原回执和未决副作用仍由上面的账本分支处理。
-            var denied = ExecutionJson.ReceiptFor(operation, "failed", null, rejection.Code);
-            await _journal.CompleteAsync(operation, denied, CancellationToken.None).ConfigureAwait(false);
-            return denied;
-        }
-
-        JsonElement receipt;
-        var invoked = false;
+        ValidateOperationAuthority(operation, token);
         using var operationLifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         using var observation = CancellationTokenSource.CreateLinkedTokenSource(operationLifetime.Token);
         var active = new ActiveExecution(operation, operationLifetime);
@@ -347,25 +331,55 @@ public sealed class ExecutionHost : IDisposable
         operationLifetime.CancelAfter(remaining <= TimeSpan.Zero ? TimeSpan.Zero : remaining < TimeSpan.FromSeconds(125) ? remaining : TimeSpan.FromSeconds(125));
         try
         {
-            await GuardAsync(operation, operationLifetime.Token).ConfigureAwait(false);
-            monitor = MonitorOperationAsync(operation, operationLifetime, observation.Token);
-            invoked = true;
-            var result = await _backend.ExecuteAsync(operation, ct => GuardAsync(operation, ct), operationLifetime.Token).ConfigureAwait(false);
-            WireJson.ValidateNamed("ResourceResult", result);
-            receipt = ExecutionJson.ReceiptFor(operation, "completed", result, null);
-            ExecutionJson.Receipt(operation, receipt);
+            // Claim reserves only the original idempotency slot. It grants no local permission.
+            // An unconfirmed claim must escape unchanged: it cannot prove that no effect occurred.
+            var claim = await _journal.ClaimAsync(operation, operationLifetime.Token).ConfigureAwait(false);
+            if (claim.Status != ExecutorJournalClaimStatus.Claimed)
+            {
+                // An existing outcome is not live work. Its historical status must not cancel
+                // current-authority verification as though a new backend were still pending.
+                lock (_gate) if (ReferenceEquals(_active, active)) _active = null;
+                // Current authority still protects historical results. A new denial cannot
+                // replace an existing completed result or turn an unresolved effect into failure.
+                await AuthorizeAsync(operation, operationLifetime.Token).ConfigureAwait(false);
+                if (claim.Status == ExecutorJournalClaimStatus.Completed)
+                {
+                    var stored = claim.Receipt ?? throw new InvalidDataException("耐久回执缺失。");
+                    ExecutionJson.Receipt(operation, stored);
+                    return stored;
+                }
+                var unknown = ExecutionJson.ReceiptFor(operation, "unknown", null, "execution_outcome_unknown");
+                await _journal.CompleteAsync(operation, unknown, CancellationToken.None).ConfigureAwait(false);
+                return unknown;
+            }
+
+            JsonElement receipt;
+            var invoked = false;
+            try
+            {
+                monitor = MonitorOperationAsync(operation, operationLifetime, observation.Token);
+                // The original operation deadline and cancellation observation include human
+                // approval; the backend cannot start merely because a durable slot was reserved.
+                await GuardAsync(operation, operationLifetime.Token).ConfigureAwait(false);
+                invoked = true;
+                var result = await _backend.ExecuteAsync(operation, ct => GuardAsync(operation, ct), operationLifetime.Token).ConfigureAwait(false);
+                WireJson.ValidateNamed("ResourceResult", result);
+                receipt = ExecutionJson.ReceiptFor(operation, "completed", result, null);
+                ExecutionJson.Receipt(operation, receipt);
+            }
+            catch (ExecutionRejectedException error) { receipt = ExecutionJson.ReceiptFor(operation, "failed", null, error.Code); }
+            catch (Exception) { receipt = ExecutionJson.ReceiptFor(operation, invoked ? "unknown" : "failed", null, invoked ? "execution_outcome_unknown" : "ECANCELED"); }
+            // Cancellation must not cancel the original durable settlement. Before invocation,
+            // this freshly owned slot proves failure; after invocation the outcome stays unknown.
+            await _journal.CompleteAsync(operation, receipt, CancellationToken.None).ConfigureAwait(false);
+            return receipt;
         }
-        catch (ExecutionRejectedException error) { receipt = ExecutionJson.ReceiptFor(operation, "failed", null, error.Code); }
-        catch (Exception) { receipt = ExecutionJson.ReceiptFor(operation, invoked ? "unknown" : "failed", null, invoked ? "execution_outcome_unknown" : "ECANCELED"); }
         finally
         {
             lock (_gate) if (ReferenceEquals(_active, active)) _active = null;
             observation.Cancel();
             if (monitor != null) await monitor.ConfigureAwait(false);
         }
-        // 不拿已取消的运行票取消本地终局落盘；存储失败向调用者保留未决责任。
-        await _journal.CompleteAsync(operation, receipt, CancellationToken.None).ConfigureAwait(false);
-        return receipt;
     }
 
     private async Task<JsonElement> ReadStatusAsync(JsonElement operation, CancellationToken cancellationToken)
