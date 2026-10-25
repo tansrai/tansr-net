@@ -205,4 +205,21 @@ public sealed class SessionRunTests
         var result = await run.Completion.WaitAsync(Deadline);
         Assert.DoesNotContain(result.Snapshot.Messages.SelectMany(m => m.Parts), p => p.Text.Contains("withdrawn", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task MonotonicFilteredSequenceRunCompletesWithoutHistoryReadsOrInputRetry()
+    {
+        using var handler = new Handler(); using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
+        var session = await client.CreateSessionAsync(new()); using var run = session.StartRun("synthetic single turn");
+        await run.Acceptance.WaitAsync(Deadline);
+        handler.Events.Push(Frame(0, "turn.started") + Frame(50, "msg.block.start", extra: ",\"index\":0,\"blockType\":\"text\"") +
+            Frame(90, "msg.text.delta", extra: ",\"index\":0,\"text\":\"SYNTHETIC-OK\"") + Frame(100, "msg.block.end", extra: ",\"index\":0") + Completed(150));
+
+        var result = await run.Completion.WaitAsync(Deadline);
+
+        Assert.False(result.Snapshot.HasEventGap);
+        Assert.Contains(result.Snapshot.Messages.SelectMany(message => message.Parts), part => part.Text == "SYNTHETIC-OK");
+        Assert.Equal(1, handler.Sends);
+        Assert.DoesNotContain(handler.Paths, path => path.Contains("history", StringComparison.Ordinal));
+    }
 }

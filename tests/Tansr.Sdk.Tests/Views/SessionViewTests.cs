@@ -68,8 +68,10 @@ public sealed class SessionViewTests
         view.Apply(usage); view.Apply(usage);
         Assert.Equal(19, view.Snapshot.SessionTokens);
         Assert.Equal(1, view.Snapshot.UsageRequests);
-        Assert.True(view.Snapshot.HasEventGap);
+        Assert.False(view.Snapshot.HasEventGap);
         view.Apply(Event("{\"type\":\"tool.completed\",\"seq\":5,\"toolCallId\":\"t\",\"isError\":true,\"content\":\"hello\"}"));
+        view.Apply(Event("{\"type\":\"session.events_dropped\",\"seq\":6,\"droppedCount\":1,\"reason\":\"count_limit\"}"));
+        Assert.True(view.Snapshot.HasEventGap);
         Assert.Equal("failed", Assert.Single(view.Snapshot.Tools).Status);
         Assert.Equal(1, SessionViewTextFormatter.Format(view.Snapshot).Split("hello").Length - 1);
     }
@@ -85,6 +87,50 @@ public sealed class SessionViewTests
         Assert.Single(view.Snapshot.Notices);
         view.Apply(Event("{\"type\":\"server.permission.closed\",\"seq\":3,\"payload\":{\"requestId\":\"r\"}}"));
         Assert.Empty(view.Snapshot.PendingRequests);
+    }
+
+    [Theory]
+    [InlineData("session.created")]
+    [InlineData("server.platform.warning")]
+    public void MonotonicEpochOrFilteredSequenceJumpIsNotLossEvidence(string type)
+    {
+        using var view = new SessionView(new SessionViewOptions { InitialSequence = 102 });
+        view.Apply(Event("{\"type\":\"" + type + "\",\"seq\":4305072}"));
+        view.Apply(Event("{\"type\":\"turn.started\",\"seq\":4305073}"));
+        view.Apply(Event("{\"type\":\"turn.completed\",\"seq\":4305081}"));
+        view.Apply(Event("{\"type\":\"session.created\",\"seq\":7085025}"));
+
+        Assert.False(view.Snapshot.HasEventGap);
+        Assert.Equal(7085025, view.Snapshot.LastSequence);
+        Assert.DoesNotContain(view.Snapshot.Notices, notice => notice.Code == "event_sequence_gap");
+    }
+
+    [Theory]
+    [InlineData("server.replay.gap", "evicted")]
+    [InlineData("server.replay.gap", "ahead_of_log")]
+    [InlineData("session.events_dropped", "count_limit")]
+    public void ExplicitLossSurvivesLaterEpochAndTerminal(string type, string reason)
+    {
+        using var view = new SessionView(new SessionViewOptions { InitialSequence = 2 });
+        view.Apply(Event("{\"type\":\"" + type + "\",\"reason\":\"" + reason + "\",\"seq\":3}"));
+        view.Apply(Event("{\"type\":\"session.created\",\"seq\":1000}"));
+        view.Apply(Event("{\"type\":\"turn.completed\",\"seq\":1001}"));
+
+        Assert.True(view.Snapshot.HasEventGap);
+        if (reason == "ahead_of_log") Assert.Equal(2, view.Snapshot.LastSequence);
+    }
+
+    [Fact]
+    public void AdjacentWarningCannotExtendAnEarlierTerminalToAnotherHistoryWatermark()
+    {
+        using var view = FailedTurn();
+        view.Apply(Event("{\"type\":\"server.platform.warning\",\"seq\":4}"));
+        using var history = JsonDocument.Parse("{\"sessionId\":\"s\",\"lastSeq\":4,\"messages\":[]}");
+
+        view.RestoreHistory(history.RootElement, "s");
+
+        Assert.Equal("unknown", view.Snapshot.Status);
+        Assert.Null(view.Snapshot.LastError);
     }
 
     [Fact]

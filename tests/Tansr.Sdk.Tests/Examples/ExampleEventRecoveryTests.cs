@@ -161,6 +161,117 @@ public sealed class ExampleEventRecoveryTests
     }
 
     [Fact]
+    public async Task FailedRecoveryIsNotRetriedByEveryRetainedEvent()
+    {
+        var reads = 0;
+        var recovery = Recovery(_ =>
+        {
+            reads++;
+            throw new IOException("fixture_read_failed");
+        }, Metadata("idle", 50), new List<long>());
+        await Assert.ThrowsAsync<IOException>(() => recovery.RecoverGapAsync(CancellationToken.None));
+
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+
+        Assert.Equal(1, reads);
+        Assert.True(recovery.Required);
+        Assert.False(await recovery.ObserveTerminalAsync(Terminal(50), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task RunningRecoveryStartsOnceUntilCoveringTerminalThenCanHandleANewGap()
+    {
+        var reads = new Queue<JsonElement>(new[] { History(5), History(91), History(91) });
+        var installed = new List<long>();
+        var recovery = Recovery(_ => Task.FromResult(reads.Dequeue()), Metadata("running", 90), installed);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+
+        Assert.Equal(new long[] { 5 }, installed);
+        Assert.True(recovery.Required);
+        Assert.True(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
+        Assert.False(recovery.Required);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        Assert.Equal(new long[] { 5, 91, 91 }, installed);
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task NewAuthoritativeEpochGapReplacesPendingOldTerminalFloor()
+    {
+        using var view = new SessionView();
+        var histories = new Queue<JsonElement>(new[] { History(5), History(1), History(3) });
+        var metadata = new Queue<JsonElement>(new[] { Metadata("running", 90), Metadata("running", 2) });
+        var recovery = new ExampleEventRecovery("s", _ => Task.FromResult(histories.Dequeue()),
+            _ => Task.FromResult(metadata.Dequeue()), history =>
+            {
+                view.RestoreHistory(history, "s");
+                return Task.CompletedTask;
+            }, () => true);
+        await recovery.RecoverGapAsync(CancellationToken.None);
+        Assert.True(recovery.Required);
+        view.Apply(new AgentEvent("server.replay.gap", null,
+            Json("""{"sessionId":"s","type":"server.replay.gap","reason":"ahead_of_log"}""")));
+
+        await recovery.RecoverGapAsync(CancellationToken.None, newReplayGap: true);
+        Assert.Equal(1, recovery.HistorySequence);
+        Assert.True(recovery.Required);
+        view.Apply(Event("turn.started", 2));
+        view.Apply(Terminal(3));
+        Assert.True(await recovery.ObserveTerminalAsync(Terminal(3), CancellationToken.None));
+
+        Assert.False(recovery.Required);
+        Assert.Equal(3, recovery.HistorySequence);
+        Assert.False(view.Snapshot.HasEventGap);
+        Assert.Equal("idle", view.Snapshot.Status);
+        Assert.Empty(histories);
+        Assert.Empty(metadata);
+    }
+
+    [Fact]
+    public async Task FailedNewEpochRecoveryCannotReuseThePreviousTerminalFloor()
+    {
+        var reads = 0;
+        var recovery = Recovery(_ => ++reads == 1 ? Task.FromResult(History(5)) : throw new IOException("new_epoch_history_failed"),
+            Metadata("running", 90), new List<long>());
+        await recovery.RecoverGapAsync(CancellationToken.None);
+
+        await Assert.ThrowsAsync<IOException>(() => recovery.RecoverGapAsync(CancellationToken.None, newReplayGap: true));
+        await recovery.RecoverGapAsync(CancellationToken.None);
+
+        Assert.False(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
+        Assert.Equal(2, reads);
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task IncompleteProjectionHistoryLeavesRecoveryLockedWithoutRepeatedReads()
+    {
+        using var view = new SessionView();
+        view.Apply(Event("session.events_dropped", 0));
+        var reads = 0;
+        var recovery = new ExampleEventRecovery("s", _ =>
+        {
+            reads++;
+            return Task.FromResult(Json("""{"sessionId":"s","lastSeq":5,"offset":0,"total":1,"messages":[]}"""));
+        }, _ => Task.FromResult(Metadata("idle", 5)), history =>
+        {
+            view.RestoreHistory(history, "s");
+            return Task.CompletedTask;
+        }, () => true);
+
+        var error = await Assert.ThrowsAsync<Tansr.Sdk.Client.TansrProtocolException>(() => recovery.RecoverGapAsync(CancellationToken.None));
+        await recovery.RecoverGapAsync(CancellationToken.None);
+
+        Assert.Equal("incomplete_history_snapshot", error.Code);
+        Assert.Equal(1, reads);
+        Assert.True(recovery.Required);
+        Assert.True(view.Snapshot.HasEventGap);
+    }
+
+    [Fact]
     public async Task TerminalSettlementKeepsObservedErrorAndRecoversNarratorInSameInstall()
     {
         using var view = new SessionView();

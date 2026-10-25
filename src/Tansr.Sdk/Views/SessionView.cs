@@ -159,12 +159,8 @@ public sealed partial class SessionView : IDisposable
             {
                 if (sequence < 0 || sequence > MaximumEventSequence) throw new ArgumentException("Event sequence must be a nonnegative safe integer.", nameof(item));
                 if (_lastSequence.HasValue && sequence.Value <= _lastSequence.Value) return false;
-                if (_lastSequence.HasValue && _lastSequence.Value != long.MaxValue && sequence.Value > _lastSequence.Value + 1)
-                {
-                    _gap = true;
-                    _observedTerminalSequence = null;
-                    Notice("event_sequence_gap", (_lastSequence.Value + 1).ToString(CultureInfo.InvariantCulture) + ".." + (sequence.Value - 1).ToString(CultureInfo.InvariantCulture));
-                }
+                // 会话序号单调但不保证相邻；订阅过滤、恢复纪元都可能合法跳号。
+                // 缺失由 replay-gap／dropped 事件声明，不能从数字差值推断。
                 _lastSequence = sequence;
             }
             var payload = Property(data, "payload");

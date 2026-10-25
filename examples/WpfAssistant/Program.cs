@@ -188,10 +188,12 @@ internal sealed class AssistantWindow : Window
         finally { _busy = false; SetEnabled(); }
     }
 
+    private bool RequiresEventRecovery => _eventRecovery || _view?.Snapshot.HasEventGap == true;
+
     private void SetEnabled()
     {
         foreach (var button in _sessionButtons)
-            button.IsEnabled = !_busy && !_closing && _session != null && (!_eventRecovery || _recoveryButtons.Contains(button)) &&
+            button.IsEnabled = !_busy && !_closing && _session != null && (!RequiresEventRecovery || _recoveryButtons.Contains(button)) &&
                 (!_requestButtons.TryGetValue(button, out var kind) || CurrentRequest(kind) != null);
         if (_connect != null) _connect.IsEnabled = !_busy && !_closing && _session == null;
         if (_cancelConnect != null) _cancelConnect.IsEnabled = !_closing && _connecting is { IsCancellationRequested: false };
@@ -478,16 +480,17 @@ internal sealed class AssistantWindow : Window
             Volatile.Write(ref _eventConnection, "观察中");
             _firstTokenDiagnostics?.Received(session, item);
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
-            if (item.Name == "server.replay.gap")
+            var newReplayGap = item.Name == "server.replay.gap";
+            if (newReplayGap || view.Snapshot.HasEventGap && !recovery.Required)
             {
-                // A gap is a recovery signal, not a terminal error. Keep this SSE alive,
+                // 显式重放缺口和不完整本地投影复用一次恢复，保留当前 SSE 连接。
                 // rebuild the bounded presentation from the same session's authoritative
                 // history, then let the stream deliver newer events. History never creates
                 // approval tickets or completion/usage facts.
                 await SetRecoveryAsync(true, "事件断档，正在恢复权威历史；暂不可发送，可取消或断开。");
                 try
                 {
-                    await recovery.RecoverGapAsync(ct).ConfigureAwait(false);
+                    await recovery.RecoverGapAsync(ct, newReplayGap).ConfigureAwait(false);
                     // Required只在metadata确认idle且随后权威历史安装成功后解除；View仍保持unknown。
                     // 仅授权诊断关联下一次发送，不改变运行状态、业务发送权限或历史事实。
                     if (IsCurrentObservation() && !recovery.Required)
@@ -593,6 +596,7 @@ internal sealed class AssistantWindow : Window
     private async Task SendAsync()
     {
         var text = _draft.Text; var revision = _draftRevision; if (string.IsNullOrWhiteSpace(text)) return;
+        if (RequiresEventRecovery) throw new InvalidOperationException("event_recovery_required");
         _cancellation?.Dismiss();
         var timing = _firstTokenDiagnostics?.BeginSend(_session!, _session!.Id, _view!.Snapshot) == true ? _firstTokenDiagnostics : null;
         try
@@ -615,6 +619,7 @@ internal sealed class AssistantWindow : Window
         var blocks = new List<MessageBlock>(); var text = _draft.Text; var revision = _draftRevision;
         if (!string.IsNullOrWhiteSpace(text)) blocks.Add(MessageBlock.Text(text));
         blocks.Add(MessageBlock.Image(mime, Convert.ToBase64String(await BoundedFiles.ReadAsync(picker.FileName, 8 * 1024 * 1024))));
+        if (RequiresEventRecovery) throw new InvalidOperationException("event_recovery_required");
         _cancellation?.Dismiss();
         SaveLocal(); await _session!.SendBlocksAsync(blocks); _view!.AppendUserMessage(text + "\n[image: " + info.Name + "]"); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
     }

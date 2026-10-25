@@ -28,11 +28,14 @@ internal sealed class ExampleEventRecovery
     internal bool Required { get; private set; }
     internal long HistorySequence { get; private set; } = -1;
 
-    internal async Task RecoverGapAsync(CancellationToken cancellationToken)
+    internal async Task RecoverGapAsync(CancellationToken cancellationToken, bool newReplayGap = false)
     {
+        EnsureCurrent(cancellationToken);
+        // 观察回调按序等待；恢复在途或失败时保持锁定，后续重放不重复发起历史读取。
+        // 新的权威 replay gap 可能改变纪元，仍须重新核定历史与终态水位。
+        if (Required && !newReplayGap) return;
         Required = true;
         _terminalFloor = long.MaxValue;
-        EnsureCurrent(cancellationToken);
         var history = await _history(cancellationToken).ConfigureAwait(false);
         await InstallAsync(history, cancellationToken).ConfigureAwait(false);
         var metadata = await _metadata(cancellationToken).ConfigureAwait(false);

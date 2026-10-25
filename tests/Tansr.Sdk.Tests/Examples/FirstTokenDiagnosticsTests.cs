@@ -321,7 +321,7 @@ public sealed class FirstTokenDiagnosticsTests
         using var diagnostic = Create(files.Output, clock);
         var session = new object();
         using var view = new SessionView(new SessionViewOptions { InitialSequence = -1 });
-        view.Apply(gapped ? Event("turn.completed", 2) : Event("turn.started", 0));
+        view.Apply(gapped ? Event("session.events_dropped", 0) : Event("turn.started", 0));
         Assert.Equal(gapped, view.Snapshot.HasEventGap);
         Assert.False(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
         using var idle = new SessionView();
@@ -371,6 +371,37 @@ public sealed class FirstTokenDiagnosticsTests
         Assert.Single(rows, row => Stage(row) == "TextRenderEnd");
         Assert.Single(rows, row => Stage(row) == "Complete");
         Assert.DoesNotContain("CONTENT", File.ReadAllText(files.Output));
+    }
+
+    [Fact]
+    public async Task LegalEpochReplayCanEstablishTheNextSampleWithoutExtraHistoryReads()
+    {
+        using var files = new DiagnosticFiles();
+        var clock = new TestClock();
+        using var diagnostic = Create(files.Output, clock);
+        using var view = new SessionView(new SessionViewOptions { InitialSequence = 102 });
+        var session = new object();
+        view.Apply(Event("session.created", 4305072));
+        view.Apply(Event("turn.started", 4305073));
+        view.Apply(Event("turn.completed", 4305081));
+        view.Apply(Event("session.created", 7085025));
+        var reads = 0;
+        var recovery = new ExampleEventRecovery("private-session-credential",
+            _ => { reads++; throw new InvalidOperationException("Unexpected history read for a legal sequence jump."); },
+            _ => throw new InvalidOperationException("Unexpected metadata read for a legal sequence jump."),
+            _ => Task.CompletedTask, () => true);
+        if (view.Snapshot.HasEventGap) await recovery.RecoverGapAsync(CancellationToken.None);
+
+        Assert.Equal(0, reads);
+        Assert.False(view.Snapshot.HasEventGap);
+        Assert.True(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
+        diagnostic.Saved(); diagnostic.Sent();
+        Assert.False(Observe(diagnostic, session, view, Event("turn.started", 7085026)));
+        Assert.True(Observe(diagnostic, session, view, Event("turn.completed", 7085027)));
+        diagnostic.Complete();
+        var rows = await ReadAsync(diagnostic, files.Output);
+        Assert.Contains(rows, row => Stage(row) == "TurnStartedReceived");
+        Assert.DoesNotContain(rows, row => Stage(row) == "BaselineGap");
     }
 
     [Fact]

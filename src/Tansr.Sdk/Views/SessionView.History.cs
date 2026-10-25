@@ -40,7 +40,7 @@ public sealed partial class SessionView
             // Keep that original event's projection only at the same known log position;
             // never infer a terminal from messages or carry one into another epoch.
             var keepTerminal = !_epochLost && !_gap && !_runtimeUnknown && !_running &&
-                _observedTerminalSequence.HasValue && _lastSequence == sequence;
+                _observedTerminalSequence == sequence && _lastSequence == sequence;
             _sessionId = expectedSessionId; _lastSequence = sequence; _epochLost = false; _gap = false;
             _messages.Clear(); _tools.Clear(); _blocks.Clear(); _requests.Clear(); _agents.Clear(); _todos.Clear();
             _current = null; _structuredBytes = 0; _running = false; _runtimeUnknown = !keepTerminal; _compacting = false;
