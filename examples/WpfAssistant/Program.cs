@@ -79,6 +79,7 @@ internal sealed class AssistantWindow : Window
     private bool _eventRecovery;
     private string _eventReceived = "尚未收到事件", _eventHandled = "尚未处理事件", _eventConnection = "未连接";
     private readonly FirstTokenDiagnostics? _firstTokenDiagnostics = FirstTokenDiagnostics.FromEnvironment();
+    private readonly ConnectionDiagnostics? _connectionDiagnostics = ConnectionDiagnostics.FromEnvironment();
 
     internal AssistantWindow()
     {
@@ -160,6 +161,7 @@ internal sealed class AssistantWindow : Window
         Closing += OnClosing;
         Closed += (_, _) => Interlocked.Exchange(ref _tokenSource, null)?.Dispose();
         Closed += (_, _) => _firstTokenDiagnostics?.Dispose();
+        Closed += (_, _) => _connectionDiagnostics?.Dispose();
         SetEnabled();
     }
 

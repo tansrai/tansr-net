@@ -93,7 +93,7 @@ internal sealed class SessionTransport : IDisposable
         return value;
     }
 
-    internal async Task<SessionAccess> AccessAsync(CancellationToken cancellationToken)
+    internal async Task<SessionAccess> AccessAsync(CancellationToken cancellationToken, ConnectionTiming? connectionTiming = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var before = ReadPrincipal();
@@ -102,15 +102,18 @@ internal sealed class SessionTransport : IDisposable
             if (principalBound && !string.Equals(principal, before, StringComparison.Ordinal)) throw new TansrProtocolException("context_changed");
             principal = before; principalBound = true;
         }
+        connectionTiming?.Mark(ConnectionTimingPhase.IdentityBeforeToken);
         string token;
         try { token = await tokens(cancellationToken).ConfigureAwait(false); }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
         catch { throw new TansrProtocolException("token_unavailable"); }
+        connectionTiming?.Mark(ConnectionTimingPhase.TokenReceived);
         cancellationToken.ThrowIfCancellationRequested();
         if (string.IsNullOrEmpty(token) || token.Length > 16384) throw new TansrProtocolException("token_unavailable");
         foreach (var c in token) if (c < 33 || c > 126) throw new TansrProtocolException("token_unavailable");
         var access = new SessionAccess(token, before);
         AssertCurrent(access);
+        connectionTiming?.Mark(ConnectionTimingPhase.AccessValidated);
         return access;
     }
 
@@ -139,7 +142,7 @@ internal sealed class SessionTransport : IDisposable
     /// time is <c>deadline_exceeded</c> here and the request is not sent — a replay never extends it.</summary>
     internal async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, SessionAccess access,
         byte[]? body, string accept, string? contentType, string? lastEventId, CancellationToken cancellationToken, string? closureId = null,
-        ApiRequestConditions? conditions = null)
+        ApiRequestConditions? conditions = null, ConnectionTiming? connectionTiming = null, bool discoveryTiming = false)
     {
         AssertCurrent(access);
         if (!path.StartsWith("/", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal) || path.IndexOf('\\') >= 0 || !ApiRoutes.IsApiPath(path))
@@ -178,8 +181,10 @@ internal sealed class SessionTransport : IDisposable
         }
         HttpResponseMessage response;
         var sender = streaming ? streamingClient : client;
+        connectionTiming?.Mark(discoveryTiming ? ConnectionTimingPhase.CapabilityRequestReady : ConnectionTimingPhase.CreateRequestReady);
         try { response = await sender.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false); }
         catch (HttpRequestException) { throw new TansrProtocolException("network_error"); }
+        connectionTiming?.Mark(discoveryTiming ? ConnectionTimingPhase.CapabilityHeaders : ConnectionTimingPhase.CreateHeaders);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -194,6 +199,7 @@ internal sealed class SessionTransport : IDisposable
             var meta = Meta(response);
             if (streaming && negotiateEventEnvelope && response.IsSuccessStatusCode && !meta.EventEnvelopeNegotiated)
                 throw new EnvelopeNotNegotiatedException();
+            connectionTiming?.Mark(discoveryTiming ? ConnectionTimingPhase.CapabilityHeadersValidated : ConnectionTimingPhase.CreateHeadersValidated);
             return response;
         }
         catch { response.Dispose(); throw; }

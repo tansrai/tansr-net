@@ -77,14 +77,16 @@ public sealed partial class TansrClient : IDisposable
         finally { discoveryGate.Release(); }
     }
 
-    private async Task<JsonElement> DiscoverAsync(SessionAccess access, CancellationToken cancellationToken)
+    private async Task<JsonElement> DiscoverAsync(SessionAccess access, CancellationToken cancellationToken, ConnectionTiming? timing = null)
     {
         using var response = await transport.SendAsync(HttpMethod.Get, ApiRoutes.SessionCapabilities.Path() + ApiRoutes.SessionCapabilities.Query(("protocol", WireContract.Protocol)), access,
-            null, "application/json", null, null, cancellationToken).ConfigureAwait(false);
+            null, "application/json", null, null, cancellationToken, connectionTiming: timing, discoveryTiming: true).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellationToken).ConfigureAwait(false);
         if ((int)response.StatusCode != 200) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
-        var value = SessionJson.Control(await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellationToken).ConfigureAwait(false), WireJson.MaximumControlBytes);
+        var bytes = await SessionTransport.ReadBodyAsync(response, WireJson.MaximumControlBytes, cancellationToken).ConfigureAwait(false);
+        timing?.Mark(ConnectionTimingPhase.CapabilityBody);
+        var value = SessionJson.Control(bytes, WireJson.MaximumControlBytes);
         if (value.ValueKind != JsonValueKind.Object || SessionJson.String(value, "protocol") != "sdk2-ext-v1" ||
             !value.TryGetProperty("contracts", out var contracts) || contracts.ValueKind != JsonValueKind.Array || contracts.GetArrayLength() > 2)
             throw new TansrProtocolException("invalid_response");
@@ -104,22 +106,25 @@ public sealed partial class TansrClient : IDisposable
         }
         transport.AssertCurrent(access);
         if (contract == SessionContract.Sdk2OffloadV1 && !sdk2) throw new TansrProtocolException("unsupported_capability");
+        timing?.Mark(ConnectionTimingPhase.CapabilityParsed);
         return value;
     }
 
-    private async Task EnsureContractAsync(SessionAccess access, CancellationToken cancellationToken)
+    private async Task EnsureContractAsync(SessionAccess access, CancellationToken cancellationToken, ConnectionTiming? timing = null)
     {
         if (contract == SessionContract.Sdk1) return;
+        timing?.Mark(ConnectionTimingPhase.DiscoveryGateWait);
         await discoveryGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        timing?.Mark(ConnectionTimingPhase.DiscoveryGateEntered);
         try
         {
             if (string.Equals(discoveredToken, access.Token, StringComparison.Ordinal)) return;
             discoveredToken = null;
-            await DiscoverAsync(access, cancellationToken).ConfigureAwait(false);
+            await DiscoverAsync(access, cancellationToken, timing).ConfigureAwait(false);
             transport.AssertCurrent(access);
             discoveredToken = access.Token;
         }
-        finally { discoveryGate.Release(); }
+        finally { discoveryGate.Release(); timing?.Mark(ConnectionTimingPhase.DiscoveryGateReleased); }
     }
 
     internal void VerifyFamily(JsonElement value)
@@ -130,18 +135,21 @@ public sealed partial class TansrClient : IDisposable
     }
 
     internal async Task<JsonElement> SendSessionAsync(HttpMethod method, string path, byte[]? body, CancellationToken cancellationToken,
-        int requestLimit = 2 * 1024 * 1024, InputErrorMode inputErrorMode = InputErrorMode.None, int? expectedStatus = null)
+        int requestLimit = 2 * 1024 * 1024, InputErrorMode inputErrorMode = InputErrorMode.None, int? expectedStatus = null, ConnectionTiming? timing = null)
     {
         if (body is not null && body.Length > requestLimit) throw new TansrProtocolException("payload_too_large");
         using var cancellation = RequestCancellation(cancellationToken);
-        var access = await transport.AccessAsync(cancellation.Token).ConfigureAwait(false);
-        await EnsureContractAsync(access, cancellation.Token).ConfigureAwait(false);
-        using var response = await transport.SendAsync(method, path, access, body, "application/json", null, null, cancellation.Token).ConfigureAwait(false);
+        var access = await transport.AccessAsync(cancellation.Token, timing).ConfigureAwait(false);
+        await EnsureContractAsync(access, cancellation.Token, timing).ConfigureAwait(false);
+        using var response = await transport.SendAsync(method, path, access, body, "application/json", null, null, cancellation.Token, connectionTiming: timing).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) await SessionTransport.ThrowHttpAsync(response, maxResponseBytes, cancellation.Token, inputErrorMode: inputErrorMode).ConfigureAwait(false);
         if (expectedStatus.HasValue && (int)response.StatusCode != expectedStatus.Value) throw new TansrProtocolException("invalid_response");
         SessionTransport.ExpectContent(response, "application/json");
-        var value = SessionJson.Parse(await SessionTransport.ReadBodyAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false));
+        var bytes = await SessionTransport.ReadBodyAsync(response, maxResponseBytes, cancellation.Token).ConfigureAwait(false);
+        timing?.Mark(ConnectionTimingPhase.CreateBody);
+        var value = SessionJson.Parse(bytes);
         transport.AssertCurrent(access);
+        timing?.Mark(ConnectionTimingPhase.CreateParsed);
         return value;
     }
 
@@ -198,15 +206,24 @@ public sealed partial class TansrClient : IDisposable
     {
         if (options is null) throw new ArgumentNullException(nameof(options));
         var resume = options.ResumeSessionId;
-        var body = SessionRequestWriter.Create(options, contract);
-        var value = await SendSessionAsync(HttpMethod.Post, ApiRoutes.SessionCreate.Path(), body, cancellationToken).ConfigureAwait(false);
-        VerifyFamily(value);
-        var id = SessionJson.String(value, "sessionId");
-        SessionJson.Text(id, 512, "sessionId");
-        var last = SessionJson.LastSequence(value);
-        if (!value.TryGetProperty("resumed", out var resumed) || resumed.ValueKind != JsonValueKind.True && resumed.ValueKind != JsonValueKind.False ||
-            resume is not null && !string.Equals(resume, id, StringComparison.Ordinal)) throw new TansrProtocolException("invalid_response");
-        return new AgentSession(this, id, last, resumed.GetBoolean());
+        var timing = ConnectionTiming.Start(resume is not null);
+        try
+        {
+            var body = SessionRequestWriter.Create(options, contract);
+            timing?.Mark(ConnectionTimingPhase.RequestSerialized);
+            var value = await SendSessionAsync(HttpMethod.Post, ApiRoutes.SessionCreate.Path(), body, cancellationToken, timing: timing).ConfigureAwait(false);
+            VerifyFamily(value);
+            var id = SessionJson.String(value, "sessionId");
+            SessionJson.Text(id, 512, "sessionId");
+            var last = SessionJson.LastSequence(value);
+            if (!value.TryGetProperty("resumed", out var resumed) || resumed.ValueKind != JsonValueKind.True && resumed.ValueKind != JsonValueKind.False ||
+                resume is not null && !string.Equals(resume, id, StringComparison.Ordinal)) throw new TansrProtocolException("invalid_response");
+            var session = new AgentSession(this, id, last, resumed.GetBoolean());
+            timing?.Mark(ConnectionTimingPhase.Complete);
+            return session;
+        }
+        catch (OperationCanceledException) { timing?.Mark(ConnectionTimingPhase.Canceled); throw; }
+        catch { timing?.Mark(ConnectionTimingPhase.Failed); throw; }
     }
 
     public async Task<AgentSession> GetSessionAsync(string sessionId, CancellationToken cancellationToken = default)

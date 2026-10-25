@@ -21,6 +21,7 @@
     <Compile Include="../../examples/Shared/ExampleDeviceApprovals.cs" Link="Examples/ExampleDeviceApprovals.cs" />
     <Compile Include="../../examples/Shared/BoundedFiles.cs" Link="Examples/BoundedFiles.cs" />
     <Compile Include="../../examples/WpfAssistant/FirstTokenDiagnostics.cs" Link="Examples/FirstTokenDiagnostics.cs" />
+    <Compile Include="../../examples/WpfAssistant/ConnectionDiagnostics.cs" Link="Examples/ConnectionDiagnostics.cs" />
     <None Include="../../contract/*.json" Link="contract/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Terminal/Fixtures/*.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="../../contract/terminal-observation-v1.golden.json" Link="Terminal/Fixtures/terminal-observation-v1.golden.json" CopyToOutputDirectory="PreserveNewest" />
