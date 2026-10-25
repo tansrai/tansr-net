@@ -78,6 +78,7 @@ internal sealed class AssistantWindow : Window
     private bool _busy, _closing, _closed;
     private bool _eventRecovery;
     private string _eventReceived = "尚未收到事件", _eventHandled = "尚未处理事件", _eventConnection = "未连接";
+    private readonly FirstTokenDiagnostics? _firstTokenDiagnostics = FirstTokenDiagnostics.FromEnvironment();
 
     internal AssistantWindow()
     {
@@ -158,6 +159,7 @@ internal sealed class AssistantWindow : Window
         AutomationProperties.SetAutomationId(_narration, "SessionNarration");
         Closing += OnClosing;
         Closed += (_, _) => Interlocked.Exchange(ref _tokenSource, null)?.Dispose();
+        Closed += (_, _) => _firstTokenDiagnostics?.Dispose();
         SetEnabled();
     }
 
@@ -471,10 +473,10 @@ internal sealed class AssistantWindow : Window
             // Only keep two bounded metadata watermarks in memory: no payload, token,
             // archive mirror or per-event disk log. These distinguish a stalled source
             // from a consumer that is still processing a received event.
-            var eventLabel = item.Name + " #" + (item.Data.TryGetProperty("seq", out var sequence) ? sequence.ToString() : "—") +
-                " @ " + DateTimeOffset.UtcNow.ToString("O");
-            Volatile.Write(ref _eventReceived, eventLabel);
+            var eventLabel = item.Name + " #" + (item.Data.TryGetProperty("seq", out var sequence) ? sequence.ToString() : "—");
+            Volatile.Write(ref _eventReceived, eventLabel + " @ " + DateTimeOffset.UtcNow.ToString("O"));
             Volatile.Write(ref _eventConnection, "观察中");
+            _firstTokenDiagnostics?.Received(session, item);
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
             if (item.Name == "server.replay.gap")
             {
@@ -486,6 +488,10 @@ internal sealed class AssistantWindow : Window
                 try
                 {
                     await recovery.RecoverGapAsync(ct).ConfigureAwait(false);
+                    // Required只在metadata确认idle且随后权威历史安装成功后解除；View仍保持unknown。
+                    // 仅授权诊断关联下一次发送，不改变运行状态、业务发送权限或历史事实。
+                    if (IsCurrentObservation() && !recovery.Required)
+                        _firstTokenDiagnostics?.ConfirmRecoveredIdle(session, recovery.HistorySequence);
                     await SetRecoveryAsync(recovery.Required, !recovery.Required ? "权威历史已恢复；会话空闲，运行呈现以实时事件为准。" :
                         "权威历史已恢复，等待实时事件收口；可处理新收到的审批、取消或断开。");
                 }
@@ -522,7 +528,16 @@ internal sealed class AssistantWindow : Window
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); }); }
-            if (IsCurrentObservation()) Volatile.Write(ref _eventHandled, eventLabel);
+            if (IsCurrentObservation())
+            {
+                Volatile.Write(ref _eventHandled, eventLabel + " @ " + DateTimeOffset.UtcNow.ToString("O"));
+                if (_firstTokenDiagnostics?.Handled(session, item) == true)
+                {
+                    // 终态停止新事件采样；让已排队的本轮Render先运行，再异步落有界诊断。
+                    try { _ = Dispatcher.BeginInvoke(new Action(() => _firstTokenDiagnostics.Complete()), DispatcherPriority.Background); }
+                    catch { _firstTokenDiagnostics.Dispose(); }
+                }
+            }
         }, new EventStreamOptions { StopOnGap = false, Reconnect = true }, token);
             if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
             if (IsCurrentObservation())
@@ -545,6 +560,7 @@ internal sealed class AssistantWindow : Window
 
     private void Render(SessionViewSnapshot snapshot)
     {
+        var timingKinds = _firstTokenDiagnostics?.BeginRender(_session!, snapshot) ?? 0;
         _media?.Register(snapshot);
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.ScrollToEnd();
         _saveTimer.Start();
@@ -555,6 +571,7 @@ internal sealed class AssistantWindow : Window
             _requests.SelectedItem = _requests.Items.Cast<RequestItem>().FirstOrDefault(x => x.Request.Id == selected) ?? _requests.Items.Cast<RequestItem>().FirstOrDefault();
         }
         SetEnabled();
+        _firstTokenDiagnostics?.EndRender(timingKinds, snapshot);
     }
 
     private Task OpenMediaAsync()
@@ -577,7 +594,14 @@ internal sealed class AssistantWindow : Window
     {
         var text = _draft.Text; var revision = _draftRevision; if (string.IsNullOrWhiteSpace(text)) return;
         _cancellation?.Dismiss();
-        SaveLocal(); await _session!.SendAsync(text); _view!.AppendUserMessage(text); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
+        var timing = _firstTokenDiagnostics?.BeginSend(_session!, _session!.Id, _view!.Snapshot) == true ? _firstTokenDiagnostics : null;
+        try
+        {
+            SaveLocal(); timing?.Saved();
+            await _session!.SendAsync(text); timing?.Sent();
+            _view!.AppendUserMessage(text); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
+        }
+        catch { timing?.SendFailed(); throw; }
         _status.Text = "输入已接纳；等待运行、持久化及收尾事实。";
     }
 
@@ -818,6 +842,7 @@ internal sealed class AssistantWindow : Window
 
     private async Task CloseConnectionAsync()
     {
+        _firstTokenDiagnostics?.Dispose();
         TrySaveForExit();
         if (_session == null) return;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -851,6 +876,7 @@ internal sealed class AssistantWindow : Window
 
     private async Task DetachAsync()
     {
+        _firstTokenDiagnostics?.Dispose();
         TrySaveForExit();
         _cancellation?.Detach(); _cancellation = null;
         var ownedLocalServe = _connection?.OwnsLocalServe == true;
