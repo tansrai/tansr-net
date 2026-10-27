@@ -51,14 +51,7 @@ internal sealed class NativeDeviceHost
         DeviceSessionHost? host = null;
         try
         {
-            journal = await SqliteExecutorJournal.OpenAsync(new SqliteExecutorJournalOptions
-            {
-                Path = journalOptions.Path, Mode = journalOptions.Mode, ExecutorId = journalOptions.ExecutorId,
-                KeyProvider = journalOptions.KeyProvider, CompactCompletedReceipts = journalOptions.CompactCompletedReceipts,
-                MaxOperations = journalOptions.MaxOperations, MaxStoredBytes = journalOptions.MaxStoredBytes, MaxPages = journalOptions.MaxPages,
-                ApplicationScopeId = scope.GetProperty("applicationScopeId").GetString()!,
-                EndUserId = scope.GetProperty("endUserId").GetString()!, ReadContext = readTrustedScope,
-            }, cancellationToken).ConfigureAwait(false);
+            journal = await SqliteExecutorJournal.OpenAsync(JournalOptions(journalOptions, scope, readTrustedScope), cancellationToken).ConfigureAwait(false);
             var backend = new WindowsExecutorBackend(journalOptions.ExecutorId,
                 new[] { new WindowsExecutorWorkspace(workspaceId, workspaceRevision, workspace) }, tools,
                 interpreter, processFactory);
@@ -73,6 +66,15 @@ internal sealed class NativeDeviceHost
             journal?.Dispose(); workspace.Dispose(); throw;
         }
     }
+
+    internal static SqliteExecutorJournalOptions JournalOptions(SqliteExecutorJournalOptions options, JsonElement scope, Func<JsonElement> readTrustedScope) => new()
+    {
+        Path = options.Path, Mode = options.Mode, ExecutorId = options.ExecutorId, Layout = options.Layout,
+        KeyProvider = options.KeyProvider, CompactCompletedReceipts = options.CompactCompletedReceipts,
+        MaxOperations = options.MaxOperations, MaxStoredBytes = options.MaxStoredBytes, MaxPages = options.MaxPages,
+        ApplicationScopeId = scope.GetProperty("applicationScopeId").GetString()!,
+        EndUserId = scope.GetProperty("endUserId").GetString()!, ReadContext = readTrustedScope,
+    };
 
     /// <summary>调用者先停止发送，再等待本机执行全部收尾；不删库、不关远端会话。</summary>
     internal async Task StopAsync()

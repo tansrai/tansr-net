@@ -44,16 +44,21 @@ internal sealed class AssistantWindow : Window
     private readonly TextBox _narration = new() { IsReadOnly = true, AcceptsReturn = true, VerticalScrollBarVisibility = ScrollBarVisibility.Auto, TextWrapping = TextWrapping.Wrap };
     private SessionNarrator? _narrator;
     private Button _connect = null!;
+    private Button _send = null!;
     private Button _cancelConnect = null!;
     private CancellationTokenSource? _connecting;
     private Task? _connectionAttempt;
     private readonly Queue<string> _connectionStages = new();
+    private string? _initializationTimingSample;
+    private Stopwatch? _initializationElapsed;
+    private bool _initializationReady, _initializationInteractionReported;
     private string _currentToken = "";
     private ExampleTokenSource? _tokenSource;
     private string? _tokenSourceFailure;
     private AgentSession? _session;
     private TansrClient? _client;
     private ExampleConnection? _connection;
+    private SessionConnection? _sessionConnection;
     private MediaWorkspace? _media;
     private MediaWindow? _mediaWindow;
     private SessionView? _view;
@@ -119,7 +124,8 @@ internal sealed class AssistantWindow : Window
         top.Children.Add(Row(Button("离线授权档案", () => ReadOfflineStorageAsync(false), false), Button("离线授权记忆", () => ReadOfflineStorageAsync(true), false)));
         var bottom = new StackPanel(); DockPanel.SetDock(bottom, Dock.Bottom); layout.Children.Add(bottom);
         bottom.Children.Add(_draft);
-        bottom.Children.Add(Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
+        _send = Button("发送", SendAsync);
+        bottom.Children.Add(Row(_send, Button("发送图片与草稿", SendImageAsync),
             Button("取消当前工作", CancelCurrentAsync, allowDuringRecovery: true),
             new TextBlock { Text = "失败或结果未知时保留草稿；请先查历史，避免重复发送。", VerticalAlignment = VerticalAlignment.Center }));
         bottom.Children.Add(Row(Button("同轮插入草稿", InsertAsync), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync)));
@@ -202,24 +208,56 @@ internal sealed class AssistantWindow : Window
         _textMode.IsEnabled = _thinkingMode.IsEnabled = !_closing;
         _narratorMode.IsEnabled = _session == null && !_closing;
         _endpoint.IsEnabled = _resume.IsEnabled = _session == null && !_busy && !_closing;
+        if (_initializationReady && !_initializationInteractionReported && !_busy && !_closing && _session != null)
+        {
+            _initializationInteractionReported = true;
+            _initializationElapsed?.Stop();
+            if (_send.IsEnabled)
+                _connectionDiagnostics?.MarkInitialization(_initializationTimingSample, ConnectionInitializationPhase.InputReady);
+            else if (RequiresEventRecovery)
+                _connectionDiagnostics?.MarkInitialization(_initializationTimingSample, ConnectionInitializationPhase.InputBlockedByRecovery);
+            // 观察与查询/审批交互就绪不要求会话 idle；新发送仍遵守原恢复门，不能据此判接入失败。
+            _connectionDiagnostics?.MarkInitialization(_initializationTimingSample, ConnectionInitializationPhase.InteractionReady);
+            if (_connectionStages.Count >= 12) _connectionStages.Dequeue();
+            _connectionStages.Enqueue("InteractionReady · 会话交互可用（" + (_send.IsEnabled ? "发送可用" : "恢复缺口阻止新发送") +
+                "）：从点击连接起 " + (_initializationElapsed?.Elapsed.TotalMilliseconds ?? 0).ToString("F0") + " ms");
+        }
     }
 
     private async Task ConnectAsync()
     {
+        _initializationElapsed = Stopwatch.StartNew();
+        _initializationReady = _initializationInteractionReported = false;
+        _initializationTimingSample = _connectionDiagnostics?.BeginInitialization();
         using var connecting = new CancellationTokenSource();
         _connecting = connecting;
         _connectionStages.Clear();
         SetEnabled();
-        try { _connectionAttempt = ConnectCoreAsync(connecting.Token); await _connectionAttempt; }
+        try { _connectionAttempt = ConnectCoreAsync(connecting.Token, _initializationTimingSample); await _connectionAttempt; }
+        catch (OperationCanceledException)
+        {
+            _initializationReady = false;
+            _initializationElapsed.Stop();
+            _connectionDiagnostics?.MarkInitialization(_initializationTimingSample, ConnectionInitializationPhase.Canceled);
+            throw;
+        }
+        catch
+        {
+            _initializationReady = false;
+            _initializationElapsed.Stop();
+            _connectionDiagnostics?.MarkInitialization(_initializationTimingSample, ConnectionInitializationPhase.Failed);
+            throw;
+        }
         finally { _connectionAttempt = null; _connecting = null; SetEnabled(); }
     }
 
-    private async Task ConnectCoreAsync(CancellationToken connectToken)
+    private async Task ConnectCoreAsync(CancellationToken connectToken, string? timingSample)
     {
         var requestedResume = _resume.Text;
         BindLocalState(newConnection: true);
         _resume.Text = requestedResume;
         SaveLocal();
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.LocalStateReady);
         Volatile.Write(ref _currentToken, _token.Password);
         var sessionLocal = _local;
         var endpoint = _endpoint.Text;
@@ -236,30 +274,76 @@ internal sealed class AssistantWindow : Window
             // manual fallback or overwrite a ticket the user is currently typing.
             return access;
         }, _loopback.IsChecked == true, connectToken));
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.ClientReady);
         var client = connection.Client;
-        AgentSession session;
-        CreateSessionOptions createOptions;
+        var connected = new TaskCompletionSource<SessionConnection>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var loading = true;
+        DispatcherTimer? loadingTimer = null;
         try
         {
             connectToken.ThrowIfCancellationRequested();
-            createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools));
-            session = await MeasureConnectionStageAsync("CreateResume · 能力发现与创建 / 恢复会话", () => client.CreateSessionAsync(createOptions, connectToken));
-        }
-        catch (Exception error) { await CleanupFailedConnectionAsync(connection.CloseAsync, error); throw; }
-        // Serve 已接受建会后，先保留真实 ID；初始化失败不能把重连变成另一笔新建。
-        _resume.Text = session.Id;
-        try
-        {
-            SaveLocal();
-            connectToken.ThrowIfCancellationRequested();
-            await MeasureConnectionStageAsync("Initialize · 声明平台能力", () => ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id, connectToken));
-            connectToken.ThrowIfCancellationRequested();
+            var createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools));
+            _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.SdkInitializationBegin);
+            using var initialization = client.StartSessionInitialization(createOptions, new SessionInitializationOptions
+            {
+                SessionConfirmedAsync = (session, _) =>
+                {
+                    _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.SessionConfirmed);
+                    return Dispatcher.InvokeAsync(() =>
+                    {
+                        if (!ReferenceEquals(_local, sessionLocal) || !sessionLocal.IsCurrent(endpoint))
+                            throw new InvalidOperationException("local_state_identity_changed");
+                        // 先保存创建成功事实，能力协商失败也继续使用这个 ID。
+                        _resume.Text = session.Id; SaveLocal();
+                        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.SessionConfirmedPersisted);
+                    }).Task;
+                },
+                PrepareObservationAsync = (session, lifetimeToken) => Dispatcher.InvokeAsync(() =>
+                    PrepareSessionPresentationAsync(connection, session, createOptions, sessionLocal, endpoint, lifetimeToken, connected.Task, timingSample)).Task.Unwrap(),
+                Progress = progress =>
+                {
+                    // 保留 SDK 原始阶段时刻；不依赖 UI 派发是否及时，也不让日志参与完成判定。
+                    _connectionDiagnostics?.MarkInitializationProgress(timingSample, progress);
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (!loading || !ReferenceEquals(_local, sessionLocal) || _closing) return;
+                        if (_connectionStages.Count >= 12) _connectionStages.Dequeue();
+                        _connectionStages.Enqueue("SDK · " + ExampleInitializationProgress.Format(progress));
+                    }));
+                }
+            }, connectToken);
+            loadingTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            loadingTimer.Tick += (_, _) =>
+            {
+                if (loading && ReferenceEquals(_local, sessionLocal) && !_closing)
+                    _status.Text = ExampleInitializationProgress.Format(initialization.Progress);
+            };
+            loadingTimer.Start();
+            _sessionConnection = await initialization.Ready;
+            _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.SseReady);
+            _initializationReady = true;
+            connected.TrySetResult(_sessionConnection);
+            _status.Text = "已连接会话 " + _sessionConnection.Session.Id + "；恢复会话可用“历史”分页查阅权威记录。" +
+                (connection.Contract == SessionContract.Sdk2OffloadV1 ? "SDK2 客户端已初始化；本机工具仍需显式连接设备并获授权。" : "");
+            TrySaveForExit();
         }
         catch (Exception error)
         {
-            await CleanupFailedConnectionAsync(connection.CloseAsync, error);
-            throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
+            connected.TrySetCanceled();
+            await CleanupFailedConnectionAsync(ReferenceEquals(_connection, connection) ? DetachAsync : connection.CloseAsync, error);
+            throw;
         }
+        finally { loading = false; loadingTimer?.Stop(); }
+    }
+
+    private async Task<SessionObservationOptions?> PrepareSessionPresentationAsync(ExampleConnection connection, AgentSession session,
+        CreateSessionOptions createOptions, LocalConversationState sessionLocal, string endpoint, CancellationToken lifetimeToken,
+        Task<SessionConnection> connected, string? timingSample)
+    {
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.PresentationBegin);
+        lifetimeToken.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(_local, sessionLocal) || !sessionLocal.IsCurrent(endpoint)) throw new InvalidOperationException("local_state_identity_changed");
+        var client = connection.Client;
         _eventRecovery = false;
         _eventReceived = _eventHandled = "尚未收到事件";
         _eventConnection = "连接中";
@@ -267,7 +351,8 @@ internal sealed class AssistantWindow : Window
         var savedInput = sessionLocal.Snapshot.Endpoint == endpoint ? sessionLocal.Snapshot.Input : null;
         _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
         _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, endpoint, session.Id, sessionLocal.PathName, connection.Profile, connection.Contract);
-        _lifetime = new CancellationTokenSource();
+        _lifetime = CancellationTokenSource.CreateLinkedTokenSource(lifetimeToken);
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.NativeReadyBegin);
         _nativeTools = new NativeToolHost(session, "Tansr.WPF", async (title, ct) =>
         {
             await Dispatcher.InvokeAsync(() =>
@@ -276,13 +361,11 @@ internal sealed class AssistantWindow : Window
                 if (!IsCurrentPresentation(session, sessionLocal, endpoint)) throw new InvalidOperationException("local_state_identity_changed");
                 Title = title;
             }, DispatcherPriority.Normal, ct);
-        }, code => Dispatcher.BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, endpoint)) _status.Text = code; })), connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
-        try
-        {
-            await MeasureConnectionStageAsync("NativeReady · 核对原生工具恢复水位", () => _nativeTools.Ready.WaitAsync(connectToken));
-            connectToken.ThrowIfCancellationRequested();
-        }
-        catch (Exception error) { await CleanupFailedConnectionAsync(DetachAsync, error); throw; }
+        }, code => Dispatcher.BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, endpoint)) _status.Text = code; })), connection.NativeTools,
+            resumeRequested: createOptions.ResumeSessionId != null, initializationCancellation: lifetimeToken);
+        await MeasureConnectionStageAsync("NativeReady · 核对原生工具恢复水位", () => _nativeTools.Ready.WaitAsync(lifetimeToken));
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.NativeReady);
+        lifetimeToken.ThrowIfCancellationRequested();
         _view = new SessionView(new SessionViewOptions
         {
             TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
@@ -306,10 +389,9 @@ internal sealed class AssistantWindow : Window
         _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
         _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
         _cancellation = new ExampleCancellationFeedback(session.Id);
-        _observation = ObserveAsync(session, _view, _lifetime.Token);
-        _status.Text = "已连接会话 " + session.Id + "；恢复会话可用“历史”查阅权威记录。" +
-            (connection.Contract == SessionContract.Sdk2OffloadV1 ? "SDK2 客户端已初始化；本机工具仍需显式连接设备并获授权。" : "");
-        TrySaveForExit();
+        var observation = CreateObservation(session, _view, _lifetime.Token, connected);
+        _connectionDiagnostics?.MarkInitialization(timingSample, ConnectionInitializationPhase.ObservationPrepared);
+        return observation;
     }
 
     // 仅记录本机界面耗时，最多保留十二段；不记录正文、票据或逐事件轨迹，也不重试请求。
@@ -440,7 +522,7 @@ internal sealed class AssistantWindow : Window
         if (!Dispatcher.HasShutdownStarted) Dispatcher.BeginInvoke(new Action(() => RenderCancellationFeedback(cancellation, session, local, endpoint)));
     }
 
-    private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
+    private SessionObservationOptions CreateObservation(AgentSession session, SessionView view, CancellationToken token, Task<SessionConnection> connected)
     {
         var storage = _storage; var narrator = _narrator; var nativeTools = _nativeTools;
         var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
@@ -456,22 +538,17 @@ internal sealed class AssistantWindow : Window
                 SetEnabled();
             });
         }
-        var recovery = new ExampleEventRecovery(session.Id,
-            ct => MeasureConnectionStageAsync("History · 读取权威历史", () => session.GetHistoryAsync(ct), IsCurrentObservation),
-            ct => MeasureConnectionStageAsync("Metadata · 核对恢复后的运行状态", () => session.GetMetadataAsync(ct), IsCurrentObservation),
-            async history =>
-            {
-                await Dispatcher.InvokeAsync(() =>
-                {
-                    if (!IsCurrentObservation() || !IsCurrentPresentation(session, local, endpoint))
-                        throw new OperationCanceledException("recovery_presentation_replaced", token);
-                    view.RestoreHistory(history, session.Id);
-                    narrator?.RestoreHistory(history, session.Id);
-                });
-            }, IsCurrentObservation);
-        try
+        var recovery = ExampleEventRecovery.Create(session, view, narrator, async (state, ct) =>
         {
-            await session.ObserveAsync(async (item, ct) =>
+            ct.ThrowIfCancellationRequested();
+            if (!IsCurrentObservation()) throw new OperationCanceledException("recovery_presentation_replaced", ct);
+            if (!state.Required && state.Projection is { Status: "idle" } projection)
+                _firstTokenDiagnostics?.ConfirmRecoveredIdle(session, projection.HistorySequence);
+            await SetRecoveryAsync(state.Required, state.Required
+                ? "有界恢复尚未就绪：" + state.BlockedReason + "；可观察、审批、取消或断开。"
+                : "有界会话呈现已恢复；更早历史按需浏览，运行事实以新事件为准。");
+        });
+        var options = new SessionObservationOptions(async (item, ct) =>
         {
             if (!IsCurrentObservation()) return;
             // Only keep two bounded metadata watermarks in memory: no payload, token,
@@ -482,54 +559,8 @@ internal sealed class AssistantWindow : Window
             Volatile.Write(ref _eventConnection, "观察中");
             _firstTokenDiagnostics?.Received(session, item);
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
-            var newReplayGap = item.Name == "server.replay.gap";
-            if (newReplayGap || view.Snapshot.HasEventGap && !recovery.Required)
-            {
-                // 显式重放缺口和不完整本地投影复用一次恢复，保留当前 SSE 连接。
-                // rebuild the bounded presentation from the same session's authoritative
-                // history, then let the stream deliver newer events. History never creates
-                // approval tickets or completion/usage facts.
-                await SetRecoveryAsync(true, "事件断档，正在恢复权威历史；暂不可发送，可取消或断开。");
-                try
-                {
-                    await recovery.RecoverGapAsync(ct, newReplayGap).ConfigureAwait(false);
-                    // Required只在metadata确认idle且随后权威历史安装成功后解除；View仍保持unknown。
-                    // 仅授权诊断关联下一次发送，不改变运行状态、业务发送权限或历史事实。
-                    if (IsCurrentObservation() && !recovery.Required)
-                        _firstTokenDiagnostics?.ConfirmRecoveredIdle(session, recovery.HistorySequence);
-                    await SetRecoveryAsync(recovery.Required, !recovery.Required ? "权威历史已恢复；会话空闲，运行呈现以实时事件为准。" :
-                        "权威历史已恢复，等待实时事件收口；可处理新收到的审批、取消或断开。");
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (Exception error)
-                {
-                    if (!IsCurrentObservation()) return;
-                    view.MarkSourceFailure("history_recovery", ErrorText(error));
-                    await SetRecoveryAsync(true, "权威历史恢复失败：" + ErrorText(error) + "；可取消或断开后重连。");
-                }
-            }
             if (!IsCurrentObservation()) return;
             if (cancellation.Observe(item)) QueueCancellationFeedback(cancellation, session, local, endpoint);
-            if ((item.Name is "turn.completed" or "turn.aborted") && recovery.Required)
-            {
-                try
-                {
-                    var restored = await recovery.ObserveTerminalAsync(item, ct).ConfigureAwait(false);
-                    if (restored)
-                    {
-                        await SetRecoveryAsync(false, "权威历史已补齐本轮正文；本轮终态已由服务端事件确认。");
-                        QueueCancellationFeedback(cancellation, session, local, endpoint);
-                    }
-                    else await SetRecoveryAsync(true, "历史尚未确认完整，仍可审批、取消或断开；请稍后重连查阅。");
-                }
-                catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
-                catch (Exception error)
-                {
-                    if (!IsCurrentObservation()) return;
-                    view.MarkSourceFailure("history_recovery", ErrorText(error));
-                    await SetRecoveryAsync(true, "历史补齐未确认：" + ErrorText(error) + "；可取消或断开后重连。");
-                }
-            }
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { await Dispatcher.InvokeAsync(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); }); }
@@ -543,23 +574,33 @@ internal sealed class AssistantWindow : Window
                     catch { _firstTokenDiagnostics.Dispose(); }
                 }
             }
-        }, new EventStreamOptions { StopOnGap = false, Reconnect = true }, token);
-            if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
-            if (IsCurrentObservation())
-            {
-                Volatile.Write(ref _eventConnection, "已结束");
-                await SetRecoveryAsync(true, "事件观察已结束；请查状态，断开并重新连接后再发送。");
-                QueueCancellationFeedback(cancellation, session, local, endpoint);
-            }
-        }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
-        catch (Exception error)
+        })
+        { Events = new EventStreamOptions { StopOnGap = false, Reconnect = true }, Recovery = recovery };
+        _observation = ObserveCompletionAsync();
+        return options;
+
+        async Task ObserveCompletionAsync()
         {
-            if (!IsCurrentObservation()) return;
-            Volatile.Write(ref _eventConnection, "观察失败：" + ErrorText(error));
-            view.MarkSourceFailure("event_source", ErrorText(error));
-            await SetRecoveryAsync(true, "事件观察失败，暂不可发送；请更新票据并断开重连：" + ErrorText(error));
-            if (cancellation.ObservationFailed(ErrorText(error))) QueueCancellationFeedback(cancellation, session, local, endpoint);
+            try
+            {
+                await (await connected).Completion;
+                if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
+                if (IsCurrentObservation())
+                {
+                    Volatile.Write(ref _eventConnection, "已结束");
+                    await SetRecoveryAsync(true, "事件观察已结束；请查状态，断开并重新连接后再发送。");
+                    QueueCancellationFeedback(cancellation, session, local, endpoint);
+                }
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+            catch (Exception error)
+            {
+                if (!IsCurrentObservation()) return;
+                Volatile.Write(ref _eventConnection, "观察失败：" + ErrorText(error));
+                view.MarkSourceFailure("event_source", ErrorText(error));
+                await SetRecoveryAsync(true, "事件观察失败，暂不可发送；请更新票据并断开重连：" + ErrorText(error));
+                if (cancellation.ObservationFailed(ErrorText(error))) QueueCancellationFeedback(cancellation, session, local, endpoint);
+            }
         }
     }
 
@@ -635,10 +676,10 @@ internal sealed class AssistantWindow : Window
     private async Task ShowHistoryAsync()
     {
         var session = _session!; var local = _local; var endpoint = _endpoint.Text;
-        var history = await session.GetHistoryAsync();
-        if (!IsCurrentPresentation(session, local, endpoint)) return;
-        local.Save(endpoint, session.Id, _draft.Text, _conversation.Text, history.GetRawText());
-        await ShowAsync("服务端历史（已保留本机展示副本）", Task.FromResult(history));
+        var window = new HistoryBrowserWindow(session.Id, (offset, limit, ct) => session.GetHistoryAsync(offset, limit, ct),
+            () => IsCurrentPresentation(session, local, endpoint), _lifetime!.Token, ErrorText);
+        ShowSessionWindow(window);
+        await window.LoadFirstAsync();
     }
     private Task ShowLocalAsync()
     {
@@ -870,7 +911,9 @@ internal sealed class AssistantWindow : Window
         _cancellation?.Detach(); _cancellation = null;
         _lifetime!.Cancel();
         CloseSessionWindows();
+        _sessionConnection?.Dispose();
         if (_observation != null) await _observation;
+        _sessionConnection = null;
         if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
         _storage = null;
         _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
@@ -893,7 +936,9 @@ internal sealed class AssistantWindow : Window
         // 不调用 interrupt/close/delete：明确释放本机观察和宿主资源，远端状态仍须以后查询。
         _lifetime?.Cancel();
         CloseSessionWindows();
+        _sessionConnection?.Dispose();
         if (_observation != null) await _observation;
+        _sessionConnection = null;
         if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
         _storage = null;
         string? cleanupFailure = null;

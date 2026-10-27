@@ -93,15 +93,22 @@ internal sealed class SessionTransport : IDisposable
         return value;
     }
 
-    internal async Task<SessionAccess> AccessAsync(CancellationToken cancellationToken, ConnectionTiming? connectionTiming = null)
+    // 前置供材与首次请求沿同一规则绑定可信主体；这里只读本机声明，不获取票据或发送请求。
+    internal string? BindCurrentIdentity()
     {
-        cancellationToken.ThrowIfCancellationRequested();
         var before = ReadPrincipal();
         lock (principalGate)
         {
             if (principalBound && !string.Equals(principal, before, StringComparison.Ordinal)) throw new TansrProtocolException("context_changed");
             principal = before; principalBound = true;
         }
+        return before;
+    }
+
+    internal async Task<SessionAccess> AccessAsync(CancellationToken cancellationToken, ConnectionTiming? connectionTiming = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var before = BindCurrentIdentity();
         connectionTiming?.Mark(ConnectionTimingPhase.IdentityBeforeToken);
         string token;
         try { token = await tokens(cancellationToken).ConfigureAwait(false); }
@@ -122,6 +129,15 @@ internal sealed class SessionTransport : IDisposable
         var current = ReadPrincipal();
         lock (principalGate)
             if (!principalBound || !string.Equals(principal, current, StringComparison.Ordinal) || !string.Equals(current, access.Principal, StringComparison.Ordinal))
+                throw new TansrProtocolException("context_changed");
+    }
+
+    // 初始化跨宿主 await 后沿已绑定主体复核，不再获取票据或改变连接池。
+    internal void AssertBoundIdentity()
+    {
+        var current = ReadPrincipal();
+        lock (principalGate)
+            if (!principalBound || !string.Equals(principal, current, StringComparison.Ordinal))
                 throw new TansrProtocolException("context_changed");
     }
 

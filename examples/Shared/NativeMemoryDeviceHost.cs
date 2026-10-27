@@ -48,6 +48,7 @@ internal sealed class NativeMemoryDeviceHost
                 var store = await SqliteTerminalPersistenceStore.OpenAsync(new SqliteTerminalPersistenceOptions
                 {
                     EnableProfile = true, Path = configuration.PublicationPath, Mode = OpenMode(configuration.PublicationMode),
+                    Layout = configuration.PublicationLayout == "authenticated-indexed-v2" ? TerminalPersistenceSqliteLayout.AuthenticatedIndexed : TerminalPersistenceSqliteLayout.LegacyAudited,
                     Identity = configuration.PublicationIdentity, ReadContext = authority.ReadScope, KeyProvider = key,
                     MaxActiveTransfers = configuration.MaxTransfers, MaxStagingBytes = configuration.MaxStagingBytes, MaxPages = configuration.MaxPages,
                 }, ct).ConfigureAwait(false);
@@ -78,6 +79,7 @@ internal sealed class NativeMemoryDeviceHost
                 {
                     Path = configuration.JournalPath, Mode = OpenMode(configuration.JournalMode), ExecutorId = configuration.ExecutorId,
                     KeyProvider = key, CompactCompletedReceipts = true,
+                    Layout = NativeTerminalDeviceHost.JournalLayout(configuration.PublicationProfile, configuration.PublicationLayout),
                     MaxOperations = configuration.JournalMaxOperations, MaxStoredBytes = configuration.JournalMaxStoredBytes, MaxPages = configuration.JournalMaxPages,
                 }, (operation, token) =>
                 {

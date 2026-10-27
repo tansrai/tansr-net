@@ -16,6 +16,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     public bool AcknowledgementRecoveryAvailable => _recovery && _syncRole == "source";
     public const string Format = "sdk2-archive-sync-sqlite-v1";
     public const string RecoveryFormat = "sdk2-archive-sync-recovery-sqlite-v1";
+    public const string IndexedFormat = "sdk2-archive-sync-encrypted-indexed-net-sqlite-v2";
     private const int Reserve = 4096;
     private static readonly string[] Schema =
     {
@@ -59,10 +60,16 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         _limits = new ArchiveStoreLimits { MaxRecords = options.Limits.MaxRecords, MaxArtifacts = options.Limits.MaxArtifacts, MaxStoredBytes = options.Limits.MaxStoredBytes, MaxBatchBytes = options.Limits.MaxBatchBytes };
         _context = options.ReadContext; _retention = options.ReadRetentionRevision; _authorizeRetention = options.AuthorizeRetention;
         _historical = historical; _recovery = recovery;
+        _indexed = options.Layout == ArchiveSqliteLayout.AuthenticatedIndexed;
+        if (_indexed) _sourceCipher = new MemoryPublicationBodyCipher(options.KeyProvider!, cipher!.KeyId, metadata);
     }
 
     public static Task<SqliteArchiveStore> OpenAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
         => OpenCore(options, false, cancellationToken);
+
+    /// <summary>显式选择新认证索引 source 文件族；新建与重开使用同一布局，不迁移既有文件。</summary>
+    public static Task<SqliteArchiveStore> OpenSourceAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
+        => OpenCore(options, false, cancellationToken, indexedSource: true);
 
     /// <summary>显式选择原 Node 恢复文件族；MigrateV1 只接受完整审计通过的旧明文 source 库。</summary>
     public static Task<SqliteArchiveStore> OpenRecoverableAsync(SqliteArchiveStoreOptions options, CancellationToken cancellationToken = default)
@@ -76,21 +83,25 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         A.Need(_historical, "invalid_input"); return new ArchiveHistoryView(this, current, _identity, _context);
     }
 
-    private static Task<SqliteArchiveStore> OpenCore(SqliteArchiveStoreOptions options, bool historical, CancellationToken cancellationToken, bool recovery = false)
+    private static Task<SqliteArchiveStore> OpenCore(SqliteArchiveStoreOptions options, bool historical, CancellationToken cancellationToken, bool recovery = false, bool indexedSource = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (options == null || options.ReadContext == null || options.ReadRetentionRevision == null || options.AuthorizeRetention == null || options.Limits == null) throw new StorageException("invalid_input");
         var value = options; var limits = value.Limits;
+        var layout = indexedSource ? ArchiveSqliteLayout.AuthenticatedIndexed : value.Layout;
         A.Need(limits.MaxRecords >= 1 && limits.MaxRecords <= 1000000 && limits.MaxArtifacts >= 1 && limits.MaxArtifacts <= 1000000 && limits.MaxStoredBytes >= 1 && limits.MaxStoredBytes <= 1073741824 && limits.MaxBatchBytes >= 1 && limits.MaxBatchBytes <= 67108864 && value.MaxPages >= 8 && value.MaxPages <= 262144 && (value.Mode == StorageOpenMode.Create || value.Mode == StorageOpenMode.Reopen || recovery && value.Mode == StorageOpenMode.MigrateV1), "invalid_input");
         string path = StorageFileIdentity.FullPath(value.Path); var identity = A.Identity(value.Identity); var replica = A.Copy(value.Replica);
         A.Fields(replica, "replicationId", "role"); WireJson.ValidateNamed("Id", replica.GetProperty("replicationId")); A.Need(new[] { "primary", "replica" }.Contains(A.String(replica, "role")), "invalid_input");
         A.Need(value.SyncRole == "source" || value.SyncRole == "cache", "invalid_input");
         A.Need(!recovery || value.KeyProvider == null && !historical && value.SyncRole == "source", "invalid_input");
+        A.Need(layout == ArchiveSqliteLayout.LegacyAudited || layout == ArchiveSqliteLayout.AuthenticatedIndexed, "invalid_input");
+        A.Need(layout != ArchiveSqliteLayout.AuthenticatedIndexed || value.KeyProvider != null && value.SyncRole == "source" && !recovery && value.Mode != StorageOpenMode.MigrateV1, "invalid_input");
         bool migrating = recovery && value.Mode == StorageOpenMode.MigrateV1;
         // 固定调用方配置后才访问文件，外部对象之后的修改不能改变库身份或配额。
         var fixedOptions = new SqliteArchiveStoreOptions
         {
             Path = path,
+            Layout = layout,
             Mode = historical || migrating ? StorageOpenMode.Reopen : value.Mode,
             Identity = identity,
             Replica = replica,
@@ -117,26 +128,33 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             var store = new SqliteArchiveStore(connection, parent, file, fixedOptions, identity, metadata, cipher, historical, recovery && !migrating);
             // 历史只读连接不改 journal_mode、page_size、max_page_count 或原 metadata。
             store.Exec(historical ? "PRAGMA busy_timeout=0; PRAGMA query_only=ON; PRAGMA foreign_keys=ON" : "PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
+            store.CheckHistoryVersion();
             if (fixedOptions.Mode == StorageOpenMode.Create)
             {
                 store.Exec("PRAGMA page_size=4096; PRAGMA journal_mode=WAL");
                 store.Transaction(() =>
                 {
                     foreach (string sql in Schema) store.Exec(sql);
+                    if (store._indexed) foreach (string sql in SourceSchema) store.Exec(sql);
                     if (store._recovery) { store.Exec(RecoverySchema); store.Exec(RecoveryIndex); }
                     store.Exec("INSERT INTO metadata VALUES(1,$json)", ("$json", metadata));
                     store.Exec("INSERT INTO sync_state VALUES(1,'0')");
                     if (cipher != null) { store.Exec(EncryptionSchema); store.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.CreateCheck())); }
                     store.Exec("INSERT INTO state VALUES(1,NULL,NULL,0,0,0,0)"); store.Reaccount();
+                    if (store._indexed) store._sourceLoaded = true;
                 }, () => { A.Need(A.Equal(scope, Scope(fixedOptions.ReadContext, identity)), "context_changed"); parent.Check(); file.Check(); }, false);
             }
             else
             {
-                A.Need(store.Number("PRAGMA page_size") == 4096 && (string?)store.Scalar("PRAGMA journal_mode") == "wal" && (string?)store.Scalar("PRAGMA quick_check") == "ok");
+                A.Need(store.Number("PRAGMA page_size") == 4096 && (string?)store.Scalar("PRAGMA journal_mode") == "wal");
+                if (!historical && !store._indexed) A.Need((string?)store.Scalar("PRAGMA quick_check") == "ok");
             }
             if (historical) A.Need(store.Number("PRAGMA page_count") <= fixedOptions.MaxPages, "capacity_exceeded");
             else A.Need(store.Number("PRAGMA max_page_count=" + fixedOptions.MaxPages.ToString(CultureInfo.InvariantCulture)) == fixedOptions.MaxPages, "capacity_exceeded");
-            store.CheckFixed(); store.Audit(); A.Need(A.Equal(scope, Scope(fixedOptions.ReadContext, identity)), "context_changed");
+            store.CheckFixed();
+            if (historical) store.CheckHistoryMetadata(); else if (store._indexed) store.CheckSourceState(); else store.Audit();
+            A.Need(A.Equal(scope, Scope(fixedOptions.ReadContext, identity)), "context_changed"); store.CheckHistoryVersion();
+            if (historical || store._indexed) cancellationToken.ThrowIfCancellationRequested();
             if (migrating) store.EnableRecovery(cancellationToken);
             return Task.FromResult(store);
         }
@@ -170,26 +188,44 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             var state = State(); A.Need(state.Pending == null, "pending_ack");
             long previous = state.Head == null ? 0 : A.SequenceOf(A.Parse(state.Head), "sequence");
             A.Need(previous != long.MaxValue && A.SequenceOf(records[0], "sequence") == previous + 1);
-            A.Need(!ReservedRecoveryKey(request) && Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request)) == 0, "receipt_mismatch");
+            A.Need(!ReservedRecoveryKey(request) && !SourceOperationExists(request), "receipt_mismatch");
             foreach (var pair in references)
             {
                 var existing = Artifact(pair.Value, false);
                 byte[] supplied = bodies.TryGetValue(pair.Key, out var suppliedBody) ? suppliedBody : Array.Empty<byte>();
                 if (existing != null) { if (supplied.Length != 0) A.Need(ReadBody(pair.Value).SequenceEqual(supplied)); continue; }
                 byte[] body = _cipher == null || supplied.Length == 0 ? supplied : _cipher.Seal(pair.Value, supplied);
-                Exec("INSERT INTO artifacts VALUES($id,$json,$body)", ("$id", pair.Key), ("$json", A.Text(pair.Value)), ("$body", body));
+                string artifactText = A.Text(pair.Value);
+                Exec("INSERT INTO artifacts VALUES($id,$json,$body)", ("$id", pair.Key), ("$json", artifactText), ("$body", body));
+                SourceCost(A.Bytes(pair.Key) + A.Bytes(artifactText) + body.LongLength, artifacts: 1);
+                SourceNewArtifact(pair.Key, artifactText, body.LongLength);
             }
             foreach (var record in records)
             {
                 string id = A.String(record, "recordId");
                 if (deleted.Contains(id)) RequireTombstone(record);
-                else A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id OR sequence=$sequence", ("$id", id), ("$sequence", A.SequenceOf(record, "sequence"))) == 0, "deleted");
+                else
+                {
+                    A.Need(!Deleted(id) && Number("SELECT count(*) FROM tombstones WHERE sequence=$sequence", ("$sequence", A.SequenceOf(record, "sequence"))) == 0, "deleted");
+                    SourceCheck("tombstone-sequence", A.String(record, "sequence"), null);
+                }
+                SourceCheck("record-id", id, null); SourceCheck("record-sequence", A.String(record, "sequence"), null);
+                if (_indexed) A.Need(Number("SELECT EXISTS(SELECT 1 FROM record_artifacts WHERE record_id=$id)", ("$id", id)) == 0);
                 Exec("INSERT INTO records VALUES($sequence,$id,$json)", ("$sequence", A.SequenceOf(record, "sequence")), ("$id", id), ("$json", A.Text(record)));
-                foreach (var reference in A.References(record)) Exec("INSERT OR IGNORE INTO record_artifacts VALUES($artifact,$record)", ("$artifact", A.String(reference, "artifactId")), ("$record", id));
+                SourceCost(8 + A.Bytes(id) + A.Bytes(A.Text(record)), records: 1); SourceRecord(record, true);
+                foreach (var reference in A.References(record).GroupBy(item => A.String(item, "artifactId")).Select(group => group.First()))
+                {
+                    string artifactId = A.String(reference, "artifactId");
+                    Exec("INSERT OR IGNORE INTO record_artifacts VALUES($artifact,$record)", ("$artifact", artifactId), ("$record", id));
+                    SourceCost(A.Bytes(artifactId) + A.Bytes(id)); if (!deleted.Contains(id)) SourceAddArtifactReference(artifactId);
+                }
             }
             string? receiptText = receipt == null ? null : A.Text(receipt.Value); A.Need(receiptText == null || A.Bytes(receiptText) <= Reserve, "receipt_mismatch");
             Exec("INSERT INTO operations VALUES($request,$ack,$receipt,zeroblob($reserve))", ("$request", request), ("$ack", A.Text(ack)), ("$receipt", (object?)receiptText ?? DBNull.Value), ("$reserve", Reserve - (receiptText == null ? 0 : A.Bytes(receiptText))));
             Exec("INSERT INTO checkpoints VALUES($request,$from,$through,$json)", ("$request", request), ("$from", A.SequenceOf(ack.GetProperty("coverage"), "fromSequence")), ("$through", A.SequenceOf(ack.GetProperty("coverage"), "throughSequence")), ("$json", A.Text(checkpoint, 1572864)));
+            SourceCost(A.Bytes(request) + A.Bytes(A.Text(ack)) + Reserve + 16 + A.Bytes(request) + A.Bytes(A.Text(checkpoint, 1572864)) +
+                A.Bytes(A.Text(head)) - (state.Head == null ? 0 : A.Bytes(state.Head)) + (receipt == null ? A.Bytes(request) : 0), operations: 1);
+            SourceStoreOperation(request); if (_indexed) SourceCheckpoint(request, true);
             Exec("UPDATE state SET head=$head,pending=$pending WHERE id=1", ("$head", A.Text(head)), ("$pending", receipt == null ? (object)request : DBNull.Value)); Reaccount();
         }, check);
     }
@@ -198,7 +234,23 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     { var state = State(); return state.Pending == null ? null : Operation(state.Pending).Ack; }, cancellationToken));
     public Task<JsonElement?> HeadAsync(CancellationToken cancellationToken = default) => Task.FromResult(Run<JsonElement?>(_ =>
     { string? head = State().Head; return head == null ? null : A.Parse(head); }, cancellationToken));
-    public Task<byte[]> BodyAsync(JsonElement artifactReference, CancellationToken cancellationToken = default) => Task.FromResult(Run(_ => ReadBody(ValidateReference(artifactReference)), cancellationToken));
+    public Task<byte[]> BodyAsync(JsonElement artifactReference, CancellationToken cancellationToken = default)
+    {
+        byte[]? body = null;
+        try
+        {
+            return Task.FromResult(Run(_ =>
+            {
+                var reference = ValidateReference(artifactReference);
+                if (_historical) CheckHistoryBodyReference(reference);
+                body = ReadBody(reference);
+                if (_historical && A.Equal(_historyRecord!.Value.GetProperty("payload"), reference))
+                    A.Need(WireJson.DomainDigest("tansr.sdk2.payload.v1", body) == A.String(_historyRecord.Value, "payloadDigest"));
+                return body;
+            }, cancellationToken));
+        }
+        catch { if (body != null) Array.Clear(body, 0, body.Length); throw; }
+    }
     public Task<byte[]> BodyChunkAsync(JsonElement artifactReference, long offset, CancellationToken cancellationToken = default) => Task.FromResult(Run(_ =>
     {
         var reference = ValidateReference(artifactReference); Artifact(reference, true); long length = reference.GetProperty("bytes").GetInt64();
@@ -220,7 +272,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         string? request = null;
         return Task.FromResult(Run<JsonElement?>(_ =>
         {
-            if (Number("SELECT count(*) FROM operations WHERE request=$request", ("$request", request!)) == 0) return null;
+            if (!SourceOperationExists(request!)) return null;
             var operation = Operation(request!);
             return A.Object(writer =>
             {
@@ -238,8 +290,9 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         A.Need(after < end && after != long.MaxValue, "invalid_input");
         using var command = Command("SELECT request,json FROM checkpoints WHERE from_sequence=$from AND length(CAST(request AS BLOB))<=4096 AND length(CAST(json AS BLOB))<=1572864", ("$from", after + 1));
         using var reader = command.ExecuteReader(); A.Need(reader.Read(), "invalid_input");
-        var operation = Operation(reader.GetString(0)); A.Need(operation.Receipt != null, "pending_ack");
-        var checkpoint = A.Parse(reader.GetString(1), maximum: 1572864);
+        string request = reader.GetString(0); var operation = Operation(request); A.Need(operation.Receipt != null, "pending_ack");
+        string checkpointText = reader.GetString(1); if (_indexed) A.Need(SourceCheckpoint(request) == checkpointText);
+        var checkpoint = A.Parse(checkpointText, maximum: 1572864);
         var tombstones = checkpoint.GetProperty("page").GetProperty("records").EnumerateArray().Where(record => Deleted(A.String(record, "recordId"))).Select(record =>
         {
             RequireTombstone(record);
@@ -313,6 +366,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             A.Need(State().Pending == request && operation.Reserved == Reserve, "receipt_mismatch");
             Transaction(() =>
             {
+                if (_indexed) Exec("UPDATE source_authentication SET reserve=zeroblob(0) WHERE id=1");
                 Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE request=$request", ("$receipt", text), ("$reserve", Reserve - A.Bytes(text)), ("$request", request));
                 if (_recovery)
                 {
@@ -323,6 +377,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
                         Exec("UPDATE ack_rebases SET original_receipt=$receipt,reserve=zeroblob($reserve) WHERE previous_request=$request", ("$receipt", text), ("$reserve", RecoveryReserve(intent) - A.Bytes(text)), ("$request", request));
                     }
                 }
+                SourceStoreOperation(request); SourceCost(-A.Bytes(request));
                 Exec("UPDATE state SET pending=NULL WHERE id=1"); Reaccount();
             }, check); return null;
         }, cancellationToken); return Task.CompletedTask;
@@ -330,6 +385,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
 
     public Task<ArchiveRecordPage> ReadRecordsAsync(ArchiveReadRequest request, CancellationToken cancellationToken = default) => Task.FromResult(Run(_ =>
     {
+        if (_historical) _historyRecord = null;
         A.Need(request != null && request.MaxRecords >= 1 && request.MaxRecords <= 128 && request.MaxBytes >= 1 && request.MaxBytes <= 1048576, "invalid_input");
         A.Need(A.Equal(A.Identity(request!.Identity), _identity), "identity_mismatch"); var selection = A.Copy(request.Selection, maximum: 65536);
         int maxRecords = request.MaxRecords, maxBytes = request.MaxBytes, bytes = 0; var records = new List<JsonElement>(); var missing = new List<string>(); string? next = null; bool complete = true;
@@ -340,10 +396,22 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             foreach (var value in ids.EnumerateArray())
             {
                 WireJson.ValidateNamed("Id", value); string id = value.GetString()!; A.Need(seen.Add(id), "invalid_input");
-                A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id", ("$id", id)) == 0, "deleted");
+                A.Need(!Deleted(id), "deleted");
                 string? text = (string?)Scalar("SELECT json FROM records WHERE record_id=$id AND length(CAST(json AS BLOB))<=1048576", ("$id", id));
-                if (text == null) { missing.Add(id); continue; }
-                A.Need(bytes + A.Bytes(text) <= maxBytes, "capacity_exceeded"); var record = A.Parse(text, "ArchiveRecord"); A.VerifyRecord(record, _identity); records.Add(record); bytes += A.Bytes(text);
+                if (text == null)
+                {
+                    if (_historical || _indexed) A.Need(Number("SELECT count(*) FROM records WHERE record_id=$id", ("$id", id)) == 0);
+                    SourceCheck("record-id", id, null);
+                    missing.Add(id); continue;
+                }
+                A.Need(bytes + A.Bytes(text) <= maxBytes, "capacity_exceeded"); var record = A.Parse(text, "ArchiveRecord"); A.VerifyRecord(record, _identity);
+                if (_historical || _indexed)
+                {
+                    SourceRecord(record); A.Need(A.String(record, "recordId") == id);
+                    A.Need(Number("SELECT sequence FROM records WHERE record_id=$id", ("$id", id)) == A.SequenceOf(record, "sequence"));
+                    CheckHistoryRecord(record);
+                }
+                records.Add(record); bytes += A.Bytes(text);
             }
             complete = missing.Count == 0;
         }
@@ -353,16 +421,24 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             string? head = State().Head; A.Need(head != null && through <= A.SequenceOf(A.Parse(head), "sequence"), "invalid_input");
             long expectedRows = Math.Min(through - from + 1, maxRecords);
             A.Need(Number("SELECT count(*) FROM (SELECT sequence FROM records WHERE sequence>=$from AND sequence<=$through ORDER BY sequence LIMIT $limit)", ("$from", from), ("$through", through), ("$limit", maxRecords)) == expectedRows);
-            using var command = Command("SELECT sequence,json FROM records WHERE sequence>=$from AND sequence<=$through ORDER BY sequence LIMIT $limit", ("$from", from), ("$through", through), ("$limit", maxRecords)); using var reader = command.ExecuteReader(); long expected = from;
+            using var command = Command("SELECT sequence,CASE WHEN length(CAST(json AS BLOB))<=1048576 THEN json END FROM records WHERE sequence>=$from AND sequence<=$through ORDER BY sequence LIMIT $limit", ("$from", from), ("$through", through), ("$limit", maxRecords)); using var reader = command.ExecuteReader(); long expected = from;
             while (reader.Read())
             {
-                A.Need(reader.GetInt64(0) == expected); string text = reader.GetString(1);
+                A.Need(reader.GetInt64(0) == expected && !reader.IsDBNull(1)); string text = reader.GetString(1);
                 if (bytes + A.Bytes(text) > maxBytes) { A.Need(records.Count > 0, "capacity_exceeded"); break; }
-                var record = A.Parse(text, "ArchiveRecord"); A.VerifyRecord(record, _identity); A.Need(Number("SELECT count(*) FROM tombstones WHERE record_id=$id", ("$id", A.String(record, "recordId"))) == 0, "deleted"); records.Add(record); bytes += A.Bytes(text); if (expected == long.MaxValue) break; expected++;
+                var record = A.Parse(text, "ArchiveRecord"); A.VerifyRecord(record, _identity);
+                if (_historical || _indexed)
+                {
+                    SourceRecord(record); A.Need(A.SequenceOf(record, "sequence") == expected);
+                    A.Need((string?)Scalar("SELECT record_id FROM records WHERE sequence=$sequence AND length(CAST(record_id AS BLOB))<=128", ("$sequence", expected)) == A.String(record, "recordId"));
+                    CheckHistoryRecord(record);
+                }
+                A.Need(!Deleted(A.String(record, "recordId")), "deleted"); records.Add(record); bytes += A.Bytes(text); if (expected == long.MaxValue) break; expected++;
             }
             complete = records.Count > 0 && A.SequenceOf(records[records.Count - 1], "sequence") == through;
             if (!complete) next = expected.ToString(CultureInfo.InvariantCulture);
         }
+        if (_historical && records.Count == 1) _historyRecord = records[0];
         return new ArchiveRecordPage(records.AsReadOnly(), bytes, missing.AsReadOnly(), next, Coverage(records, complete));
     }, cancellationToken));
 
@@ -379,10 +455,12 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
             var fixedValue = A.Retention(_identity, retention); string revision = A.String(fixedValue, "revision"), request = A.String(fixedValue, "requestId"); string text = A.Text(fixedValue);
             A.Need(Sequence.Parse(revision).ToInt64() <= Sequence.Parse(_retention()).ToInt64(), "context_changed");
             _authorizeRetention(fixedValue);
+            if (_indexed) { Audit(check); SourceIndex(false, check); }
             string? existing = (string?)Scalar("SELECT json FROM retention WHERE revision=$revision OR request_id=$request", ("$revision", Sequence.Parse(revision).ToInt64()), ("$request", request));
             if (existing != null) { A.Need(existing == text, "receipt_mismatch"); return null; }
             A.Need(LocalRevision() == A.String(fixedValue, "previousRevision") && State().Pending == null, "context_changed");
-            Transaction(() =>
+            _sourceMaintenance = _indexed;
+            try { Transaction(() =>
             {
                 foreach (var tombstone in fixedValue.GetProperty("records").EnumerateArray())
                 {
@@ -396,7 +474,9 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
                 Exec("UPDATE artifacts SET body=zeroblob(0) WHERE EXISTS(SELECT 1 FROM record_artifacts ra WHERE ra.artifact_id=artifacts.id) AND NOT EXISTS(SELECT 1 FROM record_artifacts ra LEFT JOIN tombstones t ON t.record_id=ra.record_id WHERE ra.artifact_id=artifacts.id AND t.record_id IS NULL)");
                 Exec("INSERT INTO retention VALUES($revision,$request,$json)", ("$revision", Sequence.Parse(revision).ToInt64()), ("$request", request), ("$json", text));
                 Exec("UPDATE sync_state SET revision=$revision WHERE id=1", ("$revision", revision)); Reaccount();
-            }, () => { _authorizeRetention(fixedValue); check(); }); return null;
+                if (_indexed) SourceIndex(true, check);
+            }, () => { _authorizeRetention(fixedValue); check(); }); }
+            finally { _sourceMaintenance = false; } return null;
         }, cancellationToken, true); return Task.CompletedTask;
     }
 
@@ -404,7 +484,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     public Task<JsonElement?> RetentionPageAsync(string afterRevision, CancellationToken cancellationToken = default) => Task.FromResult(Run<JsonElement?>(_ =>
     {
         long after = Sequence.Parse(afterRevision).ToInt64(); A.Need(after <= Sequence.Parse(LocalRevision()).ToInt64(), "invalid_input");
-        if (after == long.MaxValue) return null; string? text = (string?)Scalar("SELECT json FROM retention WHERE revision=$revision", ("$revision", after + 1)); return text == null ? null : A.Retention(_identity, A.Parse(text));
+        if (after == long.MaxValue) return null; string? text = _indexed ? SourceRetention(after + 1) : (string?)Scalar("SELECT json FROM retention WHERE revision=$revision", ("$revision", after + 1)); return text == null ? null : A.Retention(_identity, A.Parse(text));
     }, cancellationToken, true));
     public Task CloseAsync() { Dispose(); return Task.CompletedTask; }
     public void Dispose()
@@ -412,7 +492,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         lock (_gate)
         {
             if (_busy) { _poisoned = true; throw new StorageException("reentrant"); }
-            if (_closed) return; _connection.Dispose(); _file.Dispose(); _parent.Dispose(); _closed = true;
+            if (_closed) return; _connection.Dispose(); _file.Dispose(); _parent.Dispose(); _historyRecord = null; _closed = true;
         }
     }
 
@@ -428,12 +508,12 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
                 var scope = Scope(_context, _identity); string trusted = Sequence.Parse(_retention()).Value;
                 void Check()
                 {
-                    A.Need(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested(); CheckFixed(); A.Need(!_poisoned, "reentrant");
+                    A.Need(!_poisoned, "reentrant"); cancellationToken.ThrowIfCancellationRequested(); CheckHistoryVersion(); CheckFixed(); A.Need(!_poisoned, "reentrant");
                     // VerifyCheck 会调用宿主供钥函数，之后必须重新核授权；不能在最后一次回调后交出旧主体正文或提交。
                     string currentRetention = Sequence.Parse(_retention()).Value;
                     A.Need(A.Equal(scope, Scope(_context, _identity)) && trusted == currentRetention, "context_changed");
                     A.Need(!_poisoned, "reentrant"); string local = LocalRevision(); A.Need(allowStale || _historical ? Sequence.Parse(local).ToInt64() <= Sequence.Parse(trusted).ToInt64() : local == trusted, "context_changed");
-                    cancellationToken.ThrowIfCancellationRequested();
+                    cancellationToken.ThrowIfCancellationRequested(); CheckHistoryVersion();
                 }
                 Check(); if (_known != null) A.Need(_known.Equals(State())); var result = work(Check); Check(); return result;
             }
@@ -445,30 +525,43 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     private void Transaction(Action work, Action check, bool refresh = true)
     {
         A.Need(!_historical, "invalid_input");
-        bool begun = false, committing = false;
-        try { Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false; if (refresh) _known = State(); committing = false; }
+        bool begun = false, committing = false; string? previousRoot = _sourceRoot; bool previousLoaded = _sourceLoaded;
+        try
+        {
+            Exec("BEGIN IMMEDIATE"); begun = true; _sourceTransaction = true;
+            work(); if (_indexed) SaveSourceAuthentication(); check(); committing = true; Exec("COMMIT"); begun = false;
+            if (refresh) _known = State(); committing = false;
+        }
         catch
         {
             // SQLITE_FULL 等可能在 COMMIT 前自动回滚；不要把“无活动事务”的二次错误误判成未知提交。
             bool unknown = committing; if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
-            throw;
+            _sourceRoot = previousRoot; _sourceLoaded = previousLoaded; throw;
         }
+        finally { _sourceTransaction = false; }
     }
 
     private void CheckFixed()
     {
         _parent.Check(); _file.Check(); var expected = _cipher == null ? Schema : Schema.Concat(new[] { EncryptionSchema }).ToArray();
         if (_recovery) expected = expected.Concat(new[] { RecoverySchema, RecoveryIndex }).ToArray();
+        if (_indexed) expected = expected.Concat(SourceSchema).ToArray();
         A.Need(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == expected.Length && Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND (length(CAST(sql AS BLOB))>4096 OR length(CAST(name AS BLOB))>128)") == 0);
-        using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 14"))
+        using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 18"))
         using (var reader = command.ExecuteReader()) { var found = new HashSet<string>(StringComparer.Ordinal); while (reader.Read()) { A.Need(!reader.IsDBNull(0) && expected.Contains(reader.GetString(0))); found.Add(reader.GetString(0)); } A.Need(found.Count == expected.Length); }
         A.Need((string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == _metadata, "identity_mismatch");
         if (_cipher != null) { var check = Scalar("SELECT key_check FROM encryption WHERE id=1 AND length(key_check)<=4096") as byte[]; A.Need(check != null); _cipher.VerifyCheck(check!); }
+        if (_indexed)
+        {
+            CheckSourceVersion();
+            if (!_sourceTransaction) LoadSourceAuthentication();
+        }
     }
 
-    private void Audit()
+    private void Audit(Action? check = null)
     {
+        check?.Invoke();
         A.Need(Scalar("PRAGMA foreign_key_check") == null);
         foreach (string table in new[] { "metadata", "state", "sync_state" }) A.Need(Number("SELECT count(*) FROM " + table) == 1);
         A.Need(Number("SELECT count(*) FROM records WHERE length(CAST(json AS BLOB))>1048576 OR length(CAST(record_id AS BLOB))>128") == 0);
@@ -480,6 +573,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         var references = new Dictionary<string, JsonElement>(StringComparer.Ordinal); long sequence = 0; string digest = A.ZeroDigest;
         using (var command = Command("SELECT sequence,record_id,json FROM records ORDER BY sequence")) using (var reader = command.ExecuteReader()) while (reader.Read())
         {
+            check?.Invoke();
             var record = A.Parse(reader.GetString(2), "ArchiveRecord"); A.VerifyRecord(record, _identity);
             A.Need(reader.GetInt64(0) == ++sequence && A.SequenceOf(record, "sequence") == sequence && reader.GetString(1) == A.String(record, "recordId") && A.String(record, "predecessorDigest") == digest); digest = A.String(record, "recordDigest");
             foreach (var reference in A.References(record))
@@ -494,6 +588,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         A.Need(references.Count == state.Artifacts);
         foreach (var reference in references.Values)
         {
+            check?.Invoke();
             var artifact = Artifact(reference, false); A.Need(artifact != null);
             if (Allowed(A.String(reference, "artifactId"))) ReadBody(reference); else A.Need(artifact!.Value.Length == 0);
         }
@@ -501,6 +596,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         long through = 0; int pending = 0;
         using (var command = Command("SELECT request,from_sequence,through_sequence,json FROM checkpoints ORDER BY from_sequence")) using (var reader = command.ExecuteReader()) while (reader.Read())
         {
+            check?.Invoke();
             string key = reader.GetString(0); var operation = Operation(key); var coverage = operation.Ack.GetProperty("coverage");
             A.Need(reader.GetInt64(1) == through + 1 && A.SequenceOf(coverage, "fromSequence") == reader.GetInt64(1) && A.SequenceOf(coverage, "throughSequence") == reader.GetInt64(2)); through = reader.GetInt64(2);
             var checkpoint = A.Parse(reader.GetString(3), maximum: 1572864); A.Fields(checkpoint, "binding", "status", "page", "request"); A.Need(A.Text(checkpoint.GetProperty("request")) == key);
@@ -521,6 +617,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
         long revision = 0; var tombstones = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         using (var command = Command("SELECT revision,request_id,json FROM retention ORDER BY revision")) using (var reader = command.ExecuteReader()) while (reader.Read())
         {
+            check?.Invoke();
             var retention = A.Retention(_identity, A.Parse(reader.GetString(2))); A.Need(reader.GetInt64(0) == ++revision && A.SequenceOf(retention, "revision") == revision && reader.GetString(1) == A.String(retention, "requestId"));
             foreach (var tombstone in retention.GetProperty("records").EnumerateArray())
             {
@@ -541,7 +638,8 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     private (JsonElement Reference, long Length)? Artifact(JsonElement reference, bool required)
     {
         using var command = Command("SELECT json,length(body) FROM artifacts WHERE id=$id AND length(CAST(json AS BLOB))<=1048576", ("$id", A.String(reference, "artifactId"))); using var reader = command.ExecuteReader();
-        if (!reader.Read()) { A.Need(!required, "missing_artifact"); return null; }
+        if (!reader.Read()) { SourceCheck("artifact", A.String(reference, "artifactId"), null); A.Need(!required, "missing_artifact"); return null; }
+        SourceCheck("artifact", A.String(reference, "artifactId"), SourceDigest(A.String(reference, "artifactId"), reader.GetString(0), reader.GetInt64(1)));
         var stored = A.Parse(reader.GetString(0), "ArtifactRef"); A.Need(A.Equal(stored, reference));
         if (required) A.Need(Allowed(A.String(reference, "artifactId")), "deleted");
         long expected = reference.GetProperty("bytes").GetInt64(); if (_cipher != null) expected = ArchiveBodyCipher.EncryptedBytes(expected);
@@ -551,15 +649,17 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     {
         var artifact = Artifact(reference, true); A.Need(artifact!.Value.Length <= _limits.MaxBatchBytes + 8192, "capacity_exceeded");
         byte[] raw = (byte[])Scalar("SELECT body FROM artifacts WHERE id=$id", ("$id", A.String(reference, "artifactId")))!; byte[] body = _cipher == null ? raw : _cipher.Open(reference, raw);
-        A.Need(body.LongLength == reference.GetProperty("bytes").GetInt64() && WireJson.Sha256(body) == A.String(reference, "sha256")); return body;
+        try { A.Need(body.LongLength == reference.GetProperty("bytes").GetInt64() && WireJson.Sha256(body) == A.String(reference, "sha256")); return body; }
+        catch { if (_historical) Array.Clear(body, 0, body.Length); throw; }
     }
-    private bool Allowed(string id) => Number("SELECT count(*) FROM record_artifacts ra LEFT JOIN tombstones t ON t.record_id=ra.record_id WHERE ra.artifact_id=$id AND t.record_id IS NULL", ("$id", id)) > 0;
-    private bool Deleted(string id) => Number("SELECT count(*) FROM tombstones WHERE record_id=$id", ("$id", id)) > 0;
+    private bool Allowed(string id) => _indexed ? SourceArtifactCount(id) > 0 : Number("SELECT EXISTS(SELECT 1 FROM record_artifacts ra LEFT JOIN tombstones t ON t.record_id=ra.record_id WHERE ra.artifact_id=$id AND t.record_id IS NULL)", ("$id", id)) > 0;
+    private bool Deleted(string id) => _indexed ? SourceDeleted(id) : Number("SELECT count(*) FROM tombstones WHERE record_id=$id", ("$id", id)) > 0;
     private (JsonElement Ack, string? Receipt, int Reserved) Operation(string request)
     {
         using var command = Command("SELECT ack,receipt,length(reserve) FROM operations WHERE request=$request AND length(CAST(ack AS BLOB))<=1048576 AND (receipt IS NULL OR length(CAST(receipt AS BLOB))<=4096)", ("$request", request)); using var reader = command.ExecuteReader(); A.Need(reader.Read(), "receipt_mismatch");
         var ack = A.Parse(reader.GetString(0), "ArchiveAckRequest"); A.Need(A.Text(ack.GetProperty("request")) == request && A.String(ack, "bindingId") == A.String(_identity, "bindingId") && A.String(ack, "sourceId") == A.String(_identity, "sourceId") && A.String(ack, "sourceGeneration") == A.String(_identity, "sourceGeneration") && A.Equal(ack.GetProperty("generations"), _identity.GetProperty("target").GetProperty("generations")));
-        string? receipt = reader.IsDBNull(1) ? null : reader.GetString(1); int reserve = reader.GetInt32(2); A.Need(reserve >= 0 && reserve + (receipt == null ? 0 : A.Bytes(receipt)) == Reserve);
+        string? receipt = reader.IsDBNull(1) ? null : reader.GetString(1); int reserve = reader.GetInt32(2);
+        SourceCheck("operation", request, SourceDigest(request, reader.GetString(0), receipt, (long)reserve)); A.Need(reserve >= 0 && reserve + (receipt == null ? 0 : A.Bytes(receipt)) == Reserve);
         if (receipt != null) A.Receipt(_identity, ack, A.Parse(receipt)); return (ack, receipt, reserve);
     }
     private JsonElement Coverage(IReadOnlyList<JsonElement> records, bool complete)
@@ -570,6 +670,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     private string LocalRevision() { string? value = (string?)Scalar("SELECT revision FROM sync_state WHERE id=1 AND length(revision)<=19"); A.Need(value != null); return Sequence.Parse(value!).Value; }
     private void Reaccount()
     {
+        if (_indexed && _sourceLoaded && !_sourceMaintenance) { State(); return; }
         long bytes = Account(), records = Number("SELECT count(*) FROM records"), artifacts = Number("SELECT count(*) FROM artifacts"), operations = Number("SELECT count(*) FROM operations");
         A.Need(bytes <= _limits.MaxStoredBytes && records <= _limits.MaxRecords && artifacts <= _limits.MaxArtifacts && operations <= _limits.MaxRecords, "capacity_exceeded");
         Exec("UPDATE state SET logical_bytes=$bytes,record_count=$records,artifact_count=$artifacts,operation_count=$operations WHERE id=1", ("$bytes", bytes), ("$records", records), ("$artifacts", artifacts), ("$operations", operations));
@@ -604,7 +705,7 @@ public sealed partial class SqliteArchiveStore : ISyncArchiveStore, IRecoverable
     }
     private static string Metadata(SqliteArchiveStoreOptions options, StorageFileIdentity parent, StorageFileIdentity file, ArchiveBodyCipher? cipher, bool recovery) => A.Text(A.Object(w =>
     {
-        w.WriteString("format", recovery ? RecoveryFormat : cipher == null ? Format : ArchiveBodyCipher.Format); w.WriteStartObject("identity"); foreach (var property in options.Identity.EnumerateObject()) property.WriteTo(w);
+        w.WriteString("format", options.Layout == ArchiveSqliteLayout.AuthenticatedIndexed ? IndexedFormat : recovery ? RecoveryFormat : cipher == null ? Format : ArchiveBodyCipher.Format); w.WriteStartObject("identity"); foreach (var property in options.Identity.EnumerateObject()) property.WriteTo(w);
         A.Property(w, "replica", options.Replica); w.WriteString("syncRole", options.SyncRole); if (cipher != null) w.WriteString("keyId", cipher.KeyId); w.WriteEndObject();
         w.WriteStartObject("limits"); w.WriteNumber("maxRecords", options.Limits.MaxRecords); w.WriteNumber("maxArtifacts", options.Limits.MaxArtifacts); w.WriteNumber("maxStoredBytes", options.Limits.MaxStoredBytes); w.WriteNumber("maxBatchBytes", options.Limits.MaxBatchBytes); w.WriteEndObject();
         w.WriteNumber("maxPages", options.MaxPages); w.WriteNumber("pageSize", 4096); w.WriteStartObject("physical"); w.WriteStartObject("directory"); w.WriteString("dev", parent.Device); w.WriteString("ino", parent.Inode); w.WriteEndObject(); w.WriteStartObject("file"); w.WriteString("dev", file.Device); w.WriteString("ino", file.Inode); w.WriteEndObject(); w.WriteEndObject();

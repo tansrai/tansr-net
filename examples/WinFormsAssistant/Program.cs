@@ -36,12 +36,16 @@ internal sealed class AssistantForm : Form
     private readonly FlowLayoutPanel _questions = new() { AutoSize = true, FlowDirection = FlowDirection.TopDown, WrapContents = false, Width = 290 };
     private readonly List<QuestionEditor> _questionEditors = new();
     private readonly List<Button> _sessionButtons = new();
+    private readonly HashSet<Button> _inputButtons = new();
     private readonly ComboBox _textMode = new() { Width = 75, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox _thinkingMode = new() { Width = 75, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly ComboBox _narratorMode = new() { Width = 90, DropDownStyle = ComboBoxStyle.DropDownList };
     private readonly TextBox _narration = new() { ReadOnly = true, Multiline = true, MaxLength = int.MaxValue, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill };
     private SessionNarrator? _narrator;
     private Button _connect = null!;
+    private readonly Button _cancelConnect = new() { Text = "取消连接等待", AutoSize = true, Enabled = false };
+    private CancellationTokenSource? _connectCancellation;
+    private object? _connectAttempt;
     private string _currentToken = "";
     private AgentSession? _session;
     private TansrClient? _client;
@@ -52,6 +56,8 @@ internal sealed class AssistantForm : Form
     private IDisposable? _subscription;
     private CancellationTokenSource? _lifetime;
     private Task? _observation;
+    private SessionConnection? _sessionConnection;
+    private SessionRecovery? _recovery;
     private ExampleCancellationFeedback? _cancellation;
     private NativeToolHost? _nativeTools;
     private LocalConversationState _local = null!;
@@ -80,7 +86,8 @@ internal sealed class AssistantForm : Form
         top.Controls.Add(Row(Label("Serve 地址"), _endpoint, Label("短期票据"), _token, _loopback));
         _connect = Button("连接 / 创建", ConnectAsync, false);
         top.Controls.Add(Row(Label("恢复会话 ID"), _resume, Label("新会话模型"), _model, _connect,
-            Button("更新票据", UpdateTokenAsync, false)));
+            _cancelConnect, Button("更新票据", UpdateTokenAsync, false)));
+        _cancelConnect.Click += (_, _) => _connectCancellation?.Cancel();
         top.Controls.Add(Row(Label("正文"), _textMode, Label("思考"), _thinkingMode,
             Button("历史", ShowHistoryAsync), Button("状态", ShowMetadataAsync),
             Button("压缩", () => ShowAsync("压缩回执", _session!.CompactAsync())), Button("创建快照", () => ShowAsync("快照回执", _session!.CheckpointAsync())),
@@ -94,8 +101,8 @@ internal sealed class AssistantForm : Form
             Button("保存本机草稿", () => { SaveLocal(); _status.Text = "草稿和呈现已保存在本机用户目录（明文，不含票据）。"; return Task.CompletedTask; }, false)));
         top.Controls.Add(Row(Button("离线授权档案", () => ReadOfflineStorageAsync(false), false), Button("离线授权记忆", () => ReadOfflineStorageAsync(true), false)));
         var bottom = new Panel { Dock = DockStyle.Bottom, Height = 200 };
-        var actions = Row(Button("发送", SendAsync), Button("发送图片与草稿", SendImageAsync),
-            Button("同轮插入草稿", InsertAsync), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync),
+        var actions = Row(Button("发送", SendAsync, requiresRecoveredInput: true), Button("发送图片与草稿", SendImageAsync, requiresRecoveredInput: true),
+            Button("同轮插入草稿", InsertAsync, requiresRecoveredInput: true), Button("查原插入回执", QueryInputAsync), Button("显式重投原插入", RetryInputAsync, requiresRecoveredInput: true),
             Button("取消当前工作", CancelCurrentAsync));
         actions.Dock = DockStyle.Bottom; bottom.Controls.Add(_draft); bottom.Controls.Add(actions); bottom.Controls.Add(_status);
         var right = new FlowLayoutPanel { Dock = DockStyle.Right, Width = 320, FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true };
@@ -145,14 +152,15 @@ internal sealed class AssistantForm : Form
     private static Label Label(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(4, 7, 4, 3) };
     private static FlowLayoutPanel Row(params Control[] controls)
     { var row = new FlowLayoutPanel { AutoSize = true, WrapContents = true, Margin = new Padding(0, 3, 0, 3) }; row.Controls.AddRange(controls); return row; }
-    private Button Button(string text, Func<Task> action, bool needsSession = true)
+    private Button Button(string text, Func<Task> action, bool needsSession = true, bool requiresRecoveredInput = false)
     {
         var button = new Button { Text = text, AutoSize = true, Margin = new Padding(3) };
         button.Name = text;
         if (needsSession) _sessionButtons.Add(button);
-        button.Click += async (_, _) => await RunAsync(action, needsSession); return button;
+        if (requiresRecoveredInput) _inputButtons.Add(button);
+        button.Click += async (_, _) => await RunAsync(action, needsSession, requiresRecoveredInput); return button;
     }
-    private async Task RunAsync(Func<Task> action, bool needsSession = false)
+    private async Task RunAsync(Func<Task> action, bool needsSession = false, bool requiresRecoveredInput = false)
     {
         if (_busy) return; _busy = true; SetEnabled();
         try
@@ -162,6 +170,7 @@ internal sealed class AssistantForm : Form
                 await SelectPresentationAsync();
                 if (needsSession) { _status.Text = "可信用户或服务已改变；旧呈现已隔离，请重新连接。"; return; }
             }
+            if (requiresRecoveredInput) RequireRecoveredInput();
             await action();
         }
         catch (OperationCanceledException) { _status.Text = "操作取消或超时；保留草稿，先查状态再重试。"; }
@@ -170,12 +179,23 @@ internal sealed class AssistantForm : Form
     }
     private void SetEnabled()
     {
-        foreach (var button in _sessionButtons) button.Enabled = !_busy && _session != null;
+        foreach (var button in _sessionButtons)
+            button.Enabled = !_busy && _session != null && (!RequiresRecovery || !_inputButtons.Contains(button));
         if (_connect != null) _connect.Enabled = !_busy && _session == null;
+        _cancelConnect.Enabled = _connectCancellation != null;
         _textMode.Enabled = _thinkingMode.Enabled = !_closing;
         _narratorMode.Enabled = _session == null;
         _endpoint.Enabled = _resume.Enabled = _session == null && !_busy;
     }
+    private bool RequiresRecovery => _view?.Snapshot.HasEventGap == true || _recovery?.Required == true;
+    private void RequireRecoveredInput()
+    {
+        if (RequiresRecovery)
+            throw new InvalidOperationException("event_recovery_required: " + (_recovery?.BlockedReason ?? "recovery_projection_pending"));
+    }
+    private static string RecoveryStatus(SessionRecovery recovery) =>
+        "会话恢复 Required=" + recovery.Required.ToString().ToLowerInvariant() + "；BlockedReason=" + (recovery.BlockedReason ?? "none") +
+        (recovery.Required ? "；暂停新输入，仍可审批、取消、查状态或断开。" : "；有界呈现已恢复，更早历史按需浏览。");
 
     private bool PresentationIsCurrent()
     {
@@ -219,62 +239,106 @@ internal sealed class AssistantForm : Form
         await SelectPresentationAsync(newConnection: true);
         SaveLocal();
         Volatile.Write(ref _currentToken, _token.Text);
-        var connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.Checked);
-        var client = connection.Client;
-        AgentSession session;
-        CreateSessionOptions createOptions;
-        try { createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools)); session = await client.CreateSessionAsync(createOptions); }
-        catch { await connection.CloseAsync(); throw; }
-        _resume.Text = session.Id;
+        using var startup = new CancellationTokenSource();
+        var attempt = new object(); _connectAttempt = attempt; _connectCancellation = startup; SetEnabled();
+        ExampleConnection? connection = null;
         try
         {
-            SaveLocal();
-            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id);
+            connection = await ExampleConnection.ConnectAsync(_endpoint.Text, _ => Task.FromResult(Volatile.Read(ref _currentToken)), _loopback.Checked, startup.Token);
+            var client = connection.Client;
+            var createOptions = ExampleSessionOptions.Create(_model.Text, _resume.Text, NativeToolHost.GetDeclarations(connection.NativeTools));
+            using var initialization = client.StartSessionInitialization(createOptions, new SessionInitializationOptions
+            {
+                SessionConfirmedAsync = (session, ct) => InvokeOnUiAsync(() =>
+                {
+                    _resume.Text = session.Id; SaveLocal();
+                    return Task.FromResult(true);
+                }),
+                PrepareObservationAsync = (session, ct) => InvokeOnUiAsync(async () =>
+                {
+                    ct.ThrowIfCancellationRequested();
+                    _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _lifetime = new CancellationTokenSource(); _closeFailure = null;
+                    var sessionLocal = _local;
+                    var sessionEndpoint = _endpoint.Text;
+                    var savedInput = sessionLocal.Snapshot.Endpoint == sessionEndpoint ? sessionLocal.Snapshot.Input : null;
+                    _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
+                    _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, sessionEndpoint, session.Id, _local.PathName, connection.Profile, connection.Contract);
+                    _nativeTools = new NativeToolHost(session, "Tansr.WinForms", (title, toolToken) =>
+                    {
+                        if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) throw new InvalidOperationException("local_state_identity_changed");
+                        return SetWindowTitleAsync(title, toolToken, () => IsCurrentPresentation(session, sessionLocal, sessionEndpoint));
+                    }, code => { if (!IsDisposed) BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) _status.Text = code; })); }, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null, initializationCancellation: ct);
+                    await _nativeTools.Ready;
+                    ct.ThrowIfCancellationRequested();
+                    _view = new SessionView(new SessionViewOptions
+                    {
+                        TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
+                        ThinkingDelivery = (ThinkingDeliveryMode)_thinkingMode.SelectedIndex,
+                    });
+                    _subscription = _view.Subscribe(snapshot =>
+                    {
+                        if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) Render(snapshot);
+                    }, SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext());
+                    _narration.Clear();
+                    _narrator = new SessionNarrator(line =>
+                    {
+                        if (IsDisposed) return;
+                        BeginInvoke(new Action(() =>
+                        {
+                            if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) return;
+                            if (_narration.Text.Length > 65536) _narration.Text = _narration.Text.Substring(_narration.Text.Length - 32768);
+                            _narration.AppendText(line + Environment.NewLine);
+                        }));
+                    }, new SessionNarratorOptions { Verbosity = (NarratorVerbosity)_narratorMode.SelectedIndex });
+                    _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
+                    _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
+                    _cancellation = new ExampleCancellationFeedback(session.Id);
+                    return (SessionObservationOptions?)CreateObservation(session, _view);
+                }),
+                Progress = progress =>
+                {
+                    if (IsDisposed || !IsHandleCreated) return;
+                    BeginInvoke(new Action(() =>
+                    {
+                        if (ReferenceEquals(_connectAttempt, attempt) && _connectCancellation != null)
+                            _status.Text = ExampleInitializationProgress.Format(progress);
+                    }));
+                }
+            }, startup.Token);
+            _sessionConnection = await initialization.Ready;
+            _connectAttempt = null;
+            _observation = ObserveCompletionAsync(_sessionConnection, _view!, _lifetime!.Token);
+            _status.Text = "已连接 " + _sessionConnection.Session.Id + "；" + (_recovery == null ? "恢复会话可用“历史”查阅权威记录。" : RecoveryStatus(_recovery));
+            TrySaveForExit();
         }
         catch (Exception error)
         {
-            await connection.CloseAsync();
-            throw new InvalidOperationException("会话 " + session.Id + " 已创建或恢复，但接入未完成。已保留恢复会话 ID，请按原 ID 重连：" + ErrorText(error), error);
-        }
-        _connection = connection; _client = client; _session = session; _media = new MediaWorkspace(session); _resume.Text = session.Id; _lifetime = new CancellationTokenSource(); _closeFailure = null;
-        var sessionLocal = _local;
-        var sessionEndpoint = _endpoint.Text;
-        var savedInput = sessionLocal.Snapshot.Endpoint == _endpoint.Text ? sessionLocal.Snapshot.Input : null;
-        _inputEditor = new TurnInputEditor(session, savedInput, sessionLocal.SaveInput);
-        _controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl, _endpoint.Text, session.Id, _local.PathName, connection.Profile, connection.Contract);
-        _nativeTools = new NativeToolHost(session, "Tansr.WinForms", (title, ct) =>
-        {
-            if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) throw new InvalidOperationException("local_state_identity_changed");
-            return SetWindowTitleAsync(title, ct, () => IsCurrentPresentation(session, sessionLocal, sessionEndpoint));
-        }, code => { if (!IsDisposed) BeginInvoke(new Action(() => { if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) _status.Text = code; })); }, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
-        try { await _nativeTools.Ready; }
-        catch { await DetachAsync(); throw; }
-        _view = new SessionView(new SessionViewOptions
-        {
-            TextDelivery = _textMode.SelectedIndex == 1 ? TextDeliveryMode.Final : TextDeliveryMode.Stream,
-            ThinkingDelivery = (ThinkingDeliveryMode)_thinkingMode.SelectedIndex,
-        });
-        _subscription = _view.Subscribe(snapshot =>
-        {
-            if (IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) Render(snapshot);
-        }, SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext());
-        _narration.Clear();
-        _narrator = new SessionNarrator(line =>
-        {
-            if (IsDisposed) return;
-            BeginInvoke(new Action(() =>
+            _connectAttempt = null;
+            try
             {
-                if (!IsCurrentPresentation(session, sessionLocal, sessionEndpoint)) return;
-                if (_narration.Text.Length > 65536) _narration.Text = _narration.Text.Substring(_narration.Text.Length - 32768);
-                _narration.AppendText(line + Environment.NewLine);
-            }));
-        }, new SessionNarratorOptions { Verbosity = (NarratorVerbosity)_narratorMode.SelectedIndex });
-        _storage = new ExampleLocalStorage(client, session, connection.Endpoint);
-        _workspace = new ExampleSessionWorkspace(client, session, () => _view.Snapshot, connection.DescribeServices, _lifetime.Token, _storage.ExecuteAsync);
-        _cancellation = new ExampleCancellationFeedback(session.Id);
-        _observation = ObserveAsync(session, _view, _lifetime.Token);
-        _status.Text = "已连接 " + session.Id + "；恢复会话可用“历史”查阅权威记录。";
-        TrySaveForExit();
+                if (connection != null && ReferenceEquals(_connection, connection)) await DetachAsync();
+                else if (connection != null) await connection.CloseAsync();
+            }
+            catch (Exception cleanup) { _localSaveFailure = "本机收尾未确认：" + ErrorText(cleanup); }
+            if (!string.IsNullOrEmpty(_resume.Text))
+                throw new InvalidOperationException("接入未完成，已保留恢复会话 ID；请按原 ID 对账或重连：" + ErrorText(error), error);
+            throw;
+        }
+        finally { _connectAttempt = null; _connectCancellation = null; SetEnabled(); }
+    }
+
+    private Task<T> InvokeOnUiAsync<T>(Func<Task<T>> action)
+    {
+        if (IsDisposed || !IsHandleCreated) return Task.FromException<T>(new ObjectDisposedException(nameof(AssistantForm)));
+        if (!InvokeRequired) return action();
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        BeginInvoke(new Action(async () =>
+        {
+            try { completion.TrySetResult(await action()); }
+            catch (OperationCanceledException) { completion.TrySetCanceled(); }
+            catch (Exception error) { completion.TrySetException(error); }
+        }));
+        return completion.Task;
     }
     private void UpdateDelivery()
     {
@@ -310,20 +374,47 @@ internal sealed class AssistantForm : Form
         if (!IsDisposed && IsHandleCreated) BeginInvoke(new Action(() => RenderCancellationFeedback(cancellation, session, local, endpoint)));
     }
 
-    private async Task ObserveAsync(AgentSession session, SessionView view, CancellationToken token)
+    private SessionObservationOptions CreateObservation(AgentSession session, SessionView view)
     {
         var storage = _storage; var narrator = _narrator; var nativeTools = _nativeTools;
         var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
-        try
+        var lifetime = _lifetime!.Token;
+        bool IsCurrentObservation() => !lifetime.IsCancellationRequested && ReferenceEquals(_session, session) &&
+            ReferenceEquals(_view, view) && ReferenceEquals(_local, local);
+        var recovery = ExampleEventRecovery.Create(session, view, narrator, (state, ct) =>
         {
-            await session.ObserveAsync(async (item, ct) =>
+            ct.ThrowIfCancellationRequested();
+            return InvokeOnUiAsync(() =>
+            {
+                ct.ThrowIfCancellationRequested();
+                if (IsCurrentObservation() && IsCurrentPresentation(session, local, endpoint))
+                {
+                    _status.Text = RecoveryStatus(state);
+                    SetEnabled();
+                }
+                return Task.FromResult(true);
+            });
+        });
+        _recovery = recovery;
+        return new SessionObservationOptions(async (item, ct) =>
         {
+            if (!IsCurrentObservation()) return;
             view.Apply(item); narrator?.Apply(item); nativeTools?.HandleEvent(item);
             if (cancellation.Observe(item)) QueueCancellationFeedback(cancellation, session, local, endpoint);
             try { if (storage != null) await storage.ObserveAsync(item, ct); }
             catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
             catch (Exception error) { if (!IsDisposed) BeginInvoke(new Action(() => { if (ReferenceEquals(_session, session)) _status.Text = "本地镜像保存未确认：" + ErrorText(error); })); }
-        }, token);
+        }) { Events = new EventStreamOptions { StopOnGap = false, Reconnect = true }, Recovery = recovery };
+    }
+
+    private async Task ObserveCompletionAsync(SessionConnection connection, SessionView view, CancellationToken token)
+    {
+        var session = connection.Session;
+        var cancellation = _cancellation!; var local = _local; var endpoint = _endpoint.Text;
+        try
+        {
+            await connection.Completion;
+            if (token.IsCancellationRequested) return;
             if (cancellation.ObservationEnded()) QueueCancellationFeedback(cancellation, session, local, endpoint);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
@@ -339,13 +430,14 @@ internal sealed class AssistantForm : Form
         _conversation.Text = SessionViewTextFormatter.Format(snapshot); _conversation.SelectionStart = _conversation.TextLength; _conversation.ScrollToCaret();
         _saveTimer.Start();
         var selected = (_requests.SelectedItem as RequestItem)?.Request.Id;
-        if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request.Id).SequenceEqual(snapshot.PendingRequests.Select(x => x.Id)))
+        if (!_requests.Items.Cast<RequestItem>().Select(x => x.Request).SequenceEqual(snapshot.PendingRequests))
         {
             _requests.BeginUpdate(); _requests.Items.Clear();
             foreach (var request in snapshot.PendingRequests) _requests.Items.Add(new RequestItem(request));
             _requests.EndUpdate();
             _requests.SelectedItem = _requests.Items.Cast<RequestItem>().FirstOrDefault(x => x.Request.Id == selected) ?? _requests.Items.Cast<RequestItem>().FirstOrDefault();
         }
+        SetEnabled();
     }
     private Task OpenMediaAsync()
     {
@@ -366,6 +458,7 @@ internal sealed class AssistantForm : Form
     private async Task SendAsync()
     {
         var text = _draft.Text; var revision = _draftRevision; if (string.IsNullOrWhiteSpace(text)) return;
+        RequireRecoveredInput();
         _cancellation?.Dismiss();
         SaveLocal(); await _session!.SendAsync(text); _view!.AppendUserMessage(text); if (_draftRevision == revision) _draft.Clear(); SaveLocal(); _status.Text = "输入已接纳，等待模型与存储终态。";
     }
@@ -380,6 +473,7 @@ internal sealed class AssistantForm : Form
         if (!string.IsNullOrWhiteSpace(text)) blocks.Add(MessageBlock.Text(text));
         var bytes = await BoundedFiles.ReadAsync(picker.FileName, 8 * 1024 * 1024);
         blocks.Add(MessageBlock.Image(mime, Convert.ToBase64String(bytes)));
+        RequireRecoveredInput();
         _cancellation?.Dismiss();
         SaveLocal(); await _session!.SendBlocksAsync(blocks); _view!.AppendUserMessage(text + "\n[image: " + info.Name + "]"); if (_draftRevision == revision) _draft.Clear(); SaveLocal();
     }
@@ -420,12 +514,13 @@ internal sealed class AssistantForm : Form
     private async Task InsertAsync()
     {
         var text = _draft.Text; var revision = _draftRevision; SaveLocal();
+        RequireRecoveredInput();
         _status.Text = await _inputEditor!.InsertAsync(text);
         if (_inputEditor.Current?.Outcome == "accepted" && _draftRevision == revision) _draft.Clear();
         SaveLocal();
     }
     private async Task QueryInputAsync() => _status.Text = await _inputEditor!.QueryAsync();
-    private async Task RetryInputAsync() => _status.Text = await _inputEditor!.RetryOriginalAsync();
+    private async Task RetryInputAsync() { RequireRecoveredInput(); _status.Text = await _inputEditor!.RetryOriginalAsync(); }
     private Task OpenControlsAsync() { ShowSessionWindow(new SessionControlsForm(_controls, _lifetime!.Token)); return Task.CompletedTask; }
     private Task OpenWorkspaceAsync() { ShowSessionWindow(new WorkspaceForm(_workspace!, _lifetime!.Token)); return Task.CompletedTask; }
     private async Task RevokeExtensionsAsync() { await _connection!.RevokeExtensionsAsync(); _status.Text = "本机 Skills/MCP 已撤销；已声明工具后续调用将拒绝。重新装配需要新连接。"; }
@@ -516,16 +611,22 @@ internal sealed class AssistantForm : Form
     }
     private async Task StopTerminalDeviceAsync()
     { var device = _terminalDevice; if (device == null) return; await device.StopAsync(); _terminalDevice = null; _status.Text = "本机设备已停止；远端会话未删除。"; }
+    private SessionRequestView? CurrentRequest(string kind)
+    {
+        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != kind || _view == null) return null;
+        // A queued UI selection must not outlive a close/gap or replacement ticket.
+        return _view.Snapshot.PendingRequests.FirstOrDefault(request => ReferenceEquals(request, item.Request));
+    }
     private async Task ApproveAsync(bool allow)
     {
-        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "permission") throw new InvalidOperationException("select_permission_request");
-        await _session!.PermissionAsync(item.Request.Id, Get(item.Request.Data, "digest"), allow);
+        var request = CurrentRequest("permission") ?? throw new InvalidOperationException("select_current_permission_request");
+        await _session!.PermissionAsync(request.Id, Get(request.Data, "digest"), allow);
         _status.Text = "审批回执已接纳；等待服务端关闭请求。";
     }
     private async Task AnswerAsync()
     {
-        if (_requests.SelectedItem is not RequestItem item || item.Request.Kind != "question") throw new InvalidOperationException("select_question_request");
-        await _session!.AnswerAsync(item.Request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
+        var request = CurrentRequest("question") ?? throw new InvalidOperationException("select_current_question_request");
+        await _session!.AnswerAsync(request.Id, _questionEditors.Select(x => x.Answer()).ToArray());
         _status.Text = "答案已提交；等待服务端关闭请求。";
     }
     private async Task ShowMetadataAsync()
@@ -588,14 +689,21 @@ internal sealed class AssistantForm : Form
         if (_nativeTools != null) await _nativeTools.DrainAsync(timeout.Token);
         await StopTerminalDeviceAsync();
         _cancellation?.Detach(); _cancellation = null;
-        _lifetime!.Cancel(); CloseSessionWindows(); if (_observation != null) await _observation;
+        _lifetime!.Cancel(); CloseSessionWindows();
+        if (_sessionConnection != null)
+        {
+            try { await _sessionConnection.StopAsync(); }
+            catch (Exception error) { _localSaveFailure = " 本机事件连接收尾未确认：" + ErrorText(error); }
+            _sessionConnection = null;
+        }
+        if (_observation != null) await _observation;
         if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
         _storage = null;
         _mediaWindow?.Close(); _mediaWindow = null; _media?.Dispose(); _media = null;
         _nativeTools?.Dispose(); _nativeTools = null; _narrator?.Dispose(); _narrator = null; _subscription?.Dispose(); _view?.Dispose();
         if (_connection != null) await _connection.CloseAsync(); _connection = null;
         _lifetime?.Dispose(); _lifetime = null;
-        _session = null; _client = null; _view = null; _controls = null; _status.Text = (settled?.Completed == true ? "核心资源已确认排空；未删除历史。" : "关闭请求已受理；旧合同未提供远端排空证明，未删除历史。") + _localSaveFailure;
+        _session = null; _client = null; _view = null; _recovery = null; _controls = null; _status.Text = (settled?.Completed == true ? "核心资源已确认排空；未删除历史。" : "关闭请求已受理；旧合同未提供远端排空证明，未删除历史。") + _localSaveFailure;
     }
     private async Task DetachAsync()
     {
@@ -606,7 +714,14 @@ internal sealed class AssistantForm : Form
         try { if (_storage != null) await _storage.FlushAsync(storageTimeout.Token); }
         catch (Exception error) { _localSaveFailure = " 本地上下文镜像未确认：" + ErrorText(error); }
         // 本地断开不发远端 interrupt/close/delete；保留会话 ID 供以后查账。
-        _lifetime?.Cancel(); CloseSessionWindows(); if (_observation != null) await _observation;
+        _lifetime?.Cancel(); CloseSessionWindows();
+        if (_sessionConnection != null)
+        {
+            try { await _sessionConnection.StopAsync(); }
+            catch (Exception error) { _localSaveFailure = " 本机事件连接收尾未确认：" + ErrorText(error); }
+            _sessionConnection = null;
+        }
+        if (_observation != null) await _observation;
         if (_storage != null) { if (_storage.PendingCleanupStatus.Length > 0) _localSaveFailure += _storage.PendingCleanupStatus; await _storage.CloseAsync(); }
         _storage = null;
         string? cleanupFailure = null;
@@ -619,7 +734,7 @@ internal sealed class AssistantForm : Form
         _lifetime?.Dispose(); _lifetime = null;
         try { if (_connection != null) await _connection.CloseAsync(); }
         catch (Exception error) { cleanupFailure = ErrorText(error); }
-        finally { _connection = null; _session = null; _client = null; _view = null; }
+        finally { _connection = null; _session = null; _client = null; _view = null; _recovery = null; }
         _status.Text = (ownedLocalServe ? (cleanupFailure == null ? "已断开并回收本实例启动的本地 Serve；未删除历史。" : "已断开本机连接；本地 Serve 或 MCP 收尾未确认，可退出，未删除历史。") : "已断开本机连接，可正常退出；远端会话未关闭或删除，工作可能继续。") +
             (_closeFailure == null ? "" : " 上次远端关闭未确认：" + _closeFailure) +
             (cleanupFailure == null ? "" : " 本机收尾未确认：" + cleanupFailure) + _localSaveFailure;
@@ -628,6 +743,12 @@ internal sealed class AssistantForm : Form
     {
         if (_closed) return; e.Cancel = true; if (_closing) return;
         if (_memoryDevice != null) { _status.Text = "设备仍领取记忆操作。请先在控制端核对记忆工作，再显式停止设备后退出；窗口关闭不冒充远端排空。"; return; }
+        if (_connectCancellation != null)
+        {
+            _connectCancellation.Cancel();
+            _status.Text = "已请求取消本次连接等待；窗口保留至收尾完成，之后可再关闭。已确认会话与数据不删除。";
+            return;
+        }
         if (_busy) { _status.Text = "当前请求尚未返回；完成后再关闭以保全会话状态。"; return; }
         _closing = true;
         try { await CloseConnectionAsync(); _saveTimer.Stop(); _saveTimer.Dispose(); _closed = true; Close(); }

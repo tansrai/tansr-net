@@ -96,6 +96,7 @@ public sealed partial class SqliteTerminalPersistenceStore
     private CustodyOperation? ReadCustodyOperation(string id)
     {
         var bytes = Scalar("SELECT body FROM custody_operations WHERE id=$id AND length(body)<=262172", ("$id", id)) as byte[];
+        Authenticate("custody-operation", new[] { id }, bytes == null ? null : WireJson.Sha256(bytes));
         if (bytes == null) return null;
         var value = Decode("custody-operation\0" + id, bytes);
         bool fixedBudget = value.TryGetProperty("migrationBudget", out var budget);
@@ -129,7 +130,9 @@ public sealed partial class SqliteTerminalPersistenceStore
             w.WriteStartObject("migrationBudget"); w.WriteNumber("bytes", operation.BudgetBytes); w.WriteNumber("objects", operation.BudgetObjects); w.WriteEndObject();
             w.WriteNumber("receivedBytes", operation.ReceivedBytes); w.WriteNumber("inventoryBytes", operation.InventoryBytes); w.WriteNumber("inventoryObjects", operation.InventoryObjects);
         });
-        Exec("INSERT INTO custody_operations VALUES($id,$body) ON CONFLICT(id) DO UPDATE SET body=excluded.body", ("$id", operation.Id), ("$body", _cipher.Seal("custody-operation\0" + operation.Id, Bytes(value))));
+        var bytes = _cipher.Seal("custody-operation\0" + operation.Id, Bytes(value));
+        Exec("INSERT INTO custody_operations VALUES($id,$body) ON CONFLICT(id) DO UPDATE SET body=excluded.body", ("$id", operation.Id), ("$body", bytes));
+        AuthenticateWrite("custody-operation", new[] { operation.Id }, WireJson.Sha256(bytes));
     }
     private JsonElement CustodyResponse(JsonElement request, Action<Utf8JsonWriter> write)
     {

@@ -13,6 +13,7 @@ namespace Tansr.Sdk.Windows.Storage;
 public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenceCustodyStore, IDisposable
 {
     public const string Format = "terminal-persistence-encrypted-net-sqlite-v1";
+    public const string IndexedFormat = "terminal-persistence-encrypted-indexed-net-sqlite-v2";
     private const int MaximumMetadataBytes = 262144;
     private const int MetadataReserve = 262144;
     private static readonly string[] Schema =
@@ -48,10 +49,15 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
     public static Task<SqliteTerminalPersistenceStore> OpenAsync(SqliteTerminalPersistenceOptions options, CancellationToken cancellationToken = default)
         => OpenCoreAsync(options, cancellationToken, readOnlyCopy: false);
 
-    private static Task<SqliteTerminalPersistenceStore> OpenCoreAsync(SqliteTerminalPersistenceOptions options, CancellationToken cancellationToken, bool readOnlyCopy)
+    /// <summary>标准源端入口：新建或重开明确的认证索引布局。旧库不会被猜测、自动迁移或降级打开。</summary>
+    public static Task<SqliteTerminalPersistenceStore> OpenSourceAsync(SqliteTerminalPersistenceOptions options, CancellationToken cancellationToken = default)
+        => OpenCoreAsync(options, cancellationToken, readOnlyCopy: false, layoutOverride: TerminalPersistenceSqliteLayout.AuthenticatedIndexed);
+
+    private static Task<SqliteTerminalPersistenceStore> OpenCoreAsync(SqliteTerminalPersistenceOptions options, CancellationToken cancellationToken, bool readOnlyCopy, TerminalPersistenceSqliteLayout? layoutOverride = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (options == null || !options.EnableProfile || options.ReadContext == null || options.KeyProvider == null ||
+            options.Layout != TerminalPersistenceSqliteLayout.LegacyAudited && options.Layout != TerminalPersistenceSqliteLayout.AuthenticatedIndexed ||
             options.Mode != StorageOpenMode.Create && options.Mode != StorageOpenMode.Reopen ||
             options.MaxActiveTransfers < 1 || options.MaxActiveTransfers > 32 ||
             options.MaxStagingBytes < 0 || options.MaxStagingBytes > 67108864 ||
@@ -69,6 +75,7 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
             EnableProfile = true,
             Path = path,
             Mode = options.Mode,
+            Layout = layoutOverride ?? options.Layout,
             Identity = TerminalPersistenceContract.Copy("Identity", options.Identity),
             ReadContext = options.ReadContext,
             KeyProvider = options.KeyProvider,
@@ -139,7 +146,8 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
             if (fixedOptions.Mode == StorageOpenMode.Reopen)
             {
                 Require((string?)store.Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == metadata, "identity_mismatch");
-                Require(store.Number("PRAGMA page_size") == 4096 && (string?)store.Scalar("PRAGMA quick_check") == "ok");
+                Require(store.Number("PRAGMA page_size") == 4096);
+                if (!store.Indexed) Require((string?)store.Scalar("PRAGMA quick_check") == "ok");
             }
             CheckOpening(); store.Exec("PRAGMA busy_timeout=0; PRAGMA locking_mode=EXCLUSIVE; PRAGMA foreign_keys=ON; PRAGMA synchronous=FULL");
             if (fixedOptions.Mode == StorageOpenMode.Create) store.Exec("PRAGMA page_size=4096; PRAGMA journal_mode=WAL");
@@ -150,11 +158,14 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
                 if (fixedOptions.Mode == StorageOpenMode.Create)
                 {
                     foreach (string sql in Schema) store.Exec(sql);
+                    if (store.Indexed) foreach (string sql in AuthenticationSchema) store.Exec(sql);
                     store.Exec("INSERT INTO metadata VALUES(1,$json)", ("$json", metadata));
                     store.Exec("INSERT INTO encryption VALUES(1,$check)", ("$check", cipher.Seal("key-check", Array.Empty<byte>())));
                     store.SaveState(new State { ReadOnlyCopy = readOnlyCopy });
+                    if (store.Indexed) store.CreateAuthentication();
                 }
-                store.InitializeCustody(); store.CheckFixed(); store.Audit();
+                store.InitializeCustody(); store.CheckFixed();
+                if (store.Indexed) store.CheckSourceState(); else store.Audit();
             }, CheckOpening);
             CheckOpening(); owner.Opening = false; return Task.FromResult(store);
         }
@@ -239,14 +250,25 @@ public sealed partial class SqliteTerminalPersistenceStore : ITerminalPersistenc
     private void Transaction(Action work, Action check)
     {
         bool begun = false, committing = false;
-        try { check(); Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false; _committed = true; }
+        string? originalAuthentication = _authenticationRoot;
+        string[] originalActiveTransfers = _authenticationTransfers.ToArray();
+        bool originalLoaded = _authenticationLoaded;
+        try
+        {
+            check(); originalAuthentication = _authenticationRoot; originalActiveTransfers = _authenticationTransfers.ToArray(); originalLoaded = _authenticationLoaded;
+            Exec("BEGIN IMMEDIATE"); begun = true; _authenticationTransaction = true;
+            work(); if (Indexed) SaveAuthentication(); check(); committing = true; Exec("COMMIT"); begun = false; _committed = true;
+        }
         catch
         {
             bool unknown = committing;
             if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
+            _authenticationRoot = originalAuthentication; _authenticationTransfers.Clear(); _authenticationTransfers.UnionWith(originalActiveTransfers);
+            _authenticationLoaded = originalLoaded;
             throw;
         }
+        finally { _authenticationTransaction = false; }
     }
 
 }

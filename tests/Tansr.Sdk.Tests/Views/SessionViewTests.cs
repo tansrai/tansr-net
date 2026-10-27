@@ -117,7 +117,7 @@ public sealed class SessionViewTests
         view.Apply(Event("{\"type\":\"turn.completed\",\"seq\":1001}"));
 
         Assert.True(view.Snapshot.HasEventGap);
-        if (reason == "ahead_of_log") Assert.Equal(2, view.Snapshot.LastSequence);
+        Assert.Equal(1001, view.Snapshot.LastSequence); // real new-epoch events remain observable; history stays incomplete
     }
 
     [Fact]
@@ -134,13 +134,14 @@ public sealed class SessionViewTests
     }
 
     [Fact]
-    public void EpochGapPreventsOldAndNewHistoryBeingSilentlyMerged()
+    public void EpochGapAcceptsNewLiveSequenceWithoutClaimingHistoricalCoverage()
     {
         using var view = new SessionView(new SessionViewOptions { InitialSequence = 100 });
         view.Apply(Event("{\"type\":\"server.replay.gap\",\"reason\":\"ahead_of_log\",\"requestedAfterSeq\":100,\"droppedEvents\":0}"));
         view.Apply(Event("{\"type\":\"turn.started\",\"seq\":1}"));
         Assert.True(view.Snapshot.HasEventGap);
-        Assert.Equal(100, view.Snapshot.LastSequence);
+        Assert.Equal(1, view.Snapshot.LastSequence);
+        Assert.Contains(view.Snapshot.Notices, notice => notice.Code == "observation_epoch_changed");
     }
 
     [Fact]

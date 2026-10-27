@@ -1,8 +1,8 @@
 {
   "format": "tansr-api-manifest-v1",
   "contract": "unified-v1",
-  "revision": 14,
-  "schemaHash": "b792dc53f45ca2b8fdc8438bd5b50d6d6c8a3eb08ac29920215d75a470349faf",
+  "revision": 19,
+  "schemaHash": "edd4b2f5e0dbd0d5f5107f7ab16246acbd293e5ea3477c8aefc6d7796c5eae5d",
   "families": [
     {
       "id": "agent-session-v1",
@@ -12,7 +12,7 @@
       "status": "frozen",
       "rfc": "doc/98-Agent会话服务v2契约冻结件.md",
       "source": "packages/server/src/v2/contract.ts",
-      "sha256": "d143be74431db52ec8b2874f5d017ba043b1c365ad8eb76cd03fd49e317bb22a",
+      "sha256": "5daf7802f1cdc491b2829fcb3d5859322994cf29ad1c02ffb152ca6d51b52b3f",
       "golden": {
         "packages/cli/test/fixtures/agent-v2-frames/frames.json": "5d3a40dcfea3709a06b78dd9a0066f68194efff96ebc4defc79476a589161d50",
         "packages/protocol/schemas/kernel-event.schema.json": "54b587ade59bf20a3d55647a160c3d857dbf2fa73730d82cf7811b7ee4097501"
@@ -69,8 +69,8 @@
         }
       ],
       "requestIdPath": null,
-      "sessionManifestRevision": 11,
-      "sessionManifestSha256": "d143be74431db52ec8b2874f5d017ba043b1c365ad8eb76cd03fd49e317bb22a"
+      "sessionManifestRevision": 12,
+      "sessionManifestSha256": "5daf7802f1cdc491b2829fcb3d5859322994cf29ad1c02ffb152ca6d51b52b3f"
     },
     {
       "id": "sdk2-ext-v1",
@@ -136,33 +136,41 @@
           "client": "csharp",
           "repo": "tansr-net",
           "file": "src/Tansr.Sdk/Protocol/WireContract.cs",
-          "lock": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605",
+          "lock": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
           "observed": "2026-10-01",
-          "drift": true
+          "drift": false
+        },
+        {
+          "client": "go",
+          "repo": "tansr-go",
+          "file": "contract/sdk2-ext-v1.schema.json",
+          "lock": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
+          "observed": "2026-10-01",
+          "drift": false
         },
         {
           "client": "android",
           "repo": "tansr-android",
           "file": "core/src/main/kotlin/com/tansr/sdk/sdk2/Sdk2NamedSchema.kt",
-          "lock": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605",
+          "lock": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
           "observed": "2026-10-01",
-          "drift": true
+          "drift": false
         },
         {
           "client": "ios",
           "repo": "tansr-ios",
           "file": "Sources/TansrCore/SDK2/Sdk2SchemaResource.swift",
-          "lock": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605",
+          "lock": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
           "observed": "2026-10-01",
-          "drift": true
+          "drift": false
         },
         {
           "client": "harmony",
           "repo": "tansr-harmony",
           "file": "tansr/src/main/ets/core/sdk2/client/SchemaGenerated.ets",
-          "lock": "969273844ca9196f19dd71b292b65a49307d63be0d20a0caf557e105ba6d8605",
+          "lock": "54d2d6ec81b6fd2e01344674692d89f52ea245ff8c93de9cc5edd1401124eb4f",
           "observed": "2026-10-01",
-          "drift": true
+          "drift": false
         }
       ],
       "requestIdPath": [
@@ -516,28 +524,32 @@
         {
           "client": "go",
           "repo": "tansr-go",
-          "lock": "absent",
+          "file": "contract/persistence-custody-handoff-v1.schema.json",
+          "lock": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9",
           "observed": "2026-10-01",
           "drift": false
         },
         {
           "client": "android",
           "repo": "tansr-android",
-          "lock": "absent",
+          "file": "core/src/main/resources/terminal/persistence-custody-handoff-v1.schema.json",
+          "lock": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9",
           "observed": "2026-10-01",
           "drift": false
         },
         {
           "client": "ios",
           "repo": "tansr-ios",
-          "lock": "absent",
+          "file": "Tests/TansrCoreTests/Fixtures/PersistenceCustody/persistence-custody-handoff-v1.schema.json",
+          "lock": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9",
           "observed": "2026-10-01",
           "drift": false
         },
         {
           "client": "harmony",
           "repo": "tansr-harmony",
-          "lock": "absent",
+          "file": "contract/terminal/persistence-custody-handoff-v1.schema.json",
+          "lock": "8c84ad5ba1461207dd0d9f11871989aeb8b971f6557c39ca4e06a690e191f9d9",
           "observed": "2026-10-01",
           "drift": false
         }
@@ -1011,9 +1023,15 @@
       "response": null,
       "query": [
         "offset",
-        "limit"
+        "limit",
+        "projection",
+        "afterSeq",
+        "expectedFirstSeq",
+        "minTerminalSeq",
+        "maxMessages",
+        "maxBytes"
       ],
-      "notes": "响应 { sessionId, lastSeq, messages[, total, offset] } 无命名 schema",
+      "notes": "旧history响应不变；projection=recovery显式模式使用HistoryRecoveryRequestSchema/HistoryRecoveryProjectionSchema，禁止全量回落；SSE续订historyLastSeq。",
       "etagPath": null,
       "expectedRevision": null
     },

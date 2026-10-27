@@ -35,26 +35,29 @@ internal sealed class NativeToolHost : IDisposable
         : this(session, application, setTitle, report, bindings, false) { }
 
     internal NativeToolHost(AgentSession session, string application,
-        Func<string, CancellationToken, Task> setTitle, Action<string> report, IReadOnlyList<NativeToolBinding>? bindings, bool resumeRequested)
+        Func<string, CancellationToken, Task> setTitle, Action<string> report, IReadOnlyList<NativeToolBinding>? bindings, bool resumeRequested,
+        CancellationToken initializationCancellation = default)
     {
         _session = session; _application = application; _setTitle = setTitle; _report = report;
         _bindings = ValidateBindings(bindings).ToDictionary(x => x.Name, StringComparer.Ordinal);
         // A live attach returns resumed:false on the original wire. The host still
         // attaches to existing history and must not execute an unobserved prior call.
-        Ready = session.Resumed || resumeRequested ? InitializeResumeAsync(session.LastSequence) : Task.CompletedTask;
+        Ready = session.Resumed || resumeRequested ? InitializeResumeAsync(session.LastSequence, initializationCancellation) : Task.CompletedTask;
         _ = Ready.ContinueWith(task => { _ = task.Exception; }, CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     }
 
     /// <summary>恢复宿主必须先完成这一次权威水位读取，再允许用户发送新一轮；不会自动重试或重建会话。</summary>
     internal Task Ready { get; }
-    private async Task InitializeResumeAsync(long creationSequence)
+    private async Task InitializeResumeAsync(long creationSequence, CancellationToken initializationCancellation)
     {
-        var metadata = await _session.ReadMetadataAsync(_lifetime.Token).ConfigureAwait(false);
+        // 只将接入取消关联到这次只读恢复；接入完成后不改变原工具宿主的生命周期。
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, initializationCancellation);
+        var metadata = await _session.ReadMetadataAsync(cancellation.Token).ConfigureAwait(false);
         if (!metadata.IsLive) throw new InvalidOperationException("native_tool_resume_not_live");
         lock (_gate)
         {
-            _lifetime.Token.ThrowIfCancellationRequested();
+            cancellation.Token.ThrowIfCancellationRequested();
             _resumeBoundary = Math.Max(creationSequence, metadata.LastSequence);
         }
     }

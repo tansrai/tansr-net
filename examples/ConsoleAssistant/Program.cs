@@ -86,9 +86,11 @@ internal static class Program
             catch (Exception error) { Write("worker=" + ErrorCode(error)); return 1; }
             finally { Console.CancelKeyPress -= cancel; }
         }
-        MediaWorkspace? media = null; ConsoleMediaCommands? mediaCommands = null; ExampleConnection? connection = null; TansrClient? client = null; AgentSession? session = null; Task? observation = null; NativeToolHost? nativeTools = null;
+        MediaWorkspace? media = null; ConsoleMediaCommands? mediaCommands = null; ExampleConnection? connection = null; TansrClient? client = null; AgentSession? session = null; Task? observation = null; NativeToolHost? nativeTools = null; SessionConnection? sessionConnection = null;
+        var initializationCompleted = false;
         using var view = new SessionView();
         SessionNarrator? narrator = null;
+        SessionRecovery? recovery = null;
         NativeTerminalDeviceHost? terminalDevice = null;
         // Ctrl+C stops input/observation. MCP and the executor remain available
         // until the original close, publication and resource handshake finishes.
@@ -102,6 +104,11 @@ internal static class Program
         string draft = "";
         IDisposable? localSubscription = null;
         void SaveLocal(string? history = null) => local!.Save(localEndpoint, session?.Id ?? "", draft, SessionViewTextFormatter.Format(view.Snapshot), history);
+        void RequireRecoveredInput()
+        {
+            if (view.Snapshot.HasEventGap || recovery?.Required == true)
+                throw new InvalidOperationException("event_recovery_required: " + (recovery?.BlockedReason ?? "recovery_projection_pending"));
+        }
         try
         {
             local = LocalConversationState.ForApplication("console", localEndpoint, TrustedExampleScope.CurrentPresentationIdentity);
@@ -118,38 +125,74 @@ internal static class Program
             client = connection.Client;
             var createOptions = ExampleSessionOptions.Create(Environment.GetEnvironmentVariable("TANSR_MODEL"),
                 Environment.GetEnvironmentVariable("TANSR_RESUME_SESSION"), NativeToolHost.GetDeclarations(connection.NativeTools));
-            session = await client.CreateSessionAsync(createOptions, stop.Token);
-            SaveLocal(); Write("session=" + session.Id);
-            await ExampleConnection.InitializeSessionAsync(client, connection.Contract, session.Id, stop.Token);
-            var active = session;
-            var input = new TurnInputEditor(session, saved.Endpoint == localEndpoint ? saved.Input : null, local.SaveInput);
-            var controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl,
-                Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve", session.Id, local.PathName, connection.Profile, connection.Contract);
-            storage = new ExampleLocalStorage(client, session, connection.Endpoint);
-            var workspace = new ExampleSessionWorkspace(client, session, () => view.Snapshot, connection.DescribeServices, stop.Token, storage.ExecuteAsync);
-            SaveLocal();
-            long lastSavedTicks = 0;
-            localSubscription = view.Subscribe(_ =>
+            TurnInputEditor? preparedInput = null;
+            ExampleSessionControls? controls = null;
+            ExampleSessionWorkspace? preparedWorkspace = null;
+            var progressGate = new object(); var showingInitialization = true;
+            using (var initialization = client.StartSessionInitialization(createOptions, new SessionInitializationOptions
             {
-                var now = DateTime.UtcNow.Ticks; var previous = Interlocked.Read(ref lastSavedTicks);
-                if (now - previous < TimeSpan.FromMilliseconds(750).Ticks || Interlocked.CompareExchange(ref lastSavedTicks, now, previous) != previous) return;
-                try { SaveLocal(); } catch (Exception error) { Write("local_state_save_failed=" + ErrorCode(error)); }
-            });
-            media = new MediaWorkspace(session); mediaCommands = new ConsoleMediaCommands(media, view, Write, text => { draft = text; SaveLocal(); });
-            nativeTools = new NativeToolHost(session, "Tansr.Console", (title, ct) =>
+                SessionConfirmedAsync = (confirmed, ct) =>
+                {
+                    session = confirmed;
+                    Write("session=" + confirmed.Id); SaveLocal();
+                    return Task.CompletedTask;
+                },
+                PrepareObservationAsync = async (confirmed, ct) =>
+                {
+                    preparedInput = new TurnInputEditor(confirmed, saved.Endpoint == localEndpoint ? saved.Input : null, local.SaveInput);
+                    controls = connection.SessionControl == null ? null : new ExampleSessionControls(connection.SessionControl,
+                        Environment.GetEnvironmentVariable("TANSR_SERVE_URL") ?? "local-owned-serve", confirmed.Id, local.PathName, connection.Profile, connection.Contract);
+                    storage = new ExampleLocalStorage(client, confirmed, connection.Endpoint);
+                    preparedWorkspace = new ExampleSessionWorkspace(client, confirmed, () => view.Snapshot, connection.DescribeServices, stop.Token, storage.ExecuteAsync);
+                    SaveLocal();
+                    long lastSavedTicks = 0;
+                    localSubscription = view.Subscribe(_ =>
+                    {
+                        var now = DateTime.UtcNow.Ticks; var previous = Interlocked.Read(ref lastSavedTicks);
+                        if (now - previous < TimeSpan.FromMilliseconds(750).Ticks || Interlocked.CompareExchange(ref lastSavedTicks, now, previous) != previous) return;
+                        try { SaveLocal(); } catch (Exception error) { Write("local_state_save_failed=" + ErrorCode(error)); }
+                    });
+                    media = new MediaWorkspace(confirmed); mediaCommands = new ConsoleMediaCommands(media, view, Write, text => { draft = text; SaveLocal(); });
+                    nativeTools = new NativeToolHost(confirmed, "Tansr.Console", (title, toolToken) =>
+                    {
+                        toolToken.ThrowIfCancellationRequested();
+                        if (Console.IsOutputRedirected || !OperatingSystem.IsWindows()) throw new InvalidOperationException("console_window_title_unavailable");
+                        Console.Title = title; return Task.CompletedTask;
+                    }, Write, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null, initializationCancellation: ct);
+                    await nativeTools.Ready;
+                    if (once) return null;
+                    recovery = ExampleEventRecovery.Create(confirmed, view, narrator, (state, token) =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        Write("recovery_required=" + state.Required.ToString().ToLowerInvariant() + " blocked_reason=" + (state.BlockedReason ?? "none") +
+                            (state.Required ? "；暂停新输入，仍可 /requests、审批、/cancel、/meta 或 /quit。" : "；有界呈现已恢复，更早历史按需浏览。"));
+                        return Task.CompletedTask;
+                    });
+                    return new SessionObservationOptions(async (item, eventToken) =>
+                    {
+                        narrator.Apply(item);
+                        await ObserveEventAsync(confirmed, view, nativeTools, false, item, eventToken);
+                        await ObserveStorageAsync(storage, item, eventToken);
+                    }) { Events = new EventStreamOptions { StopOnGap = false, Reconnect = true }, Recovery = recovery };
+                },
+                Progress = progress => { lock (progressGate) { if (showingInitialization) Write(ExampleInitializationProgress.Format(progress)); } }
+            }, stop.Token))
             {
-                ct.ThrowIfCancellationRequested();
-                if (Console.IsOutputRedirected || !OperatingSystem.IsWindows()) throw new InvalidOperationException("console_window_title_unavailable");
-                Console.Title = title; return Task.CompletedTask;
-            }, Write, connection.NativeTools, resumeRequested: createOptions.ResumeSessionId != null);
-            await nativeTools.Ready;
+                try { sessionConnection = await initialization.Ready; }
+                finally { lock (progressGate) showingInitialization = false; }
+            }
+            initializationCompleted = true;
+            var active = sessionConnection.Session;
+            var input = preparedInput!;
+            var workspace = preparedWorkspace!;
+            var activeMediaCommands = mediaCommands ?? throw new InvalidOperationException("media_commands_not_initialized");
             if (once)
             {
                 var prompt = string.Join(" ", args.Skip(1));
                 return await RunOnceAsync(active, prompt,
-                    async (item, ct) => { narrator.Apply(item); await ObserveEventAsync(active, view, nativeTools, true, item, ct); await ObserveStorageAsync(storage, item, ct); }, stop.Token);
+                    async (item, ct) => { narrator.Apply(item); await ObserveEventAsync(active, view, nativeTools!, true, item, ct); await ObserveStorageAsync(storage!, item, ct); }, stop.Token);
             }
-            observation = ObserveAsync(active, view, nativeTools, stop.Token, storage, narrator);
+            observation = ObserveCompletionAsync(sessionConnection);
             while (!stop.IsCancellationRequested)
             {
                 var line = await ReadCommandAsync(Console.In, stop.Token);
@@ -173,7 +216,7 @@ internal static class Program
                     { var allow = line.StartsWith("/device-allow ", StringComparison.Ordinal); Write(deviceApprovals.Answer(line.Substring(allow ? 14 : 13).Trim(), allow) ? "device_reply_accepted" : "device_request_no_longer_pending"); }
                     else if (line == "/workspace") Write(string.Join("\n", ExampleSessionWorkspace.Actions.Select((name, index) => index + "=" + name)));
                     else if (line.StartsWith("/workspace ", StringComparison.Ordinal))
-                    { var parts = line.Substring(11).Split(new[] { ' ' }, 2); Write(await workspace.ExecuteAsync(int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture), parts.Length > 1 ? parts[1] : "", stop.Token)); }
+                    { var parts = line.Substring(11).Split(new[] { ' ' }, 2); var action = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture); if (action == 31) RequireRecoveredInput(); Write(await workspace.ExecuteAsync(action, parts.Length > 1 ? parts[1] : "", stop.Token)); }
                     else if (line.StartsWith("/export ", StringComparison.Ordinal))
                     { var parts = line.Substring(8).Split(new[] { ' ' }, 2); if (parts.Length != 2) throw new InvalidOperationException("export_requires_checkpoint_and_new_path"); await workspace.ExportAsync(parts[0], parts[1], stop.Token); Write("checkpoint_exported"); }
                     else if (line.StartsWith("/import ", StringComparison.Ordinal)) Write(await workspace.ImportAsync(line.Substring(8), stop.Token));
@@ -190,12 +233,12 @@ internal static class Program
                     else if (line.StartsWith("/draft-file ", StringComparison.Ordinal))
                     { draft = new System.Text.UTF8Encoding(false, true).GetString(await BoundedFiles.ReadAsync(line.Substring(12), 1024 * 1024, stop.Token)); SaveLocal(); Write("draft_saved_no_truncation"); }
                     else if (line == "/send-draft")
-                    { if (string.IsNullOrWhiteSpace(draft)) throw new InvalidOperationException("draft_missing"); await active.SendAsync(draft, stop.Token); view.AppendUserMessage(draft); draft = ""; SaveLocal(); Write("draft_accepted"); }
+                    { if (string.IsNullOrWhiteSpace(draft)) throw new InvalidOperationException("draft_missing"); RequireRecoveredInput(); await active.SendAsync(draft, stop.Token); view.AppendUserMessage(draft); draft = ""; SaveLocal(); Write("draft_accepted"); }
                     else if (line == "/insert-draft" || line.StartsWith("/insert ", StringComparison.Ordinal))
-                    { var text = line == "/insert-draft" ? draft : line.Substring(8); if (line != "/insert-draft") draft = text; SaveLocal(); Write(await input.InsertAsync(text, stop.Token)); if (input.Current?.Outcome == "accepted" && draft == text) draft = ""; SaveLocal(); }
+                    { var text = line == "/insert-draft" ? draft : line.Substring(8); if (line != "/insert-draft") draft = text; SaveLocal(); RequireRecoveredInput(); Write(await input.InsertAsync(text, stop.Token)); if (input.Current?.Outcome == "accepted" && draft == text) draft = ""; SaveLocal(); }
                     else if (line == "/input-status") Write(await input.QueryAsync(stop.Token));
-                    else if (line == "/input-retry") Write(await input.RetryOriginalAsync(stop.Token));
-                    else if (await mediaCommands.TryHandleAsync(line, stop.Token)) { }
+                    else if (line == "/input-retry") { RequireRecoveredInput(); Write(await input.RetryOriginalAsync(stop.Token)); }
+                    else if (await activeMediaCommands.TryHandleAsync(line, stop.Token)) { }
                     else if (line == "/history") { var history = (await active.GetHistoryAsync(stop.Token)).GetRawText(); SaveLocal(history); Write(history); }
                     else if (line == "/meta") Write(SessionContextText.Format(await active.ReadMetadataAsync(stop.Token)));
                     else if (line == "/prompt") Write(ApplicationPromptText.Format(await active.ReadApplicationPromptAsync(stop.Token)));
@@ -223,7 +266,7 @@ internal static class Program
                     }
                     else if (line.StartsWith("/", StringComparison.Ordinal)) Write("未知命令；使用 --help 查看入口。");
                     else if (!string.IsNullOrWhiteSpace(line))
-                    { draft = line; SaveLocal(); await active.SendAsync(line, stop.Token); view.AppendUserMessage(line); draft = ""; SaveLocal(); Write("accepted（不等于模型完成或耐久提交）"); }
+                    { draft = line; SaveLocal(); RequireRecoveredInput(); await active.SendAsync(line, stop.Token); view.AppendUserMessage(line); draft = ""; SaveLocal(); Write("accepted（不等于模型完成或耐久提交）"); }
                 }
                 catch (OperationCanceledException) when (stop.IsCancellationRequested) { break; }
                 catch (Exception error) { Write("error=" + ErrorCode(error) + "；请求结果未知时先查状态，不自动重发。"); }
@@ -236,7 +279,7 @@ internal static class Program
         {
             localSubscription?.Dispose();
             try { if (session != null) SaveLocal(); } catch (Exception error) { Write("local_state_save_failed=" + ErrorCode(error)); }
-            if (session != null)
+            if (session != null && initializationCompleted)
             {
                 using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
                 try
@@ -263,6 +306,11 @@ internal static class Program
                 catch (Exception error) { Write("device_cleanup_unconfirmed=" + ErrorCode(error) + "; notification=" + (terminalDevice.LastNotificationErrorCode ?? "none") + "; cause=" + (error.InnerException == null ? "none" : ErrorCode(error.InnerException))); }
             }
             serviceLifetime.Cancel();
+            if (sessionConnection != null)
+            {
+                try { await sessionConnection.StopAsync(); }
+                catch (Exception error) { Write("connection_cleanup_unconfirmed=" + ErrorCode(error)); }
+            }
             if (observation != null) { try { await observation; } catch (Exception error) { Write("observer=" + ErrorCode(error)); } }
             if (storage != null) { if (storage.PendingCleanupStatus.Length > 0) Write(storage.PendingCleanupStatus); try { await storage.CloseAsync(); } catch (Exception error) { Write("storage_cleanup_unconfirmed=" + ErrorCode(error)); } }
             narrator?.Dispose(); media?.Dispose(); nativeTools?.Dispose(); client?.Dispose();
@@ -340,13 +388,12 @@ internal static class Program
         return !result.WasAborted && result.Reason is "completed" or "structured_output" ? 0 : 2;
     }
 
-    private static async Task ObserveAsync(AgentSession session, SessionView view, NativeToolHost tools, CancellationToken token, ExampleLocalStorage? storage = null, SessionNarrator? narrator = null)
+    private static async Task ObserveCompletionAsync(SessionConnection connection)
     {
         try
         {
-            await session.ObserveAsync(async (item, ct) => { narrator?.Apply(item); await ObserveEventAsync(session, view, tools, false, item, ct); if (storage != null) await ObserveStorageAsync(storage, item, ct); }, token);
+            await connection.Completion;
         }
-        catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error) { Write("event_source=" + ErrorCode(error)); }
     }
 

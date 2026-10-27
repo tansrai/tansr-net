@@ -9,7 +9,7 @@ public sealed partial class SqliteTerminalPersistenceStore
     /// <summary>
     /// 显式完整复制至新加密库或换钥；保留原身份、限额和全部 transfer 事实。stagingPath 与 destinationPath
     /// 必须是同目录内不同的新路径。验证并关闭暂存库后才发布目标；失败保留原源及具名暂存文件供恢复，不覆盖或清理。
-    /// 此入口只复制同一 v1 格式（包含永久双键、原票据及未决材料），不导入旧六动作格式。
+    /// 此入口只复制同一显式布局（包含永久双键、原票据及未决材料），不转换布局或导入旧六动作格式。
     /// 调用前停止宿主写入；成功仅表示 copy/validation 完成，切换仍 pending。现有控制机制须先确认旧 writer 已停止/撤权、未知结果已按原键结算。
     /// 目标的只读标记在认证加密状态内持久保存，重开仍仅可 head/read/lookup/query；无公共开关能将其改为 writer。
     /// 本方法不改变当前实例或 Serve 绑定，不宣称整库独立防回滚，也不会删除源库或钥。
@@ -34,6 +34,7 @@ public sealed partial class SqliteTerminalPersistenceStore
                 EnableProfile = true,
                 Path = staging,
                 Mode = StorageOpenMode.Create,
+                Layout = _options.Layout,
                 Identity = _options.Identity,
                 ReadContext = _options.ReadContext,
                 AuthorizeRecovery = _options.AuthorizeRecovery,

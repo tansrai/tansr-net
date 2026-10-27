@@ -89,6 +89,24 @@ public sealed class ConsoleWorkerTests
         Assert.DoesNotContain(events, x => Has(x, "state", "succeeded"));
     }
 
+    [Fact]
+    public async Task ConfirmedSessionWithFailedNativeInitializationIsRetainedWithoutRemoteCleanup()
+    {
+        using var handler = new Handler { FailNativeResume = true };
+        using var http = new HttpClient(UnifiedStamp.Stamp(handler)); using var client = CreateClient(http);
+        var logs = new ConcurrentQueue<string>();
+        Assert.Equal(2, await ConsoleWorker.RunJobsAsync([new("retained", "must not send", null)], 1, client, null, CancellationToken.None, logs.Enqueue).WaitAsync(Deadline));
+        Assert.Equal(1, handler.Created); Assert.Equal(1, handler.MetadataReads);
+        Assert.Equal(0, handler.Sends); Assert.Equal(0, handler.Interrupts); Assert.Equal(0, handler.Closes);
+        Assert.False(handler.Sessions["s1"].Listening); Assert.Equal(1, handler.Open);
+        var events = ReadLogs(logs);
+        Assert.Single(events, x => Has(x, "jobId", "retained") && Has(x, "sessionId", "s1") && Has(x, "phase", "session") && Has(x, "state", "created"));
+        Assert.Single(events, x => Has(x, "sessionId", "s1") && Has(x, "phase", "acceptance") && Has(x, "state", "not_sent"));
+        Assert.Single(events, x => Has(x, "sessionId", "s1") && Has(x, "phase", "terminal") && Has(x, "state", "unconfirmed"));
+        Assert.Single(events, x => Has(x, "sessionId", "s1") && Has(x, "phase", "cleanup") && Has(x, "state", "completed") && Has(x, "scope", "local_only") && Has(x, "remoteCleanup", "unknown"));
+        Assert.DoesNotContain(events, x => Has(x, "state", "creation_unconfirmed") || Has(x, "resource", "close") || Has(x, "resource", "interrupt") || Has(x, "resource", "resources"));
+    }
+
     private static TansrClient CreateClient(HttpClient http) => new(new TansrClientOptions
     { BaseUri = new("https://serve.test/"), TokenProvider = _ => Task.FromResult("fixture-token"), MaxReconnectAttempts = 0 }, http);
     private static JsonElement[] ReadLogs(ConcurrentQueue<string> logs) => logs.Select(x => { using var json = JsonDocument.Parse(x); return json.RootElement.Clone(); }).ToArray();
@@ -99,9 +117,9 @@ public sealed class ConsoleWorkerTests
         internal readonly ConcurrentDictionary<string, Session> Sessions = new(StringComparer.Ordinal);
         internal readonly ConcurrentQueue<string> Requests = new();
         internal readonly TaskCompletionSource<bool> FirstTwoSent = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        internal int Created, Sends, Closes, Interrupts, Permissions, Questions, Open, MaximumOpen;
+        internal int Created, Sends, Closes, Interrupts, Permissions, Questions, Open, MaximumOpen, MetadataReads;
         internal int CompleteAfter = int.MaxValue;
-        internal bool FailFirstInterrupt, LoseMessageResponse;
+        internal bool FailFirstInterrupt, LoseMessageResponse, FailNativeResume;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
@@ -118,7 +136,7 @@ public sealed class ConsoleWorkerTests
                 var open = Interlocked.Increment(ref Open);
                 int previous;
                 do { previous = Volatile.Read(ref MaximumOpen); if (previous >= open) break; } while (Interlocked.CompareExchange(ref MaximumOpen, open, previous) != previous);
-                return Json(new { sessionId = id, resumed = false, lastSeq = -1 });
+                return Json(new { sessionId = id, resumed = FailNativeResume, lastSeq = -1 });
             }
             var parts = path.Split('/'); var sessionId = parts[3]; var session = Sessions[sessionId];
             if (request.Method == HttpMethod.Get && path.EndsWith("/events", StringComparison.Ordinal))
@@ -127,7 +145,11 @@ public sealed class ConsoleWorkerTests
                 return new(HttpStatusCode.OK) { Content = new StreamContent(session.Events) { Headers = { ContentType = new MediaTypeHeaderValue("text/event-stream") } } };
             }
             if (request.Method == HttpMethod.Get && parts.Length == 4)
+            {
+                Interlocked.Increment(ref MetadataReads);
+                if (FailNativeResume) throw new HttpRequestException("controlled native resume failure");
                 return Json(new { sessionId, endUserId = "fixture", status = "idle", live = true, lastSeq = -1, createdAt = "2026-09-26T00:00:00Z", lastActivityAt = "2026-09-26T00:00:00Z" });
+            }
             if (request.Method == HttpMethod.Post && path.EndsWith("/messages", StringComparison.Ordinal))
             {
                 Assert.True(session.Listening);

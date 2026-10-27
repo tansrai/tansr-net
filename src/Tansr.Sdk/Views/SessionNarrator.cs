@@ -88,6 +88,16 @@ public sealed class SessionNarrator : IDisposable
         }
     }
 
+    /// <summary>Moves narration to the same bounded observation origin without narrating historical runtime facts.</summary>
+    public long RestoreRecoveryProjection(SessionRecoveryProjection projection)
+    {
+        lock (_gate)
+        {
+            if (_view == null) throw new ObjectDisposedException(nameof(SessionNarrator));
+            return _view.RestoreRecoveryProjection(projection, _view.Snapshot.Version);
+        }
+    }
+
     private string? Narrate(string type, JsonElement data, SessionViewSnapshot before, NarrationBlock? block, string id, string? arguments)
     {
         var name = before.Tools.LastOrDefault(tool => tool.Id == id && tool.IsActive)?.Name ??

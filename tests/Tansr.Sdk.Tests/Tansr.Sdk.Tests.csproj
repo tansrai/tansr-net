@@ -9,6 +9,7 @@
     <Compile Include="../../examples/Shared/FamilyFacts.cs" Link="Examples/FamilyFacts.cs" />
     <Compile Include="../../examples/Shared/ExampleCancellationFeedback.cs" Link="Examples/ExampleCancellationFeedback.cs" />
     <Compile Include="../../examples/Shared/ExampleEventRecovery.cs" Link="Examples/ExampleEventRecovery.cs" />
+    <Compile Include="../../examples/Shared/ExampleHistoryPager.cs" Link="Examples/ExampleHistoryPager.cs" />
     <Compile Include="../../examples/Shared/NativeToolHost.cs" Link="Examples/NativeToolHost.cs" />
     <Compile Include="../../examples/Shared/TurnInputEditor.cs" Link="Examples/TurnInputEditor.cs" />
     <Compile Include="../../examples/Shared/LocalConversationState.cs" Link="Examples/LocalConversationState.cs" />

@@ -11,11 +11,20 @@ public sealed class ArchiveStoreLimits
     public int MaxBatchBytes { get; set; } = 33554432;
 }
 
+/// <summary>显式选择本地文件布局。既有文件不自动迁移。</summary>
+public enum ArchiveSqliteLayout
+{
+    LegacyAudited = 0,
+    AuthenticatedIndexed = 1,
+}
+
 /// <summary>既有 SDK2 同步文件族的 source/cache 介质；不声明跨组织共享读取支持。</summary>
 public sealed class SqliteArchiveStoreOptions
 {
     public string Path { get; set; } = "";
     public StorageOpenMode Mode { get; set; }
+    /// <summary>新认证索引布局只支持带原 KeyProvider 的 source；旧明文恢复文件族继续完整审计。</summary>
+    public ArchiveSqliteLayout Layout { get; set; }
     public JsonElement Identity { get; set; }
     /// <summary>原 replica 对象，包含 replicationId 及 primary/replica role。</summary>
     public JsonElement Replica { get; set; }

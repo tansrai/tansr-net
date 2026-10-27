@@ -2,8 +2,16 @@ using System.Diagnostics;
 using System.Diagnostics.Tracing;
 using System.IO;
 using System.Text.Json;
+using Tansr.Sdk.Sessions;
 
 namespace WpfAssistant;
+
+internal enum ConnectionInitializationPhase
+{
+    LocalStateReady, ClientReady, SdkInitializationBegin, SessionConfirmed, SessionConfirmedPersisted,
+    PresentationBegin, NativeReadyBegin, NativeReady, ObservationPrepared, SseReady,
+    InputBlockedByRecovery, InputReady, InteractionReady, Failed, Canceled
+}
 
 // 一次建会的本机元数据采样；沿用首字诊断的有界内存、结束后写盘和不覆盖旧证据约束。
 internal sealed class ConnectionDiagnostics : EventListener
@@ -29,6 +37,9 @@ internal sealed class ConnectionDiagnostics : EventListener
     private EventSource? source;
     private Timer? timer;
     private string? sample;
+    private string? sdkSample;
+    private bool initializationMode, sdkReadyObserved, interactionReadyObserved;
+    private readonly HashSet<ConnectionInitializationPhase> initializationPhases = new();
     private long startedAt, lastTimestamp;
     private int bytes;
     private bool initialized, finished;
@@ -47,6 +58,68 @@ internal sealed class ConnectionDiagnostics : EventListener
         if (initialSource != null) EnableIfOpen(initialSource);
     }
     internal Task Completion => completion.Task;
+    // WPF 在进入任何本机读取/网络准备前显式开启全程计量。未调用时保留旧的 CreateSession 单段采样。
+    internal string? BeginInitialization()
+    {
+        try
+        {
+            lock (Gate)
+            {
+                if (!initialized || finished || sample != null) return null;
+                if (clock() >= expiresAt) { Finish("Expired"); return null; }
+                initializationMode = true;
+                sample = Guid.NewGuid().ToString("N"); startedAt = lastTimestamp = clock();
+                Add("Initialization.Begin", startedAt);
+                return sample;
+            }
+        }
+        catch { Stop("Closed"); return null; }
+    }
+    internal void MarkInitialization(string? attempt, ConnectionInitializationPhase phase)
+    {
+        try
+        {
+            if (!Enum.IsDefined(phase)) return;
+            lock (Gate)
+            {
+                if (!AcceptInitialization(attempt) || !initializationPhases.Add(phase)) return;
+                Add("Initialization." + phase, clock());
+                if (phase is ConnectionInitializationPhase.Failed or ConnectionInitializationPhase.Canceled) Finish(null);
+                else if (phase == ConnectionInitializationPhase.InteractionReady)
+                {
+                    interactionReadyObserved = true;
+                    if (sdkReadyObserved) Finish(null);
+                }
+            }
+        }
+        catch { Stop("Closed"); }
+    }
+    internal void MarkInitializationProgress(string? attempt, SessionInitializationProgress progress)
+    {
+        try
+        {
+            if (!Enum.IsDefined(progress.Stage) || progress.Elapsed < TimeSpan.Zero) return;
+            lock (Gate)
+            {
+                if (!AcceptInitialization(attempt)) return;
+                // elapsedMs 是宿主收到通知的时刻；sdkElapsedMs 保留核心阶段时间，避免把回调调度等待算进能力协商。
+                Add("Initialization.Sdk." + progress.Stage, clock(), progress.Elapsed.TotalMilliseconds);
+                if (progress.Stage == SessionInitializationStage.Ready)
+                {
+                    sdkReadyObserved = true;
+                    // 通知按序异步派发。界面交互可能先启用，等最后一项通知到达再封口；新发送是否可用独立记载。
+                    if (interactionReadyObserved) Finish(null);
+                }
+            }
+        }
+        catch { Stop("Closed"); }
+    }
+    private bool AcceptInitialization(string? attempt)
+    {
+        if (!initialized || finished || !initializationMode || attempt == null || sample != attempt) return false;
+        if (clock() < expiresAt) return true;
+        Finish("Expired"); return false;
+    }
     internal static ConnectionDiagnostics? FromEnvironment()
     {
         try
@@ -107,6 +180,18 @@ internal sealed class ConnectionDiagnostics : EventListener
             {
                 if (!initialized || finished) return;
                 if (clock() >= expiresAt) { Finish("Expired"); return; }
+                if (initializationMode)
+                {
+                    if (sdkSample == null)
+                    {
+                        if (phase is not ("CreateBegin" or "ResumeBegin")) return;
+                        sdkSample = current;
+                    }
+                    if (sdkSample != current) return;
+                    Add("CreateSession." + phase, timestamp);
+                    // 创建返回仅是初始化中段，不能提前漏掉能力、原生宿主、SSE 及按钮可用耗时。
+                    return;
+                }
                 if (sample == null)
                 {
                     if (phase is not ("CreateBegin" or "ResumeBegin")) return;
@@ -121,16 +206,15 @@ internal sealed class ConnectionDiagnostics : EventListener
         }
         catch { Stop("Closed"); }
     }
-    private void Add(string phase, long timestamp)
+    private void Add(string phase, long timestamp, double? sdkElapsedMs = null)
     {
-        var record = JsonSerializer.SerializeToUtf8Bytes(new
+        var fields = new Dictionary<string, object?>
         {
-            sample,
-            phase,
-            utc = DateTimeOffset.UtcNow.ToString("O"),
-            timestamp,
-            elapsedMs = (timestamp - startedAt) * 1000d / Stopwatch.Frequency
-        });
+            ["sample"] = sample, ["phase"] = phase, ["utc"] = DateTimeOffset.UtcNow.ToString("O"),
+            ["timestamp"] = timestamp, ["elapsedMs"] = (timestamp - startedAt) * 1000d / Stopwatch.Frequency
+        };
+        if (sdkElapsedMs.HasValue) fields["sdkElapsedMs"] = sdkElapsedMs.Value;
+        var record = JsonSerializer.SerializeToUtf8Bytes(fields);
         if (records.Count >= MaximumRecords || bytes + record.Length + 1 > MaximumBytes)
         { Finish("LimitReached", false); return; }
         records.Add(record); bytes += record.Length + 1;

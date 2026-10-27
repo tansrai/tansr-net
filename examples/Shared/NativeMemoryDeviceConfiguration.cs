@@ -27,6 +27,7 @@ internal sealed class NativeMemoryDeviceConfiguration
         PublicationProfile = publication.TryGetProperty("profile", out var profile) ? profile.GetString() ?? "" : "terminal-services-v1";
         if (PublicationProfile != "terminal-services-v1" && PublicationProfile != "terminal-persistence-v1")
             throw new InvalidOperationException("device_memory_unknown_profile");
+        PublicationLayout = PersistenceLayout(publication);
         MaxTransfers = Positive(publication, "maxTransfers"); MaxStagingBytes = Positive(publication, "maxStagingBytes"); MaxPages = Positive(publication, "maxPages");
         var encryption = value.GetProperty("encryption");
         if (Text(encryption, "provider") != "dpapi-current-user") throw new InvalidOperationException("device_memory_explicit_encryption_required");
@@ -58,6 +59,7 @@ internal sealed class NativeMemoryDeviceConfiguration
     internal long JournalMaxStoredBytes { get; }
     internal int JournalMaxPages { get; }
     internal string PublicationProfile { get; }
+    internal string PublicationLayout { get; }
     internal string PublicationPath { get; }
     internal string PublicationMode { get; }
     internal JsonElement PublicationIdentity { get; }
@@ -70,6 +72,13 @@ internal sealed class NativeMemoryDeviceConfiguration
         return new NativeMemoryDeviceConfiguration(document.RootElement);
     }
     internal static NativeMemoryDeviceConfiguration Parse(JsonElement value) => new(value);
+    // 既有配置缺字段保持兼容语义；新标准配置显式选认证点索引，绝不按文件猜测或迁移。
+    internal static string PersistenceLayout(JsonElement publication)
+    {
+        string layout = publication.TryGetProperty("layout", out var value) ? value.GetString() ?? "" : "legacy-audited-v1";
+        if (layout != "authenticated-indexed-v2" && layout != "legacy-audited-v1") throw new InvalidOperationException("device_memory_unknown_persistence_layout");
+        return layout;
+    }
     private static string Text(JsonElement value, string name)
     {
         var text = value.GetProperty(name).GetString();

@@ -68,6 +68,8 @@ internal sealed class NativeArchiveHost
             var storage = config.GetProperty("storage"); string modeText = Text(storage, "mode");
             if (modeText != "create" && modeText != "reopen") throw new InvalidOperationException("archive_explicit_storage_mode_required");
             var mode = modeText == "create" ? StorageOpenMode.Create : StorageOpenMode.Reopen;
+            string layout = storage.TryGetProperty("layout", out _) ? Text(storage, "layout") : "legacy-audited-v1";
+            if (layout != "authenticated-indexed-v2" && layout != "legacy-audited-v1") throw new InvalidOperationException("archive_invalid_storage_layout");
             string archivePath = Absolute(storage, "archivePath"), outboxPath = Absolute(storage, "outboxPath"), cursorPath = Absolute(storage, "cursorPath"), keyPath = Absolute(storage, "keyPath"), retentionPath = Absolute(config, "retentionAuthorityFile");
             if (new[] { archivePath, outboxPath, cursorPath, keyPath, retentionPath, Absolute(config, "trustedScopeFile") }.Distinct(StringComparer.OrdinalIgnoreCase).Count() != 6) throw new InvalidOperationException("archive_storage_paths_must_be_distinct");
             JsonElement Retention()
@@ -82,7 +84,8 @@ internal sealed class NativeArchiveHost
             var keys = mode == StorageOpenMode.Create ? CurrentUserDpapiArchiveKeyProvider.Create(keyPath, Text(storage, "keyId")) : CurrentUserDpapiArchiveKeyProvider.Open(keyPath, Text(storage, "keyId"));
             store = await SqliteArchiveStore.OpenAsync(new SqliteArchiveStoreOptions
             {
-                Path = archivePath, Mode = mode, Identity = identity, Replica = Json(new { replicationId = Text(storage, "replicationId"), role = "primary" }),
+                Path = archivePath, Mode = mode, Layout = layout == "authenticated-indexed-v2" ? ArchiveSqliteLayout.AuthenticatedIndexed : ArchiveSqliteLayout.LegacyAudited,
+                Identity = identity, Replica = Json(new { replicationId = Text(storage, "replicationId"), role = "primary" }),
                 KeyProvider = keys, ReadContext = authority.ReadScope, ReadRetentionRevision = () => Text(Retention(), "revision"),
                 AuthorizeRetention = value => { if (WireJson.CanonicalString(Retention().GetProperty("approvedRetention")) != WireJson.CanonicalString(value)) throw new InvalidOperationException("archive_retention_not_authorized"); }
             }, ct).ConfigureAwait(false);

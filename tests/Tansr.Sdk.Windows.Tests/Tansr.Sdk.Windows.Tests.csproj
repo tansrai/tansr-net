@@ -11,6 +11,7 @@
     <Compile Include="../../examples/Shared/NativeCacheContinuityHost.cs" Link="Shared/NativeCacheContinuityHost.cs" />
     <Compile Include="../../examples/Shared/NativeOfflineStorageReader.cs" Link="Shared/NativeOfflineStorageReader.cs" />
     <Compile Include="../../examples/Shared/ExampleConnection.cs" Link="Shared/ExampleConnection.cs" />
+    <Compile Include="../../examples/Shared/ExampleInitializationProgress.cs" Link="Shared/ExampleInitializationProgress.cs" />
     <Compile Include="../../examples/Shared/BoundedFiles.cs" Link="Shared/BoundedFiles.cs" />
     <Compile Include="../../examples/Shared/MediaWorkspace.cs" Link="Shared/MediaWorkspace.cs" />
     <Compile Include="../../examples/Shared/WindowsAudioRecorder.cs" Link="Shared/WindowsAudioRecorder.cs" />

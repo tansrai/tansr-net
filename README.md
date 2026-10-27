@@ -45,6 +45,32 @@ Console.WriteLine(completed.Reason); // 同时检查 WasAborted，不能把任�
 
 默认 SDK1 会话；SDK2 为显式 `SessionContract.Sdk2OffloadV1` 并要求稳定主体、可信 scope 及服务端能力发现。客户端 SDK 中不放长期 appkey。开发时明文 HTTP 仅在显式 `AllowInsecureLoopback=true` 且回环地址时允许；默认 handler 禁重定向和共享 Cookie。注入 `HttpClient` 的宿主须保持这些约束。
 
+需要 loading、取消和统一接入顺序的应用使用 `StartSessionInitialization`，无需自行串联创建、SDK2 能力协商及观察准备。旧的单步 API 保持兼容：
+
+```csharp
+using var initialization = client.StartSessionInitialization(createOptions, new SessionInitializationOptions
+{
+    SessionConfirmedAsync = (session, ct) => SaveConfirmedSessionIdAsync(session.Id, ct),
+    Progress = progress => ShowLoading(progress.Stage, progress.Elapsed, progress.CanCancel),
+}, startupCancellationToken);
+using var connection = await initialization.Ready;
+var session = connection.Session;
+// 后续按原 API 发起任务；初始化不发送业务消息，也不自动启用工具或记忆。
+// 退出本次本机连接时显式等待 connection.StopAsync()。
+```
+
+`Accepted` 在 Serve 已返回会话 ID 时完成，先于本地保存、供材或观察；后继失败仍可读取该事实，不把已有 ID 改成创建未知。调用者须耐久保留原创建请求键，失回按原键对账，不自动重发或换键。`SessionConfirmedAsync` 用于及时保存已确认 ID；保存失败会阻止后继接入。
+
+SDK 只消费 Serve 的恢复结果，不另选窗口、读取全部历史或组装上下文。`Ready` 表示本次明确要求的接入步骤完成，不代表运行空闲、完整历史已呈现或下一轮提示词已生成。需要观察时，通过 `PrepareObservationAsync` 返回 `SessionObservationOptions`，由连接维护唯一事件泵；未提供时不建立 SSE。WPF、WinForms 和控制台使用同一 SDK 阶段，宿主可自定义呈现；`Progress` 在后台有界调用，需要更新 UI 时由宿主派发。只有进度回调异常被隔离；保存与准备回调失败会阻止后续接入，不改变已确认事实。
+
+若创建或恢复必须先有独立的持久化来源，显式设置 `PreparePersistenceAsync`：SDK 在原可信身份/范围校验后、调用创建接口前等待真实来源就绪，再复核原身份。仅该前置回调保证后台派发，避免同步准备前半段阻塞 loading 返回；需要 UI 时由适配器调用自己的 dispatcher，旧 API 与未配置前置回调的路径不改变线程约定。回调返回 `ISessionPersistenceLease` 表示本次拥有该资源的关闭权；返回 `null` 表示只借用已就绪的常驻来源，SDK 不关闭它。本次 owned 资源失败时收尾，成功后由 `SessionConnection.StopAsync` 接管；取消后的晚到 owned 句柄仍只关闭一次。后置 `RequiredServices` 仍在确认会话 ID 后运行，含义不变。
+
+该前置钩子只适配开发者明确提供的已有独立端口，不提供另一套终端持久化协议，也不把必须绑定会话的 `DeviceHost` 提前启动。来源真正可用仍由 Serve 的原供材与恢复校验确认；空回调不能作为终端来源已接通的证据。
+
+必需的端侧供材可显式实现 `ISessionInitializationServices`；可选工具、设备记忆和审批仍按原授权独立连接。`RequestedTools = null` 保留既有省略含义，空数组才显式关闭全部工具。初始化取消只停止本次准备，不删除已确认会话，也不中断其他业务轮；成功后该 token 与资源寿命脱钩。返回的 `SessionConnection` 拥有本次供材与观察，`StopAsync` 只停止这些本机资源。收尾等待受 `CleanupTimeout` 限制（默认 10 秒、最多 1 分钟）；超时保留“清理未确认”，不能视为底层工作已停止；接入原错误不被清理失败覆盖，后者可由 `CleanupFailure` 单独读取。
+
+准备委托应响应传入的取消 token。若委托忽略取消，SDK 会停止后续步骤并有界结束等待，保留已受理事实和未确认清理；晚到的必需供材仍在启动结束后执行一次 `StopAsync`。SDK 不会推定回调自行创建的其它资源已撤销，宿主仍须负责这些资源。事件处理回调未结束时也不能将断流视为已回收。
+
 `ExecutionClient`、`ExecutionHost` 和 Windows 后端消费已经冻结的执行合同；先耐久认领，后执行，再存回执，未知副作用只对账。受控工作区的协作 CAS 要求全部写者遵守同一 owner，不能作为任意共享目录或同用户恶意进程的沙箱。启动本地命令也不等于提供 OS 沙箱，宿主仍须落实终端授权及受控执行环境。
 
 SDK2 本地档案采用既有同步/加密格式，正文密钥可使用当前 Windows 用户 DPAPI 保存。加密不覆盖所有协议元数据；不能以加密代替应用/用户授权、删除修订和可信密钥管理。设备记忆、远程增量输出、配置控制和缓存连续性已有公开的显式预览消费入口，由 Serve 的独立合同约束，不替换原稳定协议。完整 Electron 对照、真实界面、性能与跨端联验仍按原验收单结算。

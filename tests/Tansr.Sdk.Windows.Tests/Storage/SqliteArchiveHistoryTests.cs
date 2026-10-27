@@ -92,7 +92,7 @@ public sealed class SqliteArchiveHistoryTests
         Assert.Equal(before, File.ReadAllBytes(old.Path));
     }
 
-    private static ArchiveReceiveInput Next(Fixture fixture, JsonElement previousAck)
+    internal static ArchiveReceiveInput Next(Fixture fixture, JsonElement previousAck)
     {
         var old = fixture.Input.Page.GetProperty("records")[0]; var payload = Replace(fixture.Reference, "artifactId", Element("body-2"));
         var values = old.EnumerateObject().Where(property => property.Name != "recordDigest").ToDictionary(property => property.Name, property => property.Value.Clone());

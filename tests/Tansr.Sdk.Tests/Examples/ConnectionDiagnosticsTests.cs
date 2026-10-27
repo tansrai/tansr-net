@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Text.Json;
 using Tansr.Sdk.Transport;
+using Tansr.Sdk.Sessions;
 using WpfAssistant;
 
 namespace Tansr.Sdk.Tests.Examples;
@@ -9,6 +10,151 @@ namespace Tansr.Sdk.Tests.Examples;
 [Collection("ConnectionTiming")]
 public sealed class ConnectionDiagnosticsTests
 {
+    [Fact]
+    public async Task InitializationIncludesLocalPreparationAndDoesNotEndAtCreateOrSseReady()
+    {
+        using var files = new DiagnosticFiles();
+        var now = Stopwatch.GetTimestamp();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1), () => now));
+        var attempt = Assert.IsType<string>(diagnostic.BeginInitialization());
+        now += Stopwatch.Frequency;
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.LocalStateReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.ClientReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SdkInitializationBegin);
+        var create = Assert.IsType<ConnectionTiming>(ConnectionTiming.Start(true));
+        create.Mark(ConnectionTimingPhase.Complete);
+        Assert.False(diagnostic.Completion.IsCompleted);
+
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SessionConfirmed);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SessionConfirmedPersisted);
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.InitializingCapabilities, TimeSpan.FromMilliseconds(16)));
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.PreparingObservation, TimeSpan.FromMilliseconds(11900)));
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.PresentationBegin);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.NativeReadyBegin);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.NativeReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.ObservationPrepared);
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Ready, TimeSpan.FromSeconds(12)));
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SseReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputBlockedByRecovery);
+        Assert.False(diagnostic.Completion.IsCompleted);
+        Assert.False(File.Exists(files.Output));
+
+        now += 14 * Stopwatch.Frequency;
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InteractionReady);
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        var rows = Read(files.Output);
+        Assert.Equal("Initialization.Begin", Phase(rows[0]));
+        Assert.Equal("Initialization.InteractionReady", Phase(rows[^1]));
+        Assert.Equal(15000d, rows[^1].GetProperty("elapsedMs").GetDouble());
+        Assert.Equal(1000d, rows.Single(row => Phase(row) == "Initialization.LocalStateReady").GetProperty("elapsedMs").GetDouble());
+        Assert.Contains(rows, row => Phase(row) == "CreateSession.Complete");
+        Assert.Equal(16d, rows.Single(row => Phase(row) == "Initialization.Sdk.InitializingCapabilities").GetProperty("sdkElapsedMs").GetDouble());
+        Assert.Equal(11900d, rows.Single(row => Phase(row) == "Initialization.Sdk.PreparingObservation").GetProperty("sdkElapsedMs").GetDouble());
+        Assert.Single(rows.Select(row => row.GetProperty("sample").GetString()).Distinct());
+    }
+
+    [Fact]
+    public async Task InteractionReadyWaitsForOrderedProgressWithoutExtendingTheMeasuredButtonTime()
+    {
+        using var files = new DiagnosticFiles();
+        var now = Stopwatch.GetTimestamp();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1), () => now));
+        var attempt = diagnostic.BeginInitialization();
+        Assert.Null(diagnostic.BeginInitialization());
+        diagnostic.MarkInitialization("SECRET-BODY", ConnectionInitializationPhase.Failed);
+        diagnostic.MarkInitialization(attempt, (ConnectionInitializationPhase)999);
+        now += 15 * Stopwatch.Frequency;
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SseReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InteractionReady);
+        Assert.False(diagnostic.Completion.IsCompleted);
+        now += Stopwatch.Frequency;
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.InitializingCapabilities, TimeSpan.FromSeconds(2)));
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.PreparingObservation, TimeSpan.FromSeconds(10)));
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Ready, TimeSpan.FromSeconds(14)));
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Failed, TimeSpan.FromSeconds(17)));
+
+        var rows = Read(files.Output);
+        Assert.Equal(15000d, rows.Single(row => Phase(row) == "Initialization.InputReady").GetProperty("elapsedMs").GetDouble());
+        Assert.Equal(16000d, rows[^1].GetProperty("elapsedMs").GetDouble());
+        Assert.Equal("Initialization.Sdk.Ready", Phase(rows[^1]));
+        Assert.Equal(14000d, rows[^1].GetProperty("sdkElapsedMs").GetDouble());
+        Assert.DoesNotContain("SECRET", File.ReadAllText(files.Output));
+        Assert.DoesNotContain(rows, row => Phase(row).Contains("999", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData((int)ConnectionInitializationPhase.Failed)]
+    [InlineData((int)ConnectionInitializationPhase.Canceled)]
+    public async Task InitializationFailureDoesNotClaimButtonReadiness(int value)
+    {
+        var outcome = (ConnectionInitializationPhase)value;
+        using var files = new DiagnosticFiles();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1)));
+        var attempt = diagnostic.BeginInitialization();
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SessionConfirmed);
+        diagnostic.MarkInitialization(attempt, outcome);
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputReady);
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Ready, TimeSpan.Zero));
+        Assert.Equal(new[] { "Initialization.Begin", "Initialization.SessionConfirmed", "Initialization." + outcome }, Read(files.Output).Select(Phase));
+    }
+
+    [Fact]
+    public async Task SdkReadinessAloneStillExpiresWhenHostInteractionNeverBecomesReady()
+    {
+        using var files = new DiagnosticFiles();
+        var now = Stopwatch.GetTimestamp();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1), () => now));
+        var attempt = diagnostic.BeginInitialization();
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Ready, TimeSpan.FromSeconds(1)));
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputBlockedByRecovery);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputBlockedByRecovery);
+        now += 61 * Stopwatch.Frequency;
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputReady);
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        var phases = Read(files.Output).Select(Phase).ToArray();
+        Assert.Single(phases, phase => phase == "Initialization.InputBlockedByRecovery");
+        Assert.Equal("Expired", phases[^1]);
+        Assert.DoesNotContain("Initialization.InputReady", phases);
+    }
+
+    [Fact]
+    public async Task InteractionReadinessDoesNotRequireIdleOrPermissionToSendANewInput()
+    {
+        using var files = new DiagnosticFiles();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1)));
+        var attempt = diagnostic.BeginInitialization();
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Ready, TimeSpan.FromSeconds(1)));
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.SseReady);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InputBlockedByRecovery);
+        diagnostic.MarkInitialization(attempt, ConnectionInitializationPhase.InteractionReady);
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        var phases = Read(files.Output).Select(Phase).ToArray();
+        Assert.Equal("Initialization.InteractionReady", phases[^1]);
+        Assert.DoesNotContain("Initialization.InputReady", phases);
+        Assert.DoesNotContain("Initialization.Failed", phases);
+        Assert.DoesNotContain("Expired", phases);
+    }
+
+    [Fact]
+    public async Task InitializationProgressUsesTheExistingHardBounds()
+    {
+        using var files = new DiagnosticFiles();
+        using var diagnostic = Assert.IsType<ConnectionDiagnostics>(ConnectionDiagnostics.Create(files.Output, TimeSpan.FromMinutes(1)));
+        var attempt = diagnostic.BeginInitialization();
+        diagnostic.MarkInitializationProgress(attempt, new((SessionInitializationStage)999, TimeSpan.Zero));
+        diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Connecting, TimeSpan.FromMilliseconds(-1)));
+        for (var i = 0; i < 100; i++)
+            diagnostic.MarkInitializationProgress(attempt, new(SessionInitializationStage.Connecting, TimeSpan.FromMilliseconds(i)));
+        await diagnostic.Completion.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.InRange(Read(files.Output).Length, 1, 64);
+        Assert.InRange(new FileInfo(files.Output).Length, 1, 16384);
+        Assert.DoesNotContain("999", string.Join(" ", Read(files.Output).Select(Phase)));
+    }
+
     [Fact]
     public async Task SourceCreatedAfterExpiryCannotReenableTheFinishedListener()
     {

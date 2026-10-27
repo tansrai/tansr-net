@@ -216,6 +216,26 @@ public sealed class ArchiveHistoryViewTests
         await view.CloseAsync(); Assert.Equal(1, fixture.Version.Closes); Assert.Equal(0, fixture.Current.HeadReads);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task VersionChangesDuringCurrentAuthorityChecksPreventLateHistoryResults(bool body)
+    {
+        var fixture = new Fixture(); var view = fixture.View();
+        fixture.Current.Read = (request, _) =>
+        {
+            var page = fixture.Current.Page(request);
+            if (fixture.Current.RecordReads == (body ? 2 : 1)) fixture.Version.Head = Replace(fixture.Version.Head!.Value, "recordDigest", Json(new string('b', 64)));
+            return Task.FromResult(page);
+        };
+        if (body)
+        {
+            Assert.Equal("context_changed", (await Assert.ThrowsAsync<StorageException>(() => view.ReadArtifactAsync("record-1", fixture.Reference))).Code);
+            Assert.Equal(1, fixture.Version.BodyReads);
+        }
+        else Assert.Equal("context_changed", (await Assert.ThrowsAsync<StorageException>(() => view.ReadPageAsync(fixture.Request("record-1")))).Code);
+    }
+
     private static TaskCompletionSource Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static JsonElement Json(object value) => WireJson.Parse(JsonSerializer.SerializeToUtf8Bytes(value), 1048576);
     private static JsonElement Replace(JsonElement value, string name, JsonElement replacement)

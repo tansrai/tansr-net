@@ -331,31 +331,20 @@ public sealed class FirstTokenDiagnosticsTests
     }
 
     [Fact]
-    public async Task RecoveredIdleMetadataAllowsExactUnknownBaselineWithoutInventingRuntimeState()
+    public async Task RecoveredIdleProjectionAllowsExactUnknownBaselineWithoutInventingRuntimeState()
     {
         using var files = new DiagnosticFiles();
         var clock = new TestClock();
         using var diagnostic = Create(files.Output, clock);
         using var view = new SessionView();
         var session = new object();
-        var historyReads = 0;
-        var metadataReads = 0;
-        var history = JsonSerializer.SerializeToElement(new
-        {
-            sessionId = "private-session-credential",
-            lastSeq = 10,
-            messages = new[] { new { role = "assistant", blocks = new[] { new { t = "text", text = "OLD-CONTENT" } } } }
-        });
-        var recovery = new ExampleEventRecovery("private-session-credential",
-            _ => { historyReads++; return Task.FromResult(history); },
-            _ => { metadataReads++; return Task.FromResult(JsonSerializer.SerializeToElement(new { sessionId = "private-session-credential", lastSeq = 10, status = "idle" })); },
-            value => { view.RestoreHistory(value, "private-session-credential"); return Task.CompletedTask; }, () => true);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        Assert.False(recovery.Required);
-        Assert.Equal(2, historyReads); Assert.Equal(1, metadataReads);
+        var json = ExampleEventRecoveryTests.Projection(-1);
+        json["sessionId"] = "private-session-credential";
+        var projection = SessionRecoveryProjection.Parse(JsonSerializer.SerializeToElement(json),
+            "private-session-credential", new SessionRecoveryRequest());
+        view.RestoreRecoveryProjection(projection, view.Snapshot.Version);
         Assert.Equal("unknown", view.Snapshot.Status); Assert.False(view.Snapshot.HasEventGap);
-        diagnostic.ConfirmRecoveredIdle(session, recovery.HistorySequence);
-        Assert.True(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
+        diagnostic.ConfirmRecoveredIdle(session, projection.HistorySequence);        Assert.True(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
         Assert.Equal("unknown", view.Snapshot.Status);
         Assert.Equal(0, diagnostic.BeginRender(session, view.Snapshot));
         diagnostic.Saved(); diagnostic.Sent();
@@ -386,12 +375,7 @@ public sealed class FirstTokenDiagnosticsTests
         view.Apply(Event("turn.completed", 4305081));
         view.Apply(Event("session.created", 7085025));
         var reads = 0;
-        var recovery = new ExampleEventRecovery("private-session-credential",
-            _ => { reads++; throw new InvalidOperationException("Unexpected history read for a legal sequence jump."); },
-            _ => throw new InvalidOperationException("Unexpected metadata read for a legal sequence jump."),
-            _ => Task.CompletedTask, () => true);
-        if (view.Snapshot.HasEventGap) await recovery.RecoverGapAsync(CancellationToken.None);
-
+        if (view.Snapshot.HasEventGap) { reads++; throw new InvalidOperationException("Unexpected recovery for a legal sequence jump."); }
         Assert.Equal(0, reads);
         Assert.False(view.Snapshot.HasEventGap);
         Assert.True(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
@@ -412,17 +396,10 @@ public sealed class FirstTokenDiagnosticsTests
         using var diagnostic = Create(files.Output, clock);
         using var view = new SessionView();
         var session = new object();
-        var recovery = new ExampleEventRecovery("private-session-credential",
-            _ => Task.FromResult(JsonSerializer.SerializeToElement(new { sessionId = "private-session-credential", lastSeq = 10, messages = Array.Empty<object>() })),
-            _ => Task.FromResult(JsonSerializer.SerializeToElement(new { sessionId = "private-session-credential", lastSeq = 10, status = "running" })),
-            value => { view.RestoreHistory(value, "private-session-credential"); return Task.CompletedTask; }, () => true);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        Assert.True(recovery.Required);
-        if (!recovery.Required) diagnostic.ConfirmRecoveredIdle(session, recovery.HistorySequence);
-        Assert.False(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
+        view.MarkRecoveryPending();        Assert.False(diagnostic.BeginSend(session, "private-session-credential", view.Snapshot));
         Assert.Equal("unknown", view.Snapshot.Status);
         var rows = await ReadAsync(diagnostic, files.Output);
-        Assert.Equal(new[] { "Click", "BaselineUnconfirmed" }, rows.Select(Stage));
+        Assert.Equal(new[] { "Click", "BaselineGap" }, rows.Select(Stage));
     }
 
     [Theory]

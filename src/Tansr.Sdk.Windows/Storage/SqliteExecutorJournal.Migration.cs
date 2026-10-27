@@ -24,11 +24,12 @@ public sealed partial class SqliteExecutorJournal
                 string.Equals(parentPath, Path.GetDirectoryName(staging), StringComparison.OrdinalIgnoreCase), "invalid_input");
             using var parent = StorageFileIdentity.Open(parentPath, true);
             RequireNewMedia(destination); RequireNewMedia(staging);
-            Initialize(); check(); parent.Check();
+            Require((string?)Scalar("PRAGMA quick_check") == "ok"); Initialize(); check(); parent.Check();
             var options = new SqliteExecutorJournalOptions
             {
                 Path = staging,
                 Mode = StorageOpenMode.Create,
+                Layout = _options.Layout,
                 KeyProvider = keyProvider,
                 CompactCompletedReceipts = _compactCompletedReceipts,
                 ApplicationScopeId = _application,
@@ -64,8 +65,10 @@ public sealed partial class SqliteExecutorJournal
                             Require(++count <= _maximumOperations && bytes <= _maximumBytes, "capacity_exceeded");
                             copy.Exec("INSERT INTO operations VALUES($id,$operation,$receipt,zeroblob($reserve))",
                                 ("$id", id), ("$operation", operation), ("$receipt", (object?)receipt ?? DBNull.Value), ("$reserve", reserve));
+                            copy.SourceStoreRow(id, operation, receipt, reserve);
                         }
                         copy.Exec("UPDATE state SET logical_bytes=$bytes,operation_count=$count WHERE id=1", ("$bytes", bytes), ("$count", count));
+                        if (copy.Indexed) copy.SaveSourceAuthentication();
                         copy.Initialize(); VerifyCopiedContents(copy, CheckBoth);
                     }, CheckBoth);
                     return true;
@@ -79,6 +82,7 @@ public sealed partial class SqliteExecutorJournal
             {
                 connection.Open();
                 var audit = new SqliteExecutorJournal(connection, parent, guard, options, metadata, cipher);
+                Require((string?)audit.Scalar("PRAGMA quick_check") == "ok");
                 audit.Initialize(); VerifyCopiedContents(audit, check);
             }
             byte[] digest = guard.Digest();

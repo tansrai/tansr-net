@@ -110,8 +110,8 @@ internal static class ConsoleWorker
     private static async Task<bool> RunJobAsync(Job job, string? defaultModel, TansrClient client,
         IReadOnlyList<NativeToolBinding>? bindings, CancellationToken stop, Output output, TerminalObservationClient? observation, SessionContract sessionContract)
     {
-        AgentSession? session = null; NativeToolHost? tools = null; SessionRun? run = null; SessionNarrator? narrator = null;
-        var creationStarted = false; var acceptanceWritten = false; var terminalKnown = false; var success = false; var cleanupConfirmed = true;
+        AgentSession? session = null; NativeToolHost? tools = null; SessionRun? run = null; SessionNarrator? narrator = null; SessionConnection? sessionConnection = null;
+        var creationStarted = false; var initializationCompleted = false; var acceptanceWritten = false; var terminalKnown = false; var success = false; var cleanupConfirmed = true;
         try
         {
             stop.ThrowIfCancellationRequested();
@@ -124,15 +124,40 @@ internal static class ConsoleWorker
                 options.RequestId = "worker-" + BitConverter.ToString(hash.ComputeHash(JsonSerializer.SerializeToUtf8Bytes(new[] { options.RequestId, job.Id }))).Replace("-", "").ToLowerInvariant();
             }
             options.Labels = new Dictionary<string, string>(StringComparer.Ordinal) { ["worker.job"] = job.Id };
-            session = await client.CreateSessionAsync(options, stop).ConfigureAwait(false);
-            output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "session", state = "created" });
-            await ExampleConnection.InitializeSessionAsync(client, sessionContract, session.Id, stop).ConfigureAwait(false);
-            // 无 UI 服务不能竞争共享控制台标题；原生业务工具明确返回不可用，仍提交一次原回执。
-            tools = new NativeToolHost(session, "Tansr.Console.Worker",
-                (_, ct) => { ct.ThrowIfCancellationRequested(); throw new InvalidOperationException("window_title_unavailable_in_worker"); },
-                code => output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "native_tool", code }), bindings);
-            await tools.Ready.ConfigureAwait(false);
-            var activeSession = session; var activeTools = tools;
+            var progressGate = new object(); var showingInitialization = true;
+            using (var initialization = client.StartSessionInitialization(options, new SessionInitializationOptions
+            {
+                SessionConfirmedAsync = (confirmed, ct) =>
+                {
+                    session = confirmed;
+                    output.Emit(new { jobId = job.Id, sessionId = confirmed.Id, phase = "session", state = "created" });
+                    return Task.CompletedTask;
+                },
+                PrepareObservationAsync = async (confirmed, ct) =>
+                {
+                    // 无 UI 服务不能竞争共享控制台标题；原生业务工具明确返回不可用，仍提交一次原回执。
+                    tools = new NativeToolHost(confirmed, "Tansr.Console.Worker",
+                        (_, toolToken) => { toolToken.ThrowIfCancellationRequested(); throw new InvalidOperationException("window_title_unavailable_in_worker"); },
+                        code => output.Emit(new { jobId = job.Id, sessionId = confirmed.Id, phase = "native_tool", code }), bindings, resumeRequested: false, initializationCancellation: ct);
+                    await tools.Ready.ConfigureAwait(false);
+                    return null; // SessionRun 随后建立本轮观察并发送业务，初始化不重复开流。
+                },
+                Progress = progress =>
+                {
+                    lock (progressGate)
+                    {
+                        if (showingInitialization)
+                            output.Emit(new { jobId = job.Id, phase = "initialization", status = ExampleInitializationProgress.Format(progress) });
+                    }
+                }
+            }, stop))
+            {
+                try { sessionConnection = await initialization.Ready.ConfigureAwait(false); }
+                finally { lock (progressGate) showingInitialization = false; }
+                session = sessionConnection.Session;
+                initializationCompleted = true;
+            }
+            var activeSession = session; var activeTools = tools!;
             narrator = new SessionNarrator(line => output.Emit(new { jobId = job.Id, sessionId = activeSession.Id, phase = "narration", line }), new SessionNarratorOptions { Verbosity = ExampleSessionOptions.ReadNarratorVerbosity() });
             run = session.StartRun(job.Prompt, observer: (item, ct) => { narrator.Apply(item); return ObserveAsync(job.Id, activeSession, activeTools, item, ct, output); }, cancellationToken: stop);
             try
@@ -169,24 +194,30 @@ internal static class ConsoleWorker
         finally
         {
             run?.Dispose();
+            if (sessionConnection != null)
+                cleanupConfirmed &= await CleanupStepAsync(job.Id, sessionConnection.Session.Id, "connection", sessionConnection.StopAsync, output).ConfigureAwait(false);
             narrator?.Dispose();
             if (session is not null)
             {
-                if (!terminalKnown && run?.AcceptanceState is SessionMessageAcceptance.Accepted or SessionMessageAcceptance.Unconfirmed)
+                if (initializationCompleted && !terminalKnown && run?.AcceptanceState is SessionMessageAcceptance.Accepted or SessionMessageAcceptance.Unconfirmed)
                     cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "interrupt", () => WithBudgetAsync(session.CancelAsync, TimeSpan.FromSeconds(5)), output).ConfigureAwait(false);
-                if (tools is not null)
+                if (tools is not null && initializationCompleted)
                     cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "native_tools", () => WithBudgetAsync(tools.DrainAsync, TimeSpan.FromSeconds(12)), output).ConfigureAwait(false);
-                cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "close", () => WithBudgetAsync(session.CloseAsync, TimeSpan.FromSeconds(10)), output).ConfigureAwait(false);
                 var remoteCleanup = "unknown";
-                if (observation != null)
-                    cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "resources", async () =>
-                    {
-                        using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                        var settled = await observation.WaitForResourcesAsync(session.Id, TimeSpan.FromSeconds(10), sessionContract: sessionContract, cancellationToken: budget.Token).ConfigureAwait(false);
-                        remoteCleanup = settled.State.ToString().ToLowerInvariant();
-                    }, output).ConfigureAwait(false);
+                // 已知建会事实不能因后继接入失败而删除；原会话和请求键留给显式恢复／对账。
+                if (initializationCompleted)
+                {
+                    cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "close", () => WithBudgetAsync(session.CloseAsync, TimeSpan.FromSeconds(10)), output).ConfigureAwait(false);
+                    if (observation != null)
+                        cleanupConfirmed &= await CleanupStepAsync(job.Id, session.Id, "resources", async () =>
+                        {
+                            using var budget = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                            var settled = await observation.WaitForResourcesAsync(session.Id, TimeSpan.FromSeconds(10), sessionContract: sessionContract, cancellationToken: budget.Token).ConfigureAwait(false);
+                            remoteCleanup = settled.State.ToString().ToLowerInvariant();
+                        }, output).ConfigureAwait(false);
+                }
                 tools?.Dispose();
-                output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "cleanup", state = cleanupConfirmed ? "completed" : "unconfirmed", scope = observation == null ? "local_and_close_request" : "local_and_remote_resources", remoteCleanup });
+                output.Emit(new { jobId = job.Id, sessionId = session.Id, phase = "cleanup", state = cleanupConfirmed ? "completed" : "unconfirmed", scope = !initializationCompleted ? "local_only" : observation == null ? "local_and_close_request" : "local_and_remote_resources", remoteCleanup });
             }
             else output.Emit(new { jobId = job.Id, phase = "cleanup", state = creationStarted ? "unavailable_session_id" : "not_needed" });
         }

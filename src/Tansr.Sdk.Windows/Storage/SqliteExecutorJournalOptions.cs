@@ -9,6 +9,8 @@ public sealed class SqliteExecutorJournalOptions
     public string Path { get; set; } = "";
     /// <summary>Create 不覆盖已有文件；Reopen 不修复或重建未知介质。</summary>
     public StorageOpenMode Mode { get; set; }
+    /// <summary>原配置缺省保持完整审计布局。新来源显式选择认证点索引；创建与重开必须一致，不隐式迁移。</summary>
+    public ExecutorJournalSqliteLayout Layout { get; set; }
     /// <summary>显式选择独立紧凑介质；终态释放未用预留但永久保留原键和完整回执。重开时须保持原选择；默认兼容原 v1，不迁移旧库。</summary>
     public bool CompactCompletedReceipts { get; set; }
     /// <summary>显式 AES-256-GCM 全 operation/receipt 加密；新格式、新路径，不隐式升级原库。重开必须提供原密钥。</summary>
@@ -24,3 +26,5 @@ public sealed class SqliteExecutorJournalOptions
 }
 
 public enum StorageOpenMode { Create, Reopen, MigrateV1 }
+
+public enum ExecutorJournalSqliteLayout { LegacyAudited, AuthenticatedIndexed }

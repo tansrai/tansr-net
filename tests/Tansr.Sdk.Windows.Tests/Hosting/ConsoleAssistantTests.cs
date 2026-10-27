@@ -116,27 +116,103 @@ public sealed class ConsoleAssistantTests
     [Fact]
     public async Task InteractiveObserverKeepsMessageSendingAndSameTurnInsertionAvailable()
     {
-        using var f = new Fixture(); var session = await f.ResumeAsync(); using var stop = new CancellationTokenSource(); using var view = new SessionView();
+        using var f = new Fixture(); using var stop = new CancellationTokenSource(); using var view = new SessionView();
         f.Handler.EmitStart = false;
-        using var tools = CreateTools(session);
+        IDisposable? tools = null;
         var lines = new ConcurrentQueue<string>(); var projected = Signal();
         using var narrator = new SessionNarrator(lines.Enqueue);
         using var subscription = view.Subscribe(snapshot => { if (snapshot.LastSequence == 43) projected.TrySetResult(true); });
-        await ((Task)tools.GetType().GetProperty("Ready", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tools)!).WaitAsync(Deadline);
-        var metadataAtReady = f.Handler.MetadataReads; Assert.Equal(1, metadataAtReady);
-        var observation = (Task)ConsoleProgram.GetMethod("ObserveAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [session, view, tools, stop.Token, null, narrator])!;
-        await f.Handler.Listening.Task.WaitAsync(Deadline);
-        await session.SendAsync("first interactive prompt");
-        await session.SubmitInputAsync("input-original", new SessionInputTarget("epoch", "current"), "same turn text");
-        await session.SendAsync("second interactive prompt");
-        f.Handler.Events.Push(Frame(42, "turn.started", "current") + Frame(43, "turn.completed", "current", "completed"));
-        await projected.Task.WaitAsync(Deadline);
-        Assert.Equal(1, f.Handler.EventSubscriptions);
-        Assert.Equal(2, lines.Count); Assert.Contains(lines, line => line.Contains("turn started", StringComparison.Ordinal));
-        Assert.Contains(lines, line => line.Contains("turn completed", StringComparison.Ordinal));
-        Assert.Equal("idle", view.Snapshot.Status);
-        Assert.Equal(2, f.Handler.Messages); Assert.Equal(1, f.Handler.Inputs); Assert.Equal(metadataAtReady, f.Handler.MetadataReads);
-        stop.Cancel(); await observation.WaitAsync(Deadline); Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
+        using var initialization = f.StartInitialization(new SessionInitializationOptions
+        {
+            PrepareObservationAsync = async (session, ct) =>
+            {
+                tools = CreateTools(session, ct);
+                await ToolsReady(tools);
+                return new SessionObservationOptions((item, eventToken) =>
+                {
+                    narrator.Apply(item);
+                    return (Task)ConsoleProgram.GetMethod("ObserveEventAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null,
+                        [session, view, tools, false, item, eventToken])!;
+                });
+            }
+        }, stop.Token);
+        SessionConnection? connection = null;
+        try
+        {
+            connection = await initialization.Ready.WaitAsync(Deadline);
+            var session = connection.Session;
+            var metadataAtReady = f.Handler.MetadataReads; Assert.Equal(1, metadataAtReady);
+            Assert.Equal(0, f.Handler.Messages); Assert.Equal(1, f.Handler.Creations);
+            var observation = (Task)ConsoleProgram.GetMethod("ObserveCompletionAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [connection])!;
+            await f.Handler.Listening.Task.WaitAsync(Deadline);
+            await session.SendAsync("first interactive prompt");
+            await session.SubmitInputAsync("input-original", new SessionInputTarget("epoch", "current"), "same turn text");
+            await session.SendAsync("second interactive prompt");
+            f.Handler.Events.Push(Frame(42, "turn.started", "current") + Frame(43, "turn.completed", "current", "completed"));
+            await projected.Task.WaitAsync(Deadline);
+            Assert.Equal(1, f.Handler.EventSubscriptions);
+            Assert.Equal(2, lines.Count); Assert.Contains(lines, line => line.Contains("turn started", StringComparison.Ordinal));
+            Assert.Contains(lines, line => line.Contains("turn completed", StringComparison.Ordinal));
+            Assert.Equal("idle", view.Snapshot.Status);
+            Assert.Equal(2, f.Handler.Messages); Assert.Equal(1, f.Handler.Inputs); Assert.Equal(metadataAtReady, f.Handler.MetadataReads);
+            stop.Cancel(); Assert.False(connection.Completion.IsCompleted);
+            await connection.StopAsync().WaitAsync(Deadline); await observation.WaitAsync(Deadline);
+            Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
+        }
+        finally
+        {
+            if (connection != null) await connection.StopAsync().WaitAsync(Deadline);
+            tools?.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task StartupCancellationInterruptsNativeResumeMetadataWithoutSendingOrClosingTheSession()
+    {
+        using var f = new Fixture(); using var startup = new CancellationTokenSource();
+        f.Handler.BeforeMetadata = ct => Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        IDisposable? tools = null;
+        using var initialization = f.StartInitialization(new SessionInitializationOptions
+        {
+            PrepareObservationAsync = async (session, ct) =>
+            {
+                tools = CreateTools(session, ct);
+                await ToolsReady(tools);
+                return null;
+            }
+        }, startup.Token);
+        try
+        {
+            await f.Handler.MetadataEntered.Task.WaitAsync(Deadline);
+            Assert.Equal("resumed", (await initialization.Accepted.WaitAsync(Deadline)).Id);
+            startup.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => initialization.Ready.WaitAsync(Deadline));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ToolsReady(tools!).WaitAsync(Deadline));
+            await f.Handler.MetadataCancelled.Task.WaitAsync(Deadline);
+            Assert.Equal(1, f.Handler.Creations); Assert.Equal(1, f.Handler.MetadataReads);
+            Assert.Equal(0, f.Handler.EventSubscriptions); Assert.Equal(0, f.Handler.Messages);
+            Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
+        }
+        finally { startup.Cancel(); tools?.Dispose(); }
+    }
+
+    [Fact]
+    public async Task CancellingStartupAfterReadyDoesNotCancelTheNativeHostLifetime()
+    {
+        using var f = new Fixture(); using var startup = new CancellationTokenSource();
+        var session = await f.ResumeAsync();
+        using var host = CreateTools(session, startup.Token);
+        await ToolsReady(host).WaitAsync(Deadline);
+        startup.Cancel();
+        Assert.True(ToolsReady(host).IsCompletedSuccessfully);
+        var tools = (IReadOnlyList<Tansr.Sdk.Windows.Hosting.WindowsBusinessTool>)host.GetType()
+            .GetMethod("SelectDeviceExecution", BindingFlags.Instance | BindingFlags.NonPublic)!.Invoke(host, null)!;
+        using var arguments = JsonDocument.Parse("{}");
+        var result = await Assert.Single(tools, item => item.Name == "application_info").Invoke(arguments.RootElement, CancellationToken.None).WaitAsync(Deadline);
+        Assert.Equal("ok", result.GetProperty("status").GetString());
+        Assert.Equal(1, f.Handler.Creations); Assert.Equal(1, f.Handler.MetadataReads);
+        Assert.Equal(0, f.Handler.EventSubscriptions); Assert.Equal(0, f.Handler.Messages);
+        Assert.Equal(0, f.Handler.Interrupts); Assert.Equal(0, f.Handler.Closes);
     }
 
     private static Task<int> RunOnce(AgentSession session, Func<AgentEvent, CancellationToken, Task>? observer = null, CancellationToken token = default)
@@ -146,11 +222,14 @@ public sealed class ConsoleAssistantTests
     private static Task<string?> ReadCommand(TextReader input, CancellationToken token)
         => (Task<string?>)ConsoleProgram.GetMethod("ReadCommandAsync", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [input, token])!;
 
-    private static IDisposable CreateTools(AgentSession session)
+    private static Task ToolsReady(IDisposable tools)
+        => (Task)tools.GetType().GetProperty("Ready", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(tools)!;
+
+    private static IDisposable CreateTools(AgentSession session, CancellationToken initializationCancellation)
     {
         var type = ConsoleProgram.Assembly.GetType("Tansr.Examples.NativeToolHost", true)!;
-        return (IDisposable)type.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single(constructor => constructor.GetParameters().Length == 5).Invoke(
-            [session, "console-test", (Func<string, CancellationToken, Task>)((_, _) => Task.CompletedTask), (Action<string>)(_ => { }), null]);
+        return (IDisposable)type.GetConstructors(BindingFlags.Instance | BindingFlags.NonPublic).Single(constructor => constructor.GetParameters().Length == 7).Invoke(
+            [session, "console-test", (Func<string, CancellationToken, Task>)((_, _) => Task.CompletedTask), (Action<string>)(_ => { }), null, true, initializationCancellation]);
     }
     private static TaskCompletionSource<bool> Signal() => new(TaskCreationOptions.RunContinuationsAsynchronously);
     private static string Frame(int sequence, string type, string turn, string? reason = null)
@@ -186,28 +265,38 @@ public sealed class ConsoleAssistantTests
             client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://serve.test/"), TokenProvider = _ => Task.FromResult("synthetic-token"), MaxReconnectAttempts = 0 }, http);
         }
         internal Task<AgentSession> ResumeAsync() => client.CreateSessionAsync(new CreateSessionOptions { ResumeSessionId = "resumed" });
+        internal SessionInitialization StartInitialization(SessionInitializationOptions options, CancellationToken token)
+            => client.StartSessionInitialization(new CreateSessionOptions { ResumeSessionId = "resumed" }, options, token);
         public void Dispose() { client.Dispose(); http.Dispose(); Handler.Dispose(); }
     }
 
     private sealed class Handler : HttpMessageHandler
     {
         internal readonly Feed Events = new();
-        internal readonly TaskCompletionSource<bool> Sent = Signal(), Listening = Signal();
-        internal int Messages, MetadataReads, Inputs, Interrupts, Closes, EventSubscriptions;
+        internal readonly TaskCompletionSource<bool> Sent = Signal(), Listening = Signal(), MetadataEntered = Signal(), MetadataCancelled = Signal();
+        internal int Messages, MetadataReads, Inputs, Interrupts, Closes, EventSubscriptions, Creations;
         internal string? Cursor;
         internal bool EmitStart = true;
         internal Func<CancellationToken, Task>? BeforeAcceptance;
+        internal Func<CancellationToken, Task>? BeforeMetadata;
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             string path = request.RequestUri!.AbsolutePath;
             if (request.Method == HttpMethod.Post && path == "/api/sessions")
             {
+                Interlocked.Increment(ref Creations);
                 using var data = JsonDocument.Parse(await request.Content!.ReadAsStringAsync(ct)); Assert.Equal("resumed", data.RootElement.GetProperty("resume").GetProperty("sessionId").GetString());
                 return Json(new { sessionId = "resumed", resumed = true, lastSeq = 41 });
             }
             if (request.Method == HttpMethod.Get && path == "/api/sessions/resumed")
             {
                 Interlocked.Increment(ref MetadataReads);
+                MetadataEntered.TrySetResult(true);
+                if (BeforeMetadata != null)
+                {
+                    try { await BeforeMetadata(ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { MetadataCancelled.TrySetResult(true); throw; }
+                }
                 return Json(new { sessionId = "resumed", endUserId = "user", status = "idle", live = true, lastSeq = 41, createdAt = "2026-09-27T00:00:00Z", lastActivityAt = "2026-09-27T00:00:00Z" });
             }
             if (request.Method == HttpMethod.Get && path.EndsWith("/events", StringComparison.Ordinal))

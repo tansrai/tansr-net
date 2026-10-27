@@ -1,6 +1,11 @@
+using System.Net;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Tansr.Examples;
+using Tansr.Sdk.Client;
 using Tansr.Sdk.Sessions;
+using Tansr.Sdk.Tests.Api;
 using Tansr.Sdk.Views;
 
 namespace Tansr.Sdk.Tests.Examples;
@@ -8,318 +13,366 @@ namespace Tansr.Sdk.Tests.Examples;
 public sealed class ExampleEventRecoveryTests
 {
     [Fact]
-    public async Task IdleRecoveryReadsHistoryAfterMetadataAndUsesOnlyHistoryWatermark()
+    public async Task SettledProjectionReplacesHistoryMetadataHistoryWithOneBoundedRead()
     {
-        var reads = new Queue<JsonElement>(new[] { History(5), History(10) });
-        var installed = new List<long>();
-        var recovery = Recovery(_ => Task.FromResult(reads.Dequeue()), Metadata("idle", 99), installed);
-
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.Equal(new long[] { 5, 10 }, installed);
-        Assert.Equal(10, recovery.HistorySequence);
-        Assert.False(recovery.Required);
-    }
-
-    [Fact]
-    public async Task RunningRecoveryIgnoresOldTerminalThenWaitsForCommittedBody()
-    {
-        var reads = new Queue<JsonElement>(new[] { History(5), History(89), History(90) });
-        var installed = new List<long>();
-        var recovery = Recovery(_ => Task.FromResult(reads.Dequeue()), Metadata("running", 90), installed);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(80), CancellationToken.None));
-        Assert.Equal(2, reads.Count);
-        Assert.True(recovery.Required);
-        // A terminal may equal metadata's watermark while Serve is asynchronously
-        // finalizing that very turn. It is not an older terminal.
-        Assert.True(await recovery.ObserveTerminalAsync(Terminal(90), CancellationToken.None));
-        Assert.Equal(new long[] { 5, 90 }, installed);
-        Assert.False(recovery.Required);
-    }
-
-    [Fact]
-    public async Task IncompleteHistoryHasFiniteReadsAndNeverUnlocksInput()
-    {
-        var count = 0;
-        var installed = new List<long>();
-        var recovery = Recovery(_ => { count++; return Task.FromResult(History(5)); }, Metadata("running", 90), installed);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
-        Assert.Equal(7, count); // Initial history plus at most six settlement reads.
-        Assert.True(recovery.Required);
-        Assert.Equal(new long[] { 5 }, installed);
-    }
-
-    [Fact]
-    public async Task ClosingSessionDoesNotPretendArchiveIsSettled()
-    {
-        var installed = new List<long>();
-        var recovery = Recovery(_ => Task.FromResult(History(5)), Metadata("ended", 9), installed);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.True(recovery.Required);
-        Assert.False(await recovery.ObserveTerminalAsync(Event("session.ended", 9), CancellationToken.None));
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task ReplacedConnectionRejectsLateHistoryWithoutInstallation()
-    {
-        var current = true;
-        var installed = new List<long>();
-        var recovery = Recovery(_ => { current = false; return Task.FromResult(History(5)); }, Metadata("idle", 5), installed,
-            isCurrent: () => current);
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.RecoverGapAsync(CancellationToken.None));
-        Assert.Empty(installed);
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task ReplacedConnectionRejectsLateTerminalHistory()
-    {
-        var current = true;
-        var installed = new List<long>();
-        var reads = 0;
-        var recovery = Recovery(_ =>
-        {
-            if (++reads == 1) return Task.FromResult(History(5));
-            current = false;
-            return Task.FromResult(History(91));
-        }, Metadata("running", 90), installed, isCurrent: () => current);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
-        Assert.Equal(new long[] { 5 }, installed);
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task SettlementDeadlinePreservesIncompleteState()
-    {
-        var reads = 0;
-        var installed = new List<long>();
-        var recovery = Recovery(async token =>
-        {
-            if (++reads == 1) return History(5);
-            await Task.Delay(Timeout.InfiniteTimeSpan, token);
-            return History(91);
-        }, Metadata("running", 90), installed, deadline: TimeSpan.FromMilliseconds(20));
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
-        Assert.True(recovery.Required);
-        Assert.Equal(new long[] { 5 }, installed);
-    }
-
-    [Fact]
-    public async Task CallerCancellationIsNotSwallowedAsSettlementTimeout()
-    {
-        var reads = 0;
-        var installed = new List<long>();
-        using var cancelled = new CancellationTokenSource();
-        var recovery = Recovery(async token =>
-        {
-            if (++reads == 1) return History(5);
-            cancelled.Cancel();
-            await Task.Delay(Timeout.InfiniteTimeSpan, token);
-            return History(91);
-        }, Metadata("running", 90), installed);
-        await recovery.RecoverGapAsync(cancelled.Token);
-
-        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.ObserveTerminalAsync(Terminal(91), cancelled.Token));
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task ForeignHistoryCannotChangePresentation()
-    {
-        var installed = new List<long>();
-        var recovery = Recovery(_ => Task.FromResult(Json("{\"sessionId\":\"other\",\"lastSeq\":5,\"messages\":[]}")), Metadata("idle", 5), installed);
-
-        await Assert.ThrowsAsync<InvalidOperationException>(() => recovery.RecoverGapAsync(CancellationToken.None));
-        Assert.Empty(installed);
-    }
-
-    [Fact]
-    public async Task FailedGapReadCannotLetAnUnboundOldTerminalUnlockInput()
-    {
-        var reads = 0;
-        var recovery = Recovery(_ =>
-        {
-            reads++;
-            throw new IOException("fixture_read_failed");
-        }, Metadata("running", 90), new List<long>());
-        await Assert.ThrowsAsync<IOException>(() => recovery.RecoverGapAsync(CancellationToken.None));
-
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(80), CancellationToken.None));
-        Assert.Equal(1, reads);
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task FailedRecoveryIsNotRetriedByEveryRetainedEvent()
-    {
-        var reads = 0;
-        var recovery = Recovery(_ =>
-        {
-            reads++;
-            throw new IOException("fixture_read_failed");
-        }, Metadata("idle", 50), new List<long>());
-        await Assert.ThrowsAsync<IOException>(() => recovery.RecoverGapAsync(CancellationToken.None));
-
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.Equal(1, reads);
-        Assert.True(recovery.Required);
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(50), CancellationToken.None));
-    }
-
-    [Fact]
-    public async Task RunningRecoveryStartsOnceUntilCoveringTerminalThenCanHandleANewGap()
-    {
-        var reads = new Queue<JsonElement>(new[] { History(5), History(91), History(91) });
-        var installed = new List<long>();
-        var recovery = Recovery(_ => Task.FromResult(reads.Dequeue()), Metadata("running", 90), installed);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.Equal(new long[] { 5 }, installed);
-        Assert.True(recovery.Required);
-        Assert.True(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
-        Assert.False(recovery.Required);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        Assert.Equal(new long[] { 5, 91, 91 }, installed);
-        Assert.True(recovery.Required);
-    }
-
-    [Fact]
-    public async Task NewAuthoritativeEpochGapReplacesPendingOldTerminalFloor()
-    {
+        using var fixture = new Fixture();
         using var view = new SessionView();
-        var histories = new Queue<JsonElement>(new[] { History(5), History(1), History(3) });
-        var metadata = new Queue<JsonElement>(new[] { Metadata("running", 90), Metadata("running", 2) });
-        var recovery = new ExampleEventRecovery("s", _ => Task.FromResult(histories.Dequeue()),
-            _ => Task.FromResult(metadata.Dequeue()), history =>
-            {
-                view.RestoreHistory(history, "s");
-                return Task.CompletedTask;
-            }, () => true);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        Assert.True(recovery.Required);
-        view.Apply(new AgentEvent("server.replay.gap", null,
-            Json("""{"sessionId":"s","type":"server.replay.gap","reason":"ahead_of_log"}""")));
-
-        await recovery.RecoverGapAsync(CancellationToken.None, newReplayGap: true);
-        Assert.Equal(1, recovery.HistorySequence);
-        Assert.True(recovery.Required);
-        view.Apply(Event("turn.started", 2));
-        view.Apply(Terminal(3));
-        Assert.True(await recovery.ObserveTerminalAsync(Terminal(3), CancellationToken.None));
-
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        Assert.True(await recovery.RecoverAsync());
         Assert.False(recovery.Required);
-        Assert.Equal(3, recovery.HistorySequence);
+        Assert.Equal(10, recovery.ObservationSequence);
+        Assert.Equal("unknown", view.Snapshot.Status); // no invented terminal event
         Assert.False(view.Snapshot.HasEventGap);
-        Assert.Equal("idle", view.Snapshot.Status);
-        Assert.Empty(histories);
-        Assert.Empty(metadata);
+        Assert.Contains("tail", SessionViewTextFormatter.Format(view.Snapshot));
+        var request = Assert.Single(fixture.Handler.Paths);
+        Assert.Contains("projection=recovery", request);
+        Assert.Contains("maxMessages=128", request);
+        Assert.Contains("maxBytes=262144", request);
+    }
+
+    [Theory]
+    [InlineData("recovery_projection_pending")]
+    [InlineData("recovery_projection_unsupported")]
+    [InlineData("recovery_projection_stale")]
+    [InlineData("recovery_projection_limit")]
+    public async Task UnavailableProjectionDoesNotDownloadHistoryOrPoll(string code)
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, code);
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        Assert.False(await recovery.RecoverAsync());
+        for (var i = 0; i < 8; i++) await recovery.AfterEventAsync(Event("tool.progress", i + 20), CancellationToken.None);
+        Assert.Single(fixture.Handler.Paths);
+        Assert.True(recovery.Required);
+        Assert.Equal(code, recovery.BlockedReason);
+        Assert.Equal("unknown", view.Snapshot.Status);
     }
 
     [Fact]
-    public async Task FailedNewEpochRecoveryCannotReuseThePreviousTerminalFloor()
+    public async Task SameConnectionLateHttpCannotOverwriteNewSseOrReopenApproval()
     {
-        var reads = 0;
-        var recovery = Recovery(_ => ++reads == 1 ? Task.FromResult(History(5)) : throw new IOException("new_epoch_history_failed"),
-            Metadata("running", 90), new List<long>());
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        await Assert.ThrowsAsync<IOException>(() => recovery.RecoverGapAsync(CancellationToken.None, newReplayGap: true));
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.False(await recovery.ObserveTerminalAsync(Terminal(91), CancellationToken.None));
-        Assert.Equal(2, reads);
+        using var fixture = new Fixture();
+        var pending = new TaskCompletionSource<HttpResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        fixture.Handler.Respond = (_, _) => pending.Task;
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        var read = recovery.RecoverAsync();
+        await fixture.Handler.Entered.Task;
+        view.Apply(Event("turn.started", 11));
+        view.Apply(Event("server.permission.request", 12, "\"requestId\":\"new\",\"digest\":\"new-digest\""));
+        view.Apply(Event("server.permission.closed", 13, "\"requestId\":\"new\""));
+        pending.SetResult(Response(Projection(-1)));
+        var error = await Assert.ThrowsAsync<TansrProtocolException>(() => read);
+        Assert.Equal("recovery_projection_stale", error.Code);
+        Assert.Equal(13, view.Snapshot.LastSequence);
+        Assert.Empty(view.Snapshot.PendingRequests);
         Assert.True(recovery.Required);
     }
 
     [Fact]
-    public async Task IncompleteProjectionHistoryLeavesRecoveryLockedWithoutRepeatedReads()
+    public async Task PendingRecoveryKeepsActiveBlocksToolsAndNewApprovalUsable()
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        using var view = new SessionView();
+        view.Apply(Event("turn.started", 1));
+        view.Apply(Event("msg.block.start", 2, "\"index\":0,\"blockType\":\"text\""));
+        view.Apply(Event("msg.text.delta", 3, "\"index\":0,\"text\":\"before\""));
+        view.Apply(Event("tool.started", 4, "\"toolCallId\":\"call\",\"name\":\"Read\""));
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        Assert.False(await recovery.RecoverAsync());
+        view.Apply(Event("server.permission.request", 5, "\"requestId\":\"fresh\",\"digest\":\"d\""));
+        view.Apply(Event("msg.text.delta", 6, "\"index\":0,\"text\":\"-after\""));
+        view.Apply(Event("msg.block.end", 7, "\"index\":0"));
+        Assert.Contains("before-after", SessionViewTextFormatter.Format(view.Snapshot));
+        Assert.DoesNotContain(view.Snapshot.Notices, n => n.Code == "orphan_delta");
+        Assert.Single(view.Snapshot.PendingRequests);
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public void ExplicitDroppedEventsInvalidateOldApprovalButPreserveNewLiveRequests()
     {
         using var view = new SessionView();
-        view.Apply(Event("session.events_dropped", 0));
-        var reads = 0;
-        var recovery = new ExampleEventRecovery("s", _ =>
-        {
-            reads++;
-            return Task.FromResult(Json("""{"sessionId":"s","lastSeq":5,"offset":0,"total":1,"messages":[]}"""));
-        }, _ => Task.FromResult(Metadata("idle", 5)), history =>
-        {
-            view.RestoreHistory(history, "s");
-            return Task.CompletedTask;
-        }, () => true);
-
-        var error = await Assert.ThrowsAsync<Tansr.Sdk.Client.TansrProtocolException>(() => recovery.RecoverGapAsync(CancellationToken.None));
-        await recovery.RecoverGapAsync(CancellationToken.None);
-
-        Assert.Equal("incomplete_history_snapshot", error.Code);
-        Assert.Equal(1, reads);
-        Assert.True(recovery.Required);
-        Assert.True(view.Snapshot.HasEventGap);
+        view.Apply(Event("turn.started", 1));
+        view.Apply(Event("server.permission.request", 2, "\"requestId\":\"old\",\"digest\":\"d\""));
+        view.Apply(Event("session.events_dropped", 3));
+        Assert.Empty(view.Snapshot.PendingRequests);
+        Assert.Equal("unknown", view.Snapshot.Status);
+        view.Apply(Event("server.permission.request", 4, "\"requestId\":\"fresh\",\"digest\":\"d2\""));
+        Assert.Equal("fresh", Assert.Single(view.Snapshot.PendingRequests).Id);
     }
 
     [Fact]
-    public async Task TerminalSettlementKeepsObservedErrorAndRecoversNarratorInSameInstall()
+    public async Task ProjectionNeverRestoresHistoricalPermissionsOrUsage()
     {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        view.Apply(Event("cost.usage.updated", 0, "\"usage\":{\"inputTokens\":7,\"outputTokens\":3}"));
+        view.Apply(Event("server.permission.request", 1, "\"requestId\":\"old\",\"digest\":\"d\""));
+        view.Apply(Gap("evicted"));
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await recovery.RecoverAsync();
+        Assert.Empty(view.Snapshot.PendingRequests);
+        Assert.Equal(10, view.Snapshot.SessionTokens);
+        Assert.Equal(1, view.Snapshot.UsageRequests);
+        view.Apply(Event("cost.usage.updated", 11, "\"usage\":{\"inputTokens\":2}"));
+        Assert.Equal(12, view.Snapshot.SessionTokens);
+        Assert.Equal(2, view.Snapshot.UsageRequests);
+    }
+
+    [Fact]
+    public async Task TerminalReadBindsKnownEpochAndCoversSettledBodyWithoutPolling()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await recovery.RecoverAsync();
+        view.Apply(Event("turn.started", 11));
+        view.Apply(Event("session.events_dropped", 12));
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        await recovery.AfterEventAsync(Event("session.events_dropped", 12), CancellationToken.None);
+        var terminal = Event("turn.aborted", 13, "\"reason\":\"internal_error\"");
+        view.Apply(terminal);
+        fixture.Handler.Respond = (request, _) => Task.FromResult(Response(Projection(13, first: 1, history: 13, expected: 1, minimum: 13, terminal: 13)));
+        await recovery.AfterEventAsync(terminal, CancellationToken.None);
+        Assert.Contains("expectedFirstSeq=1&minTerminalSeq=13", fixture.Handler.Paths.Last());
+        Assert.False(recovery.Required);
+        Assert.Equal("error", view.Snapshot.Status);
+        Assert.Equal(3, fixture.Handler.Paths.Count);
+    }
+
+    [Fact]
+    public async Task NewEpochGapNeverReusesPreviousTerminalFence()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await recovery.RecoverAsync();
+        view.Apply(Gap("ahead_of_log"));
+        fixture.Handler.Respond = (_, _) => Task.FromResult(Response(Projection(-1, first: 2, history: 3)));
+        await recovery.AfterEventAsync(Gap("ahead_of_log"), CancellationToken.None);
+        Assert.DoesNotContain("expectedFirstSeq", fixture.Handler.Paths.Last());
+        Assert.DoesNotContain("minTerminalSeq", fixture.Handler.Paths.Last());
+        Assert.Equal(3, view.Snapshot.LastSequence);
+        Assert.False(view.Snapshot.HasEventGap);
+        view.Apply(Event("turn.started", 4));
+        Assert.Equal("thinking", view.Snapshot.Status);
+    }
+
+    [Fact]
+    public async Task NewEpochPendingAcceptsFreshApprovalWithoutJoiningOldRuntimeOrClearingGap()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        view.Apply(Event("turn.started", 100));
+        view.Apply(Event("msg.block.start", 101, "\"index\":0,\"blockType\":\"text\""));
+        view.Apply(Event("msg.text.delta", 102, "\"index\":0,\"text\":\"old-body\""));
+        view.Apply(Event("tool.started", 103, "\"toolCallId\":\"old-call\",\"name\":\"Read\""));
+        view.Apply(Event("cost.usage.updated", 104, "\"usage\":{\"inputTokens\":7}"));
+        view.Apply(Event("server.permission.request", 105, "\"requestId\":\"old\",\"digest\":\"old-digest\""));
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        for (var epoch = 0; epoch < 2; epoch++)
+        {
+            var gap = Gap("ahead_of_log"); view.Apply(gap);
+            await recovery.AfterEventAsync(gap, CancellationToken.None);
+            Assert.Empty(view.Snapshot.PendingRequests);
+            Assert.Empty(view.Snapshot.Tools);
+            Assert.True(view.Snapshot.HasEventGap);
+            Assert.True(recovery.Required);
+            view.Apply(Event("server.permission.request", 1, "\"requestId\":\"fresh-" + epoch + "\",\"digest\":\"fresh\""));
+            Assert.Equal("fresh-" + epoch, Assert.Single(view.Snapshot.PendingRequests).Id);
+            view.Apply(Event("msg.text.delta", 2, "\"index\":0,\"text\":\"must-not-join\""));
+            Assert.DoesNotContain("old-bodymust-not-join", SessionViewTextFormatter.Format(view.Snapshot));
+            Assert.Equal(7, view.Snapshot.SessionTokens);
+        }
+        view.Apply(Event("server.permission.closed", 3, "\"requestId\":\"fresh-1\""));
+        Assert.Empty(view.Snapshot.PendingRequests);
+        var terminal = Event("turn.aborted", 4, "\"reason\":\"user_canceled\""); view.Apply(terminal);
+        fixture.Handler.Respond = (_, _) => Task.FromResult(Response(Projection(4, first: 1, history: 4, terminal: 4)));
+        await recovery.AfterEventAsync(terminal, CancellationToken.None);
+        Assert.False(recovery.Required);
+        Assert.False(view.Snapshot.HasEventGap);
+        Assert.DoesNotContain("minTerminalSeq", fixture.Handler.Paths.Last());
+        Assert.Empty(view.Snapshot.PendingRequests);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task TerminalSettlementDoesNotSwallowCallbackCancellation(bool afterInstall)
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var fail = false;
+        var failure = new OperationCanceledException("synthetic observer cancellation");
+        var recovery = new SessionRecovery(fixture.Session, view,
+            installed: (_, _) => afterInstall && fail ? Task.FromException(failure) : Task.CompletedTask,
+            changed: (_, _) => !afterInstall && fail ? Task.FromException(failure) : Task.CompletedTask);
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        await recovery.RecoverAsync();
+        var terminal = Event("turn.completed", 1); view.Apply(terminal);
+        fixture.Handler.Respond = (_, _) => Task.FromResult(Response(Projection(1)));
+        fail = true;
+        Assert.Same(failure, await Record.ExceptionAsync(() => recovery.AfterEventAsync(terminal, CancellationToken.None)));
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task TerminalBeforeArchiveSettlementUsesOnlyBoundedProjectionReads()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await recovery.RecoverAsync();
+        view.Apply(Event("session.events_dropped", 11));
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        await recovery.AfterEventAsync(Event("session.events_dropped", 11), CancellationToken.None);
+        var terminal = Event("turn.completed", 12);
+        view.Apply(terminal);
+        var reads = 0;
+        fixture.Handler.Respond = (_, _) => ++reads == 1 ? throw new TansrHttpException(409, "recovery_projection_pending") :
+            Task.FromResult(Response(Projection(12, first: 1, history: 12, expected: 1, minimum: 12)));
+        await recovery.AfterEventAsync(terminal, CancellationToken.None);
+        Assert.Equal(2, reads);
+        Assert.False(recovery.Required);
+        Assert.All(fixture.Handler.Paths, path => Assert.Contains("projection=recovery", path));
+    }
+
+    [Fact]
+    public async Task SettlementBudgetExhaustionKeepsRequiredWithoutFullHistoryFallback()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        fixture.Handler.Respond = (_, _) => throw new TansrHttpException(409, "recovery_projection_pending");
+        await recovery.RecoverAsync();
+        var terminal = Event("turn.completed", 12); view.Apply(terminal);
+        await recovery.AfterEventAsync(terminal, CancellationToken.None);
+        Assert.Equal(7, fixture.Handler.Paths.Count); // initial read plus six terminal-settlement reads
+        Assert.True(recovery.Required);
+        Assert.Equal("recovery_projection_pending", recovery.BlockedReason);
+    }
+
+    [Fact]
+    public async Task CallerCancellationCannotInstallLateSuccessfulResponse()
+    {
+        using var fixture = new Fixture();
+        using var canceled = new CancellationTokenSource();
+        fixture.Handler.Respond = (_, _) => { canceled.Cancel(); return Task.FromResult(Response(Projection(-1))); };
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => recovery.RecoverAsync(canceled.Token));
+        Assert.True(recovery.Required);
+        Assert.Empty(view.Snapshot.Messages);
+    }
+
+    [Theory]
+    [InlineData("sessionId", "\"foreign\"")]
+    [InlineData("requestedAfterSeq", "99")]
+    [InlineData("requestedFirstSeq", "1")]
+    [InlineData("firstSeq", "11")]
+    [InlineData("historyLastSeq", "12")]
+    [InlineData("historyGeneration", "\"1\"")]
+    [InlineData("windowComplete", "false")]
+    [InlineData("historyComplete", "true")]
+    [InlineData("status", "\"running\"")]
+    [InlineData("nextOffset", "99")]
+    [InlineData("terminal", "{\"seq\":99,\"type\":\"turn.completed\"}")]
+    public async Task InvalidProofNeverPartiallyInstalls(string field, string replacement)
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.Respond = (_, _) => { var json = Projection(-1); json[field] = JsonNode.Parse(replacement); return Task.FromResult(Response(json)); };
+        using var view = new SessionView();
+        view.AppendUserMessage("preserve");
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await Assert.ThrowsAsync<TansrProtocolException>(() => recovery.RecoverAsync());
+        Assert.Contains("preserve", SessionViewTextFormatter.Format(view.Snapshot));
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task ResponseBodyLimitIsEnforcedBeforeProjectionInstallation()
+    {
+        using var fixture = new Fixture();
+        fixture.Handler.Respond = (_, _) => { var value = Projection(-1); value["padding"] = new string('x', 300000); return Task.FromResult(Response(value)); };
+        using var view = new SessionView();
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view);
+        await Assert.ThrowsAnyAsync<TansrException>(() => recovery.RecoverAsync());
+        Assert.Empty(view.Snapshot.Messages);
+        Assert.True(recovery.Required);
+    }
+
+    [Fact]
+    public async Task PartialRecoveryWindowDoesNotRelaxLegacyFullHistoryContract()
+    {
+        using var fixture = new Fixture();
+        using var view = new SessionView();
+        var projection = await fixture.Session.GetRecoveryProjectionAsync();
+        Assert.Throws<TansrProtocolException>(() => view.RestoreHistory(projection.Data, "s"));
+        view.RestoreRecoveryProjection(projection, view.Snapshot.Version);
+        Assert.True(view.Snapshot.PresentationTruncated);
+    }
+
+    [Fact]
+    public async Task NarratorUsesSameObservationOriginWithoutInventingTerminal()
+    {
+        using var fixture = new Fixture();
         using var view = new SessionView();
         var lines = new List<string>();
         using var narrator = new SessionNarrator(lines.Add);
-        var gap = new AgentEvent("server.replay.gap", null,
-            Json("""{"sessionId":"s","type":"server.replay.gap","reason":"ahead_of_log"}"""));
-        view.Apply(gap); narrator.Apply(gap);
-        var reads = new Queue<JsonElement>(new[] { History(5), History(8) });
-        var recovery = new ExampleEventRecovery("s", _ => Task.FromResult(reads.Dequeue()),
-            _ => Task.FromResult(Metadata("running", 6)), history =>
-            {
-                view.RestoreHistory(history, "s");
-                narrator.RestoreHistory(history, "s");
-                return Task.CompletedTask;
-            }, () => true);
-        await recovery.RecoverGapAsync(CancellationToken.None);
-        var started = Event("turn.started", 6);
-        var error = new AgentEvent("turn.error", "7",
-            Json("""{"sessionId":"s","type":"turn.error","seq":7,"scope":"kernel","recoverable":false,"message":"reconciliation_required"}"""));
-        var aborted = new AgentEvent("turn.aborted", "8",
-            Json("""{"sessionId":"s","type":"turn.aborted","seq":8,"reason":"internal_error"}"""));
-        foreach (var item in new[] { started, error, aborted }) { view.Apply(item); narrator.Apply(item); }
-
-        Assert.True(await recovery.ObserveTerminalAsync(aborted, CancellationToken.None));
-
-        Assert.False(recovery.Required);
-        Assert.Equal("error", view.Snapshot.Status);
-        Assert.Equal("reconciliation_required", view.Snapshot.LastError?.Message);
-        Assert.Equal(4, lines.Count);
-        Assert.Contains(lines, line => line.Contains("turn error [kernel]"));
-        Assert.Contains(lines, line => line.Contains("turn aborted (internal_error)"));
-        Assert.Empty(view.Snapshot.PendingRequests);
-        Assert.Equal(0, view.Snapshot.UsageRequests);
+        narrator.Apply(Gap("ahead_of_log"));
+        var recovery = ExampleEventRecovery.Create(fixture.Session, view, narrator);
+        await recovery.RecoverAsync();
+        Assert.DoesNotContain(lines, line => line.Contains("completed") || line.Contains("aborted"));
+        narrator.Apply(Event("turn.started", 11));
+        Assert.Contains(lines, line => line.Contains("turn started"));
     }
 
-    private static ExampleEventRecovery Recovery(Func<CancellationToken, Task<JsonElement>> history, JsonElement metadata,
-        List<long> installed, Func<bool>? isCurrent = null, TimeSpan? deadline = null) =>
-        new("s", history, _ => Task.FromResult(metadata), value =>
-        {
-            installed.Add(value.GetProperty("lastSeq").GetInt64());
-            return Task.CompletedTask;
-        }, isCurrent ?? (() => true), (_, _) => Task.CompletedTask, deadline);
-
-    private static JsonElement History(long sequence) => Json("{\"sessionId\":\"s\",\"lastSeq\":" + sequence + ",\"messages\":[]}");
-    private static JsonElement Metadata(string status, long sequence) => Json("{\"sessionId\":\"s\",\"status\":\"" + status + "\",\"lastSeq\":" + sequence + "}");
-    private static AgentEvent Terminal(long sequence) => Event("turn.completed", sequence);
-    private static AgentEvent Event(string type, long sequence) => new(type, sequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
-        Json("{\"type\":\"" + type + "\",\"sessionId\":\"s\",\"seq\":" + sequence + "}"));
+    internal static JsonObject Projection(long after, long first = 1, long history = 10, long? expected = null, long? minimum = null, long? terminal = null) => new()
+    {
+        ["kind"] = "tansr-session-recovery-projection-v1", ["sessionId"] = "s", ["requestedAfterSeq"] = after,
+        ["requestedFirstSeq"] = expected, ["requestedMinTerminalSeq"] = minimum,
+        ["firstSeq"] = first, ["lastSeq"] = history, ["historyGeneration"] = 1, ["historyLastSeq"] = history,
+        ["messages"] = new JsonArray(new JsonObject { ["role"] = "assistant", ["blocks"] = new JsonArray(new JsonObject { ["t"] = "text", ["text"] = "tail" }) }),
+        ["total"] = 100, ["offset"] = 99, ["nextOffset"] = 100, ["windowComplete"] = true, ["historyComplete"] = false,
+        ["terminal"] = terminal.HasValue ? new JsonObject { ["seq"] = terminal.Value, ["type"] = "turn.aborted" } : null,
+        ["status"] = "idle"
+    };
+    private static HttpResponseMessage Response(JsonNode value) => new(HttpStatusCode.OK)
+    { Content = new StringContent(value.ToJsonString(), Encoding.UTF8, "application/json") };
+    private static AgentEvent Gap(string reason) => new("server.replay.gap", null, Json("{\"sessionId\":\"s\",\"type\":\"server.replay.gap\",\"reason\":\"" + reason + "\"}"));
+    private static AgentEvent Event(string name, long sequence, string? fields = null) => new(name, sequence.ToString(),
+        Json("{\"sessionId\":\"s\",\"type\":\"" + name + "\",\"seq\":" + sequence + (fields == null ? "" : "," + fields) + "}"));
     private static JsonElement Json(string text) { using var document = JsonDocument.Parse(text); return document.RootElement.Clone(); }
+    private sealed class Fixture : IDisposable
+    {
+        internal readonly Handler Handler = new();
+        private readonly HttpClient http;
+        internal readonly TansrClient Client;
+        internal readonly AgentSession Session;
+        internal Fixture()
+        {
+            http = UnifiedStamp.Client(Handler);
+            Client = new TansrClient(new TansrClientOptions { BaseUri = new Uri("https://synthetic.invalid"), TokenProvider = _ => Task.FromResult("synthetic"), PrincipalProvider = () => "app/user" }, http);
+            Session = new AgentSession(Client, "s", -1, true);
+        }
+        public void Dispose() { Client.Dispose(); http.Dispose(); }
+    }
+    private sealed class Handler : HttpMessageHandler
+    {
+        internal readonly List<string> Paths = new();
+        internal readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>>? Respond;
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Paths.Add(request.RequestUri!.PathAndQuery); Entered.TrySetResult();
+            if (Respond != null) return Respond(request, cancellationToken);
+            var query = request.RequestUri.Query.TrimStart('?').Split('&').Select(x => x.Split('=')).ToDictionary(x => x[0], x => x[1]);
+            Assert.Equal("recovery", query["projection"]);
+            return Task.FromResult(Response(Projection(long.Parse(query["afterSeq"]))));
+        }
+    }
 }

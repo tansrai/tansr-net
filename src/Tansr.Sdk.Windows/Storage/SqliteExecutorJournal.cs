@@ -51,16 +51,25 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
         _compactCompletedReceipts = options.CompactCompletedReceipts;
     }
 
-    public static Task<SqliteExecutorJournal> OpenAsync(SqliteExecutorJournalOptions options, CancellationToken cancellationToken = default)
+    public static Task<SqliteExecutorJournal> OpenAsync(SqliteExecutorJournalOptions options, CancellationToken cancellationToken = default) => OpenCore(options, cancellationToken);
+
+    /// <summary>显式新认证来源入口；要求原密钥，旧库不自动迁移。仅按需验证原键，完整检查由 AuditAsync 提供。</summary>
+    public static Task<SqliteExecutorJournal> OpenSourceAsync(SqliteExecutorJournalOptions options, CancellationToken cancellationToken = default) => OpenCore(options, cancellationToken, ExecutorJournalSqliteLayout.AuthenticatedIndexed);
+
+    private static Task<SqliteExecutorJournal> OpenCore(SqliteExecutorJournalOptions options, CancellationToken cancellationToken, ExecutorJournalSqliteLayout? layout = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (options == null || options.ReadContext == null || options.MaxOperations < 1 || options.MaxOperations > 1000000 ||
             options.MaxStoredBytes < 1 || options.MaxStoredBytes > 1073741824 || options.MaxPages < 8 || options.MaxPages > 262144 ||
             (options.Mode != StorageOpenMode.Create && options.Mode != StorageOpenMode.Reopen)) throw new StorageException("invalid_input");
+        var fixedLayout = layout ?? options.Layout;
+        if ((fixedLayout != ExecutorJournalSqliteLayout.LegacyAudited && fixedLayout != ExecutorJournalSqliteLayout.AuthenticatedIndexed) ||
+            fixedLayout == ExecutorJournalSqliteLayout.AuthenticatedIndexed && options.KeyProvider == null) throw new StorageException("invalid_input");
         var fixedOptions = new SqliteExecutorJournalOptions
         {
             Path = StorageFileIdentity.FullPath(options.Path),
             Mode = options.Mode,
+            Layout = fixedLayout,
             CompactCompletedReceipts = options.CompactCompletedReceipts,
             KeyProvider = options.KeyProvider,
             ApplicationScopeId = options.ApplicationScopeId,
@@ -114,19 +123,25 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
                     }
                     journal.Exec("INSERT INTO metadata VALUES (1,$value)", ("$value", metadata));
                     journal.Exec("INSERT INTO state VALUES (1,$bytes,0)", ("$bytes", Bytes(metadata) + 128));
+                    if (journal.Indexed)
+                    {
+                        foreach (var sql in SourceSchema) journal.Exec(sql);
+                        journal._sourceLoaded = true;
+                    }
                 }, () => Require(Same(originalScope, ReadScope(fixedOptions.ReadContext, fixedOptions.ApplicationScopeId, fixedOptions.EndUserId)), "context_changed"), false);
             }
             else
             {
                 Require(Convert.ToInt64(journal.Scalar("PRAGMA page_size"), CultureInfo.InvariantCulture) == 4096);
-                Require((string?)journal.Scalar("PRAGMA quick_check") == "ok");
+                if (!journal.Indexed) Require((string?)journal.Scalar("PRAGMA quick_check") == "ok");
                 Require((string?)journal.Scalar("PRAGMA journal_mode") == "wal");
                 journal.Exec("BEGIN EXCLUSIVE");
-                try { journal.Initialize(); journal.Exec("COMMIT"); }
+                try { if (journal.Indexed) journal.InitializeSource(); else journal.Initialize(); journal.Exec("COMMIT"); }
                 catch { try { journal.Exec("ROLLBACK"); } catch { } throw; }
             }
             Require(Convert.ToInt64(journal.Scalar("PRAGMA max_page_count=" + fixedOptions.MaxPages.ToString(CultureInfo.InvariantCulture)), CultureInfo.InvariantCulture) == fixedOptions.MaxPages, "capacity_exceeded");
-            journal.Initialize();
+            if (journal.Indexed) { if (fixedOptions.Mode == StorageOpenMode.Create) journal.InitializeSource(); }
+            else journal.Initialize();
             Require(Same(originalScope, ReadScope(fixedOptions.ReadContext, fixedOptions.ApplicationScopeId, fixedOptions.EndUserId)), "context_changed");
             return Task.FromResult(journal);
         }
@@ -154,6 +169,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
             Require(state.Count < _maximumOperations && state.Bytes + added <= _maximumBytes, "capacity_exceeded");
             Exec("INSERT INTO operations VALUES ($id,$operation,NULL,zeroblob($reserve))", ("$id", id), ("$operation", encoded), ("$reserve", StoredReceiptReserve));
             Exec("UPDATE state SET logical_bytes=$bytes,operation_count=$count WHERE id=1", ("$bytes", state.Bytes + added), ("$count", state.Count + 1));
+            SourceStoreRow(id, encoded, null, StoredReceiptReserve);
         }, check);
         return ExecutorJournalClaim.Claimed();
     }, cancellationToken));
@@ -176,6 +192,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
             {
                 var encoded = Encode("receipt", id, text);
                 int unused = StoredReceiptReserve - Bytes(encoded);
+                ReleaseSourceReserve(id);
                 Exec("UPDATE operations SET receipt=$receipt,reserve=zeroblob($reserve) WHERE id=$id",
                     ("$receipt", encoded), ("$reserve", _compactCompletedReceipts ? 0 : unused), ("$id", id));
                 if (_compactCompletedReceipts)
@@ -184,6 +201,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
                     var state = State(); Require(state.Bytes >= unused);
                     Exec("UPDATE state SET logical_bytes=$bytes WHERE id=1", ("$bytes", state.Bytes - unused));
                 }
+                SourceStoreRow(id, StoredSourceOperation(id), encoded, _compactCompletedReceipts ? 0 : unused, update: true);
             }, check);
             return null;
         }, cancellationToken);
@@ -201,12 +219,15 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
     public Task<IReadOnlyList<JsonElement>> OperationsAsync(string? afterOperationId = null, CancellationToken cancellationToken = default) => Task.FromResult(Run<IReadOnlyList<JsonElement>>((_scope, _check) =>
     {
         if (afterOperationId != null) WireJson.ValidateNamed("Id", StringValue(afterOperationId));
+        CheckSourceMembership(_check);
         var output = new List<JsonElement>(); int bytes = 0;
         using var command = Command("SELECT id,CASE WHEN length(CAST(operation AS BLOB))<=$maximum THEN operation ELSE NULL END FROM operations WHERE id>$after ORDER BY id LIMIT 128", ("$after", afterOperationId ?? ""), ("$maximum", StoredOperationMaximum));
         using var reader = command.ExecuteReader();
         while (reader.Read())
         {
-            Require(!reader.IsDBNull(1)); var text = Decode("operation", reader.GetString(0), reader.GetString(1), MaximumOperationBytes);
+            Require(!reader.IsDBNull(1));
+            SourceCheckOperation(reader.GetString(0), reader.GetString(1));
+            var text = Decode("operation", reader.GetString(0), reader.GetString(1), MaximumOperationBytes);
             if (bytes + Bytes(text) > 2 * MaximumOperationBytes) break;
             var op = ValidateOperation(Stored(text, "ExecutionOperation", MaximumOperationBytes));
             Require(reader.GetString(0) == op.GetProperty("operationId").GetString());
@@ -264,9 +285,12 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
     private void Transaction(Action work, Action check, bool refreshState = true)
     {
         bool begun = false, committing = false;
+        string? previousRoot = _sourceRoot; bool previousLoaded = _sourceLoaded;
         try
         {
-            Exec("BEGIN IMMEDIATE"); begun = true; work(); check(); committing = true; Exec("COMMIT"); begun = false;
+            Exec("BEGIN IMMEDIATE"); begun = true; _sourceTransaction = Indexed; work();
+            if (Indexed) SaveSourceAuthentication();
+            check(); committing = true; Exec("COMMIT"); begun = false;
             if (refreshState) { _committed = true; _known = State(); }
             committing = false;
         }
@@ -275,8 +299,10 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
             bool unknown = committing;
             if (begun) { try { if (SQLitePCL.raw.sqlite3_get_autocommit(_connection.Handle!) == 0) Exec("ROLLBACK"); } catch { unknown = true; } }
             if (unknown) { _uncertain = true; throw new StorageException("reconciliation_required"); }
+            _sourceRoot = previousRoot; _sourceLoaded = previousLoaded;
             throw;
         }
+        finally { _sourceTransaction = false; }
     }
 
     private void Initialize()
@@ -290,6 +316,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
         while (reader.Read())
         {
             var id = reader.GetString(0); var text = reader.GetString(1); var receipt = reader.IsDBNull(2) ? null : reader.GetString(2); int reserved = reader.GetInt32(3);
+            SourceCheckRow(id, text, receipt, reserved);
             Require(Bytes(id) <= 128 && Bytes(text) <= StoredOperationMaximum && reserved >= 0 && reserved <= StoredReceiptReserve);
             account += Bytes(id) + Bytes(text) + (receipt == null ? 0 : Bytes(receipt)) + reserved;
             text = Decode("operation", id, text, MaximumOperationBytes);
@@ -300,18 +327,19 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
             else ValidateStoredReceipt((text, receipt, reserved), op);
             Require(++count <= _maximumOperations && account <= _maximumBytes);
         }
-        Require(count == state.Count && account == state.Bytes); _known = state;
+        Require(count == state.Count && account == state.Bytes);
+        AuditSourceIndex(count); _known = state;
     }
 
     private void CheckFixed()
     {
         _parent.Check(); _file.Check();
-        using var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 5");
+        using var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' ORDER BY name LIMIT 8");
         using (var reader = command.ExecuteReader())
         {
             var found = new HashSet<string>(StringComparer.Ordinal);
-            while (reader.Read()) { Require(!reader.IsDBNull(0)); var sql = reader.GetString(0); Require(Schema.Contains(sql) || _cipher != null && sql == EncryptionSchema); found.Add(sql); }
-            Require(found.Count == Schema.Length + (_cipher == null ? 0 : 1));
+            while (reader.Read()) { Require(!reader.IsDBNull(0)); var sql = reader.GetString(0); Require(Schema.Contains(sql) || _cipher != null && sql == EncryptionSchema || Indexed && SourceSchema.Contains(sql)); found.Add(sql); }
+            Require(found.Count == Schema.Length + (_cipher == null ? 0 : 1) + (Indexed ? SourceSchema.Length : 0));
         }
         Require((string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=1048576") == _metadata, "identity_mismatch");
         if (_cipher != null)
@@ -320,6 +348,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
             var check = Scalar("SELECT key_check FROM encryption WHERE id=1 AND length(key_check)=28") as byte[];
             Require(check != null); _cipher.Open("key-check", check!);
         }
+        if (Indexed) { CheckSourceVersion(); if (!_sourceTransaction) LoadSourceAuthentication(); }
     }
 
     private (long Bytes, int Count) State()
@@ -332,9 +361,10 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
     private (string Operation, string? Receipt, int Reserved)? Row(string id)
     {
         using var command = Command("SELECT CASE WHEN length(CAST(operation AS BLOB))<=$operation THEN operation END, CASE WHEN length(CAST(receipt AS BLOB))<=$receipt THEN receipt END, length(reserve), receipt IS NOT NULL FROM operations WHERE id=$id", ("$id", id), ("$operation", StoredOperationMaximum), ("$receipt", StoredReceiptReserve));
-        using var reader = command.ExecuteReader(); if (!reader.Read()) return null;
+        using var reader = command.ExecuteReader(); if (!reader.Read()) { SourceCheckAbsent(id); return null; }
         Require(!reader.IsDBNull(0) && (!reader.GetBoolean(3) || !reader.IsDBNull(1)));
         var reserved = reader.GetInt32(2); Require(reserved >= 0 && reserved <= StoredReceiptReserve);
+        SourceCheckRow(id, reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1), reserved);
         return (Decode("operation", id, reader.GetString(0), MaximumOperationBytes), reader.IsDBNull(1) ? null : Decode("receipt", id, reader.GetString(1), ReceiptReserve), reserved);
     }
 
@@ -480,7 +510,7 @@ public sealed partial class SqliteExecutorJournal : IExecutorJournal, IEncrypted
     }
     private static string BuildMetadata(SqliteExecutorJournalOptions options, StorageFileIdentity parent, StorageFileIdentity file, string? keyId) => Canonical(Object(writer =>
     {
-        writer.WriteString("format", keyId == null ? options.CompactCompletedReceipts ? CompactFormat : Format : options.CompactCompletedReceipts ? EncryptedCompactFormat : EncryptedFormat);
+        writer.WriteString("format", options.Layout == ExecutorJournalSqliteLayout.AuthenticatedIndexed ? options.CompactCompletedReceipts ? IndexedCompactFormat : IndexedFormat : keyId == null ? options.CompactCompletedReceipts ? CompactFormat : Format : options.CompactCompletedReceipts ? EncryptedCompactFormat : EncryptedFormat);
         if (keyId != null) writer.WriteString("keyId", keyId);
         writer.WriteStartObject("identity"); writer.WriteStartObject("scope"); writer.WriteString("applicationScopeId", options.ApplicationScopeId); writer.WriteString("endUserId", options.EndUserId); writer.WriteEndObject(); writer.WriteString("executorId", options.ExecutorId); writer.WriteEndObject();
         writer.WriteStartObject("limits"); writer.WriteNumber("maxOperations", options.MaxOperations); writer.WriteNumber("maxStoredBytes", options.MaxStoredBytes); writer.WriteEndObject();

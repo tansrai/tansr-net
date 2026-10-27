@@ -7,20 +7,23 @@
   "apiManifest": {
     "contract": "unified-v1",
     "format": "tansr-api-manifest-v1",
-    "revision": 14,
-    "schemaHash": "b792dc53f45ca2b8fdc8438bd5b50d6d6c8a3eb08ac29920215d75a470349faf",
+    "revision": 19,
+    "schemaHash": "edd4b2f5e0dbd0d5f5107f7ab16246acbd293e5ea3477c8aefc6d7796c5eae5d",
     "sourceBranch": "main",
     "generated": "src/Tansr.Sdk/Api/ApiRoutes.generated.cs",
     "generator": "scripts/generate-api-routes.mjs",
-    "note": "PST-SERVE-01 approved optional custody profile; source-managed contract bytes are locked to the merged tansr-cli main commit below; legacy SDK2 wire fixtures retain their explicit original source revisions.",
-    "sourceWorktreeSnapshot": false
+    "note": "INIT bounded recovery approved increment. API manifest, agent-session source and error map are pinned to the exact locally committed CLI contract cf791e75. This does not claim that the uncommitted implementation candidate or this NET worktree has been merged or pushed. Other wire locks retain their original revisions.",
+    "sourceWorktreeSnapshot": false,
+    "sourceRevision": "cf791e753b72dbb4c16b4d45ce5f72f264791cf4"
   },
   "files": [
     {
       "snapshot": "contract/api-manifest.json",
       "source": "packages/server/contract/api-manifest.json",
-      "bytes": 95048,
-      "sha256": "bea3853f323ffad3048eaec70271bc5d337d1f6a47cb690a2be624c7b9058b59"
+      "bytes": 96165,
+      "sha256": "0be7027afe995e1157b028cbc4b2903d2ab033866908354bcd416f61ba6fcf85",
+      "sourceWorktreeSnapshot": false,
+      "sourceRevision": "cf791e753b72dbb4c16b4d45ce5f72f264791cf4"
     },
     {
       "snapshot": "contract/unified-v1.schema.json",
@@ -90,6 +93,29 @@
       "source": "packages/protocol/src/persistence-custody.ts",
       "bytes": 2358,
       "sha256": "b9cb8aecf53895af1234ed07916ffb0e899ddacfb70d1f84f062a846ff6d9669"
+    },
+    {
+      "snapshot": "contract/reference/agent-session-v1.contract.ts.txt",
+      "sha256": "5daf7802f1cdc491b2829fcb3d5859322994cf29ad1c02ffb152ca6d51b52b3f",
+      "sourceWorktreeSnapshot": false,
+      "bytes": 49109,
+      "source": "packages/server/src/v2/contract.ts",
+      "sourceRevision": "cf791e753b72dbb4c16b4d45ce5f72f264791cf4"
+    },
+    {
+      "snapshot": "contract/api-error-map.json",
+      "sha256": "33a6ff04ac1ffb73f40eb082e8f069452e0d2f304deca5fd7910f3069d4ccbae",
+      "sourceWorktreeSnapshot": false,
+      "bytes": 11219,
+      "source": "packages/server/contract/api-error-map.json",
+      "sourceRevision": "cf791e753b72dbb4c16b4d45ce5f72f264791cf4"
     }
-  ]
+  ],
+  "apiErrorMap": {
+    "sourceWorktreeSnapshot": false,
+    "factsHash": "be9948bcca06cad69a0142f24e18536aab193977e8358241f5b036032da98599",
+    "snapshot": "contract/api-error-map.json",
+    "revision": 5,
+    "sourceRevision": "cf791e753b72dbb4c16b4d45ce5f72f264791cf4"
+  }
 }

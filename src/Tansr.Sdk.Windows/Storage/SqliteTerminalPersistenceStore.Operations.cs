@@ -42,16 +42,17 @@ public sealed partial class SqliteTerminalPersistenceStore
                 string part = S(fixedRequest, "part"); var body = root.GetProperty("body");
                 if (part == "body-page")
                 {
-                    int p = N(fixedRequest, "pageIndex"); var hashes = body.GetProperty("pageHashes"); Need(p < hashes.GetArrayLength(), "invalid_request"); string hash = hashes[p].GetString()!;
-                    int length = checked((int)Number("SELECT bytes FROM objects WHERE kind='body-page' AND hash=$hash", ("$hash", hash))); Require(length >= 1 && length <= 12288);
-                    var raw = ReadObject(new ObjectRef("body-page", hash, length, false));
+                    int p = N(fixedRequest, "pageIndex"); Need(p < body.GetProperty("pageHashes").GetArrayLength(), "invalid_request");
+                    var raw = ReadBodyPage(root, p).Raw;
                     return Response(fixedRequest, w => { w.WriteString("part", part); w.WriteString("commitRoot", S(root, "commitRoot")); w.WriteNumber("pageIndex", p); WritePayload(w, raw); });
                 }
                 int offset = N(fixedRequest, "offset"), requested = N(fixedRequest, "length"), total = N(body, "byteLength"); Need(offset <= total, "invalid_request");
-                var bytes = new byte[Math.Min(requested, total - offset)]; var references = BodyReferences(root); int copied = 0;
+                var bytes = new byte[Math.Min(requested, total - offset)]; int copied = 0, pageIndex = -1; List<ObjectRef>? references = null;
                 while (copied < bytes.Length)
                 {
-                    int block = (offset + copied) / 12288, local = (offset + copied) % 12288; var raw = ReadObject(references[block]); int length = Math.Min(bytes.Length - copied, raw.Length - local);
+                    int block = (offset + copied) / 12288, local = (offset + copied) % 12288;
+                    if (pageIndex != block / 64) { pageIndex = block / 64; references = ReadBodyPage(root, pageIndex).References; }
+                    var raw = ReadObject(references![block % 64]); int length = Math.Min(bytes.Length - copied, raw.Length - local);
                     Require(length > 0); Buffer.BlockCopy(raw, local, bytes, copied, length); copied += length;
                 }
                 return Response(fixedRequest, w =>
@@ -94,7 +95,7 @@ public sealed partial class SqliteTerminalPersistenceStore
     { w.WriteNumber("byteLength", bytes.Length); w.WriteString("base64", Convert.ToBase64String(bytes)); w.WriteString("payloadDigest", WireJson.Sha256(bytes)); }
 
     // Bounded-memory startup audit. Permanent rows are streamed by their real indexes; this is not an O(1) startup claim.
-    private void Audit()
+    private void Audit(Action? check = null)
     {
         var state = LoadState(); var counts = new State(); string index = EmptyIndex; long ordinal = 0;
         Require(Number("SELECT count(*) FROM transfers") == state.Used["transferFacts"] && Number("SELECT count(*) FROM entries") == state.Used["receiptEntries"] && Number("SELECT count(*) FROM objects") == state.Used["objects"]);
@@ -102,6 +103,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         {
             while (reader.Read())
             {
+                check?.Invoke();
                 var entry = FindEntry(reader.GetString(0)); Require(entry != null && entry.Ordinal == ++ordinal && reader.GetInt64(1) == ordinal);
                 index = Chain("TPV1-ENTRY", Literal(index), Literal(ordinal.ToString(CultureInfo.InvariantCulture)), entry!.Value);
                 var value = entry.Value.GetProperty("value"); ReadObject(new ObjectRef("receipt-value", S(value, "sha256"), N(value, "byteLength"), false));
@@ -113,6 +115,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         {
             while (reader.Read())
             {
+                check?.Invoke();
                 string kind = reader.GetString(0); int length = reader.GetInt32(2);
                 Require(new[] { "body-page", "index-page", "body-block", "receipt-value" }.Contains(kind) && length >= 1 && length <= 12288);
                 ReadObject(new ObjectRef(kind, reader.GetString(1), length, false)); counts.Used["objects"]++; counts.Used["retainedBytes"] += length + ObjectMetadataCost(new ObjectRef(kind, reader.GetString(1), length, false));
@@ -122,6 +125,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         {
             while (reader.Read())
             {
+                check?.Invoke();
                 var ticket = LoadTicket(reader.GetString(0))!; counts.Used["transferFacts"]++;
                 long ticketCost = TicketCost(ticket); Require(ticketCost == ticket.AccountedBytes); counts.Used["retainedBytes"] += ticketCost;
                 if (ticket.Status == "staging")
@@ -144,7 +148,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         if (state.Root.HasValue)
         {
             using var sha = SHA256.Create(); long length = 0;
-            foreach (var reference in BodyReferences(state.Root.Value)) { var bytes = ReadObject(reference); sha.TransformBlock(bytes, 0, bytes.Length, null, 0); length += bytes.Length; }
+            foreach (var reference in BodyReferences(state.Root.Value)) { check?.Invoke(); var bytes = ReadObject(reference); sha.TransformBlock(bytes, 0, bytes.Length, null, 0); length += bytes.Length; }
             sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0); var body = state.Root.Value.GetProperty("body"); Require(N(body, "byteLength") == length && S(body, "sha256") == Hex(sha.Hash!));
         }
     }

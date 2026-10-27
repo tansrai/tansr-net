@@ -144,6 +144,7 @@ internal sealed class NativeTerminalDeviceHost
                     Path = journalPath,
                     Mode = Text(log, "mode") == "create" ? StorageOpenMode.Create : Text(log, "mode") == "reopen" ? StorageOpenMode.Reopen : throw new InvalidOperationException("terminal_device_open_mode_required"),
                     CompactCompletedReceipts = compactCompletedReceipts,
+                    Layout = JournalLayout(publicationProfile, publicationProfile == "terminal-persistence-v1" ? NativeMemoryDeviceConfiguration.PersistenceLayout(selectedMemory) : "legacy-audited-v1"),
                     KeyProvider = keyProvider,
                     ExecutorId = executorId,
                     ApplicationScopeId = Text(scope, "applicationScopeId"),
@@ -171,6 +172,7 @@ internal sealed class NativeTerminalDeviceHost
                         EnableProfile = true,
                         Path = memoryPath,
                         Mode = mode,
+                        Layout = NativeMemoryDeviceConfiguration.PersistenceLayout(memory) == "authenticated-indexed-v2" ? TerminalPersistenceSqliteLayout.AuthenticatedIndexed : TerminalPersistenceSqliteLayout.LegacyAudited,
                         Identity = memory.GetProperty("identity").Clone(),
                         ReadContext = authority.ReadScope,
                         KeyProvider = keyProvider!,
@@ -327,6 +329,10 @@ internal sealed class NativeTerminalDeviceHost
             }
         }
     }
+    internal static ExecutorJournalSqliteLayout JournalLayout(string? profile, string? layout) =>
+        profile == "terminal-persistence-v1" && layout == "authenticated-indexed-v2"
+            ? ExecutorJournalSqliteLayout.AuthenticatedIndexed : ExecutorJournalSqliteLayout.LegacyAudited;
+
     internal static string ReadStorageMode(JsonElement config)
     {
         var mode = config.TryGetProperty("storageMode", out var value) ? value.GetString() : "terminal";

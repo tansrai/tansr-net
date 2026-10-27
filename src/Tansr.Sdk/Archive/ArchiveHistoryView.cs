@@ -110,7 +110,11 @@ public sealed class ArchiveHistoryView
             }
             await Check().ConfigureAwait(false);
             var result = await work(Verify, new Facts(version, head, revision)).ConfigureAwait(false);
-            await Check().ConfigureAwait(false); return result;
+            await Check().ConfigureAwait(false);
+            // 当前权威的异步读取期间，旧介质也可能变化；交付前再触发一次版本后验。
+            var currentVersion = Head(await _version.HeadAsync(cancellationToken).ConfigureAwait(false)); Active(cancellationToken);
+            Need(EqualHead(version, currentVersion) && Equal(scope, Scope()), "context_changed"); Active(cancellationToken);
+            return result;
         }
         finally { lock (_gate) _busy = false; }
     }

@@ -87,10 +87,10 @@ public sealed partial class SqliteTerminalPersistenceStore
         w.WriteNumber("objects", options.MaxObjects); w.WriteNumber("retainedBytes", options.MaxRetainedBytes);
     });
     private static string Signature(SqliteTerminalPersistenceOptions options, string keyId) => Canon(Json(w =>
-    { w.WriteString("format", Format); w.WriteString("keyId", keyId); Prop(w, "identity", options.Identity); Prop(w, "limits", Limits(options)); w.WriteNumber("maxPages", options.MaxPages); }));
+    { w.WriteString("format", options.Layout == TerminalPersistenceSqliteLayout.AuthenticatedIndexed ? IndexedFormat : Format); w.WriteString("keyId", keyId); Prop(w, "identity", options.Identity); Prop(w, "limits", Limits(options)); w.WriteNumber("maxPages", options.MaxPages); }));
     private static string Metadata(SqliteTerminalPersistenceOptions options, StorageFileIdentity parent, StorageFileIdentity file, string keyId) => Canon(Json(w =>
     {
-        w.WriteString("format", Format); w.WriteString("keyId", keyId); Prop(w, "identity", options.Identity); Prop(w, "limits", Limits(options));
+        w.WriteString("format", options.Layout == TerminalPersistenceSqliteLayout.AuthenticatedIndexed ? IndexedFormat : Format); w.WriteString("keyId", keyId); Prop(w, "identity", options.Identity); Prop(w, "limits", Limits(options));
         w.WriteNumber("maxPages", options.MaxPages); w.WriteNumber("pageSize", 4096);
         w.WriteStartObject("physical"); w.WriteStartObject("directory"); w.WriteString("dev", parent.Device); w.WriteString("ino", parent.Inode); w.WriteEndObject();
         w.WriteStartObject("file"); w.WriteString("dev", file.Device); w.WriteString("ino", file.Inode); w.WriteEndObject(); w.WriteEndObject();
@@ -99,7 +99,7 @@ public sealed partial class SqliteTerminalPersistenceStore
     {
         _parent.Check(); _file.Check();
         long version = Number("PRAGMA data_version"); _dataVersion ??= version; Require(_dataVersion == version, "identity_mismatch");
-        var expectedSchema = _options.EnableCustodyHandoff ? Schema.Concat(CustodySchema).ToArray() : Schema;
+        var expectedSchema = Schema.Concat(Indexed ? AuthenticationSchema : Array.Empty<string>()).Concat(_options.EnableCustodyHandoff ? CustodySchema : Array.Empty<string>()).ToArray();
         Require(Number("SELECT count(*) FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_'") == expectedSchema.Length);
         using (var command = Command("SELECT sql FROM sqlite_master WHERE substr(name,1,7)<>'sqlite_' AND length(sql)<=4096")) using (var reader = command.ExecuteReader())
         {
@@ -110,6 +110,7 @@ public sealed partial class SqliteTerminalPersistenceStore
         Require(Number("SELECT count(*) FROM metadata") == 1 && (string?)Scalar("SELECT json FROM metadata WHERE id=1 AND length(CAST(json AS BLOB))<=262144") == _metadata);
         Require(Number("SELECT count(*) FROM encryption") == 1);
         var check = Scalar("SELECT key_check FROM encryption WHERE id=1 AND length(key_check)=28") as byte[]; Require(check != null); _cipher.Open("key-check", check!);
+        if (Indexed && (!_authenticationTransaction || !_authenticationLoaded)) LoadAuthentication();
     }
     private JsonElement Decode(string context, byte[] body)
     {
@@ -126,7 +127,9 @@ public sealed partial class SqliteTerminalPersistenceStore
         Require(!hasCopyMarker || copyMarker.ValueKind == JsonValueKind.True || copyMarker.ValueKind == JsonValueKind.False);
         var result = new State { Root = Optional(value, "root"), ReadOnlyCopy = hasCopyMarker && copyMarker.GetBoolean() }; var used = value.GetProperty("used"); Fields(used, CounterNames);
         foreach (var name in CounterNames) result.Used[name] = used.GetProperty(name).GetInt64();
-        CheckCapacity(result); if (result.Root.HasValue) ValidateRoot(result.Root.Value); return result;
+        CheckCapacity(result); if (result.Root.HasValue) ValidateRoot(result.Root.Value);
+        Require(result.Root.HasValue ? S(result.Root.Value.GetProperty("index"), "count") == result.Used["receiptEntries"].ToString(CultureInfo.InvariantCulture) : result.Used["receiptEntries"] == 0);
+        return result;
     }
     private void SaveState(State state)
     {
@@ -148,14 +151,19 @@ public sealed partial class SqliteTerminalPersistenceStore
     {
         using var command = Command("SELECT bytes,body FROM objects WHERE kind=$kind AND hash=$hash AND length(body)<=12316", ("$kind", reference.Kind), ("$hash", reference.Hash));
         using var reader = command.ExecuteReader(); Require(reader.Read() && reader.GetInt32(0) == reference.Bytes);
-        byte[] plain = _cipher.Open(ObjectContext(reference.Kind, reference.Hash, reference.Bytes), (byte[])reader.GetValue(1));
+        var encoded = (byte[])reader.GetValue(1);
+        Authenticate("object", new[] { reference.Kind, reference.Hash }, ObjectRowDigest(reference.Kind, reference.Hash, reference.Bytes, encoded));
+        byte[] plain = _cipher.Open(ObjectContext(reference.Kind, reference.Hash, reference.Bytes), encoded);
         Require(plain.Length == reference.Bytes && WireJson.Sha256(plain) == reference.Hash); return plain;
     }
     private bool AddObject(ObjectRef reference, byte[] plain)
     {
         if (Number("SELECT count(*) FROM objects WHERE kind=$kind AND hash=$hash", ("$kind", reference.Kind), ("$hash", reference.Hash)) != 0)
         { Require(ReadObject(reference).SequenceEqual(plain)); return false; }
-        Exec("INSERT INTO objects VALUES($kind,$hash,$bytes,$body)", ("$kind", reference.Kind), ("$hash", reference.Hash), ("$bytes", reference.Bytes), ("$body", _cipher.Seal(ObjectContext(reference.Kind, reference.Hash, reference.Bytes), plain))); return true;
+        Authenticate("object", new[] { reference.Kind, reference.Hash }, null);
+        var encoded = _cipher.Seal(ObjectContext(reference.Kind, reference.Hash, reference.Bytes), plain);
+        Exec("INSERT INTO objects VALUES($kind,$hash,$bytes,$body)", ("$kind", reference.Kind), ("$hash", reference.Hash), ("$bytes", reference.Bytes), ("$body", encoded));
+        AuthenticateWrite("object", new[] { reference.Kind, reference.Hash }, ObjectRowDigest(reference.Kind, reference.Hash, reference.Bytes, encoded)); return true;
     }
     private static JsonElement RefJson(ObjectRef value) => Json(w =>
     { w.WriteString("kind", value.Kind); w.WriteString("sha256", value.Hash); w.WriteNumber("byteLength", value.Bytes); w.WriteBoolean("received", value.Received); });
@@ -171,15 +179,19 @@ public sealed partial class SqliteTerminalPersistenceStore
     private void SaveTicket(Ticket row)
     {
         var bytes = Bytes(TicketJson(row)); Require(bytes.Length <= MetadataReserve);
+        var encoded = _cipher.Seal("transfer\0" + row.Id + "\0" + row.Status, bytes);
         Exec("INSERT INTO transfers VALUES($id,$status,$body) ON CONFLICT(id) DO UPDATE SET status=excluded.status,body=excluded.body",
-            ("$id", row.Id), ("$status", row.Status), ("$body", _cipher.Seal("transfer\0" + row.Id + "\0" + row.Status, bytes)));
+            ("$id", row.Id), ("$status", row.Status), ("$body", encoded));
+        AuthenticateWrite("transfer", new[] { row.Id }, TicketRowDigest(row.Id, row.Status, encoded));
+        if (Indexed) { if (row.Status == "staging") _authenticationTransfers.Add(row.Id); else _authenticationTransfers.Remove(row.Id); }
     }
     private Ticket? LoadTicket(string id)
     {
         using var command = Command("SELECT status,CASE WHEN length(body)<=262172 THEN body ELSE NULL END FROM transfers WHERE id=$id", ("$id", id)); using var reader = command.ExecuteReader();
-        if (!reader.Read()) return null;
+        if (!reader.Read()) { Authenticate("transfer", new[] { id }, null); return null; }
         string status = reader.GetString(0); Require(status == "staging" || status == "committed" || status == "rejected");
         Require(!reader.IsDBNull(1)); var encoded = (byte[])reader.GetValue(1); Require(encoded.Length <= MetadataReserve + 28);
+        Authenticate("transfer", new[] { id }, TicketRowDigest(id, status, encoded));
         var value = Decode("transfer\0" + id + "\0" + status, encoded);
         bool released = value.TryGetProperty("releasedReuseReservations", out var releasedValue);
         Require(!released || releasedValue.ValueKind == JsonValueKind.True);
@@ -214,14 +226,27 @@ public sealed partial class SqliteTerminalPersistenceStore
         if (row.Base.HasValue) ValidateRoot(row.Base.Value);
         if (row.Result.HasValue) ValidateRoot(row.Result.Value);
         Require(status == "staging" ? !row.Result.HasValue && !row.Rejection.HasValue : status == "committed" ? row.Result.HasValue && !row.Rejection.HasValue : !row.Result.HasValue && row.Rejection.HasValue);
+        if (Indexed)
+        {
+            Require(_authenticationTransfers.Contains(id) == (status == "staging"));
+            Require(TicketCost(row) == row.AccountedBytes);
+            if (status == "staging")
+            {
+                Require(row.RawRemaining + row.Accepted.Where(x => x.Received || row.ReleasedReuseReservations).Sum(x => (long)x.Bytes) == N(row.Request.GetProperty("declared"), "bytes"));
+                Require(row.ObjectsRemaining + row.Accepted.Count(x => x.Received || row.ReleasedReuseReservations) == N(row.Request.GetProperty("declared"), "objects"));
+            }
+            else Require(row.RawRemaining == 0 && row.MetadataRemaining == 0 && row.ObjectsRemaining == 0 && row.EntriesRemaining == 0 && row.Accepted.Count == 0 && !row.Base.HasValue);
+        }
         return row;
     }
     private EntryRow? FindEntry(string key, bool secondary = false)
     {
         using var command = Command("SELECT primary_key,secondary_key,ordinal,CASE WHEN length(body)<=1024 THEN body ELSE NULL END FROM entries WHERE " + (secondary ? "secondary_key" : "primary_key") + "=$key", ("$key", key));
-        using var reader = command.ExecuteReader(); if (!reader.Read()) return null;
+        using var reader = command.ExecuteReader(); if (!reader.Read()) { Authenticate(secondary ? "entry-secondary" : "entry-primary", new[] { key }, null); return null; }
         string primary = reader.GetString(0), second = reader.GetString(1); long ordinal = reader.GetInt64(2);
         Require(!reader.IsDBNull(3)); var bytes = (byte[])reader.GetValue(3); Require(bytes.Length <= 1024);
+        string digest = EntryRowDigest(primary, second, ordinal, bytes);
+        Authenticate("entry-primary", new[] { primary }, digest); Authenticate("entry-secondary", new[] { second }, digest);
         var value = Decode("entry\0" + primary + "\0" + second + "\0" + ordinal.ToString(CultureInfo.InvariantCulture), bytes);
         TerminalPersistenceContract.Validate("Entry", value); Require(S(value, "primaryKey") == primary && S(value, "secondaryKey") == second && ordinal >= 1);
         return new EntryRow(ordinal, value);
@@ -229,8 +254,12 @@ public sealed partial class SqliteTerminalPersistenceStore
     private void InsertEntry(long ordinal, JsonElement entry)
     {
         string primary = S(entry, "primaryKey"), secondary = S(entry, "secondaryKey");
+        Authenticate("entry-primary", new[] { primary }, null); Authenticate("entry-secondary", new[] { secondary }, null);
+        var encoded = _cipher.Seal("entry\0" + primary + "\0" + secondary + "\0" + ordinal.ToString(CultureInfo.InvariantCulture), Bytes(entry));
         Exec("INSERT INTO entries VALUES($primary,$secondary,$ordinal,$body)", ("$primary", primary), ("$secondary", secondary), ("$ordinal", ordinal),
-            ("$body", _cipher.Seal("entry\0" + primary + "\0" + secondary + "\0" + ordinal.ToString(CultureInfo.InvariantCulture), Bytes(entry))));
+            ("$body", encoded));
+        string digest = EntryRowDigest(primary, secondary, ordinal, encoded);
+        AuthenticateWrite("entry-primary", new[] { primary }, digest); AuthenticateWrite("entry-secondary", new[] { secondary }, digest);
     }
     private string Chain(string tag, params JsonElement[] elements)
     {

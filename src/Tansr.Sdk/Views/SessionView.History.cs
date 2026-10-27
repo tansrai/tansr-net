@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Tansr.Sdk.Client;
+using Tansr.Sdk.Sessions;
 using Tansr.Sdk.Transport;
 
 namespace Tansr.Sdk.Views;
@@ -33,14 +34,52 @@ public sealed partial class SessionView
                 if (block.ValueKind != JsonValueKind.Object || String(block, "t") == null)
                     throw new TansrProtocolException("invalid_response");
         }
+        return InstallHistoryPresentation(history, expectedSessionId, sequence);
+    }
+
+    /// <summary>
+    /// Installs a server-selected settled window at a new observation origin. Omitted older
+    /// messages remain browse-only. No approvals, usage, or terminal events are reconstructed.
+    /// expectedVersion rejects a response if this view changed while the HTTP read was pending.
+    /// </summary>
+    public long RestoreRecoveryProjection(SessionRecoveryProjection projection, long expectedVersion)
+    {
+        if (projection == null) throw new ArgumentNullException(nameof(projection));
+        return InstallHistoryPresentation(projection.Data, projection.SessionId, projection.HistorySequence, expectedVersion,
+            projection.FirstSequence, projection.HistoryGeneration);
+    }
+
+    internal void MarkRecoveryPending()
+    {
+        Update(() => { _gap = true; _runtimeUnknown = true; return true; });
+    }
+
+    private long? _recoveryFirstSequence, _recoveryHistoryGeneration;
+
+    private long InstallHistoryPresentation(JsonElement history, string expectedSessionId, long sequence,
+        long? expectedVersion = null, long? firstSequence = null, long? historyGeneration = null)
+    {
+        var messages = history.GetProperty("messages");
         Update(() =>
         {
+            if (expectedVersion.HasValue && _version != expectedVersion.Value)
+                throw new TansrProtocolException("recovery_projection_stale");
             if (_sessionId != null && _sessionId != expectedSessionId) throw new InvalidOperationException("history_session_mismatch");
+            if (firstSequence.HasValue && !_epochLost && _recoveryFirstSequence == firstSequence &&
+                (_lastSequence > sequence || _recoveryHistoryGeneration > historyGeneration))
+                throw new TansrProtocolException("recovery_projection_stale");
             // A settlement read can replace messages after the terminal was delivered.
             // Keep that original event's projection only at the same known log position;
             // never infer a terminal from messages or carry one into another epoch.
-            var keepTerminal = !_epochLost && !_gap && !_runtimeUnknown && !_running &&
-                _observedTerminalSequence == sequence && _lastSequence == sequence;
+            var keepTerminal = !_epochLost && !_runtimeUnknown && !_running &&
+                (firstSequence.HasValue
+                    ? _observedTerminalSequence.HasValue && _observedTerminalSequence >= firstSequence &&
+                        _observedTerminalSequence <= sequence && _lastSequence <= sequence &&
+                        history.GetProperty("terminal").ValueKind == JsonValueKind.Object &&
+                        history.GetProperty("terminal").GetProperty("seq").GetInt64() == _observedTerminalSequence &&
+                        (!_recoveryFirstSequence.HasValue || _recoveryFirstSequence == firstSequence)
+                    : !_gap && _observedTerminalSequence == sequence && _lastSequence == sequence);
+            _recoveryFirstSequence = firstSequence; _recoveryHistoryGeneration = historyGeneration;
             _sessionId = expectedSessionId; _lastSequence = sequence; _epochLost = false; _gap = false;
             _messages.Clear(); _tools.Clear(); _blocks.Clear(); _requests.Clear(); _agents.Clear(); _todos.Clear();
             _current = null; _structuredBytes = 0; _running = false; _runtimeUnknown = !keepTerminal; _compacting = false;
@@ -84,7 +123,12 @@ public sealed partial class SessionView
                 _truncated |= source.GetProperty("blocks").GetArrayLength() > _options.MaximumPartsPerMessage;
             }
             _truncated |= messages.GetArrayLength() > _options.MaximumMessages;
-            Notice("history_restored", "权威历史已恢复；历史不恢复事件用量、审批票据或当前运行状态。");
+            if (firstSequence.HasValue)
+            {
+                _truncated |= history.GetProperty("offset").GetInt64() > 0;
+                Notice("recovery_projection_restored", "有界呈现已恢复；更早历史按需浏览，不恢复用量、审批或终态事件。");
+            }
+            else Notice("history_restored", "权威历史已恢复；历史不恢复事件用量、审批票据或当前运行状态。");
             return true;
         });
         return sequence;

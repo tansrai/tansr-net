@@ -142,7 +142,8 @@ public sealed class SessionNarratorTests
         Assert.Contains("[12:03:06] subagent a completed", lines);
         Assert.Contains("[12:03:07] history microcompacted (3 blocks, 1,200 tokens reclaimed)", lines);
         Assert.Contains("[12:03:08] events dropped [sdk.events]: 15 event(s) dropped (count_limit)", lines);
-        Assert.Equal("[12:03:09] event replay gap (ahead_of_log) — authoritative history required", lines.Last());
+        Assert.Contains("[12:03:09] event replay gap (ahead_of_log) — authoritative history required", lines);
+        Assert.EndsWith("turn started", lines.Last());
         Assert.DoesNotContain(lines, line => line.Contains("retry"));
     }
 
@@ -168,24 +169,24 @@ public sealed class SessionNarratorTests
         using var narrator = new SessionNarrator(lines.Add, new SessionNarratorOptions { InitialSequence = 100 });
         narrator.Apply(Event("""{"type":"server.replay.gap","reason":"ahead_of_log"}""", 101));
         narrator.Apply(Event("""{"type":"turn.started"}""", 1));
-        Assert.Single(lines);
+        Assert.Equal(2, lines.Count); // fresh live facts may continue while historical coverage remains unknown
 
         using var history = JsonDocument.Parse("""{"sessionId":"sess-narr","lastSeq":5,"messages":[{"role":"assistant","blocks":[{"t":"text","text":"historical text"}]}]}""");
         Assert.Equal(5, narrator.RestoreHistory(history.RootElement, "sess-narr"));
         narrator.Apply(Event("""{"type":"turn.completed","reason":"completed"}""", 5));
-        Assert.Single(lines);
+        Assert.Equal(2, lines.Count);
         narrator.Apply(Event("""{"type":"turn.started"}""", 6));
         narrator.Apply(Event("""{"type":"turn.error","scope":"kernel","message":"failed","recoverable":false}""", 7));
         narrator.Apply(Event("""{"type":"turn.aborted","reason":"internal_error"}""", 8));
 
-        Assert.Equal(4, lines.Count);
+        Assert.Equal(5, lines.Count);
         Assert.Contains(lines, line => line.Contains("turn error [kernel]: failed"));
         Assert.EndsWith("turn aborted (internal_error)", lines.Last());
         Assert.DoesNotContain(lines, line => line.Contains("historical text") || line.Contains("turn completed"));
     }
 
     [Fact]
-    public void InvalidNarratorHistoryCannotClearEpochBoundary()
+    public void InvalidNarratorHistoryCannotInstallFactsButFreshEpochEventsRemainObservable()
     {
         var lines = new List<string>();
         using var narrator = new SessionNarrator(lines.Add);
@@ -193,7 +194,8 @@ public sealed class SessionNarratorTests
         using var wrong = JsonDocument.Parse("""{"sessionId":"other","lastSeq":0,"messages":[]}""");
         Assert.Throws<Tansr.Sdk.Client.TansrProtocolException>(() => narrator.RestoreHistory(wrong.RootElement, "sess-narr"));
         narrator.Apply(Event("""{"type":"turn.started"}""", 1));
-        Assert.Single(lines);
+        Assert.Equal(2, lines.Count);
+        Assert.EndsWith("turn started", lines.Last());
         narrator.Dispose();
         Assert.Throws<ObjectDisposedException>(() => narrator.RestoreHistory(wrong.RootElement, "sess-narr"));
     }

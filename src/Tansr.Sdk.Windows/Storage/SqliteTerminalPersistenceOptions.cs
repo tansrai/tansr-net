@@ -3,12 +3,16 @@ using Tansr.Sdk.Storage;
 
 namespace Tansr.Sdk.Windows.Storage;
 
+/// <summary>本机私有文件布局。旧布局保留完整审计；认证索引布局只可显式新建或按同布局重开。</summary>
+public enum TerminalPersistenceSqliteLayout { LegacyAudited = 0, AuthenticatedIndexed = 1 }
+
 /// <summary>New encrypted SQLite format, explicitly selected by the trusted host. Old publication files are never opened or migrated implicitly.</summary>
 public sealed class SqliteTerminalPersistenceOptions
 {
     public bool EnableProfile { get; set; }
     public string Path { get; set; } = "";
     public StorageOpenMode Mode { get; set; }
+    public TerminalPersistenceSqliteLayout Layout { get; set; }
     public JsonElement Identity { get; set; }
     public Func<JsonElement> ReadContext { get; set; } = null!;
     public IArchiveKeyProvider KeyProvider { get; set; } = null!;

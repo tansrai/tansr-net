@@ -58,6 +58,7 @@ internal sealed class ExampleSessionWorkspace
             case 29: return (await session.GetInputAcceptanceAsync(Required(argument), ct).ConfigureAwait(false)).GetRawText();
             case 30: return (await session.ListInputAcceptancesAsync(Empty(argument), cancellationToken: ct).ConfigureAwait(false)).GetRawText();
             case 31:
+                if (view().HasEventGap) throw new InvalidOperationException("recovery_projection_pending");
                 var split = argument.IndexOf('\n');
                 if (split <= 0 || split == argument.Length - 1) throw new InvalidOperationException("original_request_id_and_prompt_required");
                 return (await session.SendWithRequestAsync(argument.Substring(split + 1), argument.Substring(0, split).TrimEnd('\r'), ct).ConfigureAwait(false)).GetRawText();

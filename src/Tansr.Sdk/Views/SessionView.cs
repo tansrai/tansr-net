@@ -147,14 +147,26 @@ public sealed partial class SessionView : IDisposable
                 _observedTerminalSequence = null;
                 _runtimeUnknown = true; _requests.Clear();
                 Notice(type, String(data, "reason"), false, data.Clone());
-                // 新日志纪元必须重建，旧快照不与新序号拼接。
-                if (String(data, "reason") == "ahead_of_log") _epochLost = true;
+                // A new log invalidates old runtime associations, not the right to observe
+                // fresh approvals or cancellation. Keep history incomplete until recovery
+                // proves a settled window; never graft new deltas onto old blocks/tools.
+                if (String(data, "reason") == "ahead_of_log")
+                {
+                    _epochLost = true; _lastSequence = null;
+                    _blocks.Clear(); _tools.Clear(); _agents.Clear(); _todos.Clear();
+                    _current = null; _structuredBytes = 0; _running = false;
+                    _failed = false; _error = null; _compacting = false; _sealed = false;
+                    _recoveryFirstSequence = null; _recoveryHistoryGeneration = null;
+                    Notice("observation_epoch_changed", "旧运行关联已失效；保留的用量仅为已观察记录，历史缺口仍须恢复。");
+                }
                 return true;
             }
-            if (_epochLost) return false;
             long? sequence = Integer(data, "seq");
             if (!sequence.HasValue && long.TryParse(item.Id, NumberStyles.None, CultureInfo.InvariantCulture, out var id) && id >= 0)
                 sequence = id;
+            // A fresh epoch needs a sequenced real event. An unsequenced fragment cannot
+            // establish a live origin or reconnect an old runtime association.
+            if (_epochLost && !sequence.HasValue) return false;
             if (sequence.HasValue)
             {
                 if (sequence < 0 || sequence > MaximumEventSequence) throw new ArgumentException("Event sequence must be a nonnegative safe integer.", nameof(item));
@@ -219,7 +231,8 @@ public sealed partial class SessionView : IDisposable
             case "server.platform.warning":
                 Notice(String(data, "code") ?? type, String(data, "message")); break;
             case "session.events_dropped":
-                _gap = true; _observedTerminalSequence = null; Notice(type, String(data, "reason"), false, data.Clone()); break;
+                _gap = true; _runtimeUnknown = true; _requests.Clear(); _observedTerminalSequence = null;
+                Notice(type, String(data, "reason"), false, data.Clone()); break;
             case "session.compacted":
             case "session.microcompacted": _compacting = true; break;
             case "msg.block.start": StartBlock(data); break;

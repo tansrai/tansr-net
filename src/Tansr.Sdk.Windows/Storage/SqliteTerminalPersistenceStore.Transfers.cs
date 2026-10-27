@@ -17,21 +17,28 @@ public sealed partial class SqliteTerminalPersistenceStore
         internal bool[] Pages = Array.Empty<bool>();
         internal bool CompletePages => Pages.All(x => x);
     }
+    private (byte[] Raw, List<ObjectRef> References) ReadBodyPage(JsonElement root, int pageIndex)
+    {
+        var body = root.GetProperty("body"); var hashes = body.GetProperty("pageHashes");
+        Require(pageIndex >= 0 && pageIndex < hashes.GetArrayLength());
+        string digest = hashes[pageIndex].GetString()!;
+        int bytes = checked((int)Number("SELECT bytes FROM objects WHERE kind='body-page' AND hash=$hash", ("$hash", digest)));
+        Require(bytes >= 1 && bytes <= 12288); var raw = ReadObject(new ObjectRef("body-page", digest, bytes, false));
+        var page = WireJson.DecodeControl(raw, 12288); TerminalPersistenceContract.Validate("BodyPage", page);
+        Require(Bytes(page).SequenceEqual(raw) && N(page, "index") == pageIndex);
+        int start = checked(pageIndex * 64), expected = Math.Min(64, N(body, "blockCount") - start);
+        Require(page.GetProperty("refs").GetArrayLength() == expected); var result = new List<ObjectRef>();
+        foreach (var item in page.GetProperty("refs").EnumerateArray())
+        {
+            int length = Math.Min(12288, N(body, "byteLength") - (start + result.Count) * 12288); Require(N(item, "byteLength") == length);
+            result.Add(new ObjectRef("body-block", S(item, "sha256"), length, false));
+        }
+        return (raw, result);
+    }
     private List<ObjectRef> BodyReferences(JsonElement root)
     {
-        var body = root.GetProperty("body"); var result = new List<ObjectRef>(); int pageIndex = 0;
-        foreach (var hash in body.GetProperty("pageHashes").EnumerateArray())
-        {
-            string digest = hash.GetString()!; int bytes = checked((int)Number("SELECT bytes FROM objects WHERE kind='body-page' AND hash=$hash", ("$hash", digest)));
-            Require(bytes >= 1 && bytes <= 12288); var raw = ReadObject(new ObjectRef("body-page", digest, bytes, false));
-            var page = WireJson.DecodeControl(raw, 12288); TerminalPersistenceContract.Validate("BodyPage", page); Require(Bytes(page).SequenceEqual(raw) && N(page, "index") == pageIndex++);
-            int expected = Math.Min(64, N(body, "blockCount") - result.Count); Require(page.GetProperty("refs").GetArrayLength() == expected);
-            foreach (var item in page.GetProperty("refs").EnumerateArray())
-            {
-                int length = Math.Min(12288, N(body, "byteLength") - result.Count * 12288); Require(N(item, "byteLength") == length);
-                result.Add(new ObjectRef("body-block", S(item, "sha256"), length, false));
-            }
-        }
+        var body = root.GetProperty("body"); var result = new List<ObjectRef>();
+        for (int pageIndex = 0; pageIndex < body.GetProperty("pageHashes").GetArrayLength(); pageIndex++) result.AddRange(ReadBodyPage(root, pageIndex).References);
         Require(result.Count == N(body, "blockCount")); return result;
     }
     private Plan Material(Ticket ticket)
@@ -130,6 +137,8 @@ public sealed partial class SqliteTerminalPersistenceStore
         JsonElement? progress = null;
         if (ticket?.Status == "staging")
         {
+            // Ready bits describe durable selected originals, so validate the bounded active closure.
+            if (Indexed) foreach (var reference in ticket.Accepted) ReadObject(reference);
             var plan = Material(ticket); var accepted = ticket.Accepted.Select(x => x.Key).ToHashSet(StringComparer.Ordinal);
             progress = Json(w =>
             {
@@ -200,13 +209,17 @@ public sealed partial class SqliteTerminalPersistenceStore
         Require(Number("PRAGMA page_size") == 4096 && allocated >= reusable && reusable >= 0);
         Require(Number("PRAGMA max_page_count") == _options.MaxPages, "capacity_exceeded");
         long reserved = 0, active = 0;
-        using (var command = Command("SELECT id FROM transfers WHERE status='staging' LIMIT 33"))
-        using (var reader = command.ExecuteReader())
-            while (reader.Read())
-            {
-                Require(++active <= 32); var ticket = LoadTicket(reader.GetString(0));
-                Require(ticket != null && ticket.Status == "staging"); reserved = checked(reserved + PhysicalBudget(ticket!.Request));
-            }
+        void Include(string id)
+        {
+            Require(++active <= 32); var ticket = LoadTicket(id);
+            Require(ticket != null && ticket.Status == "staging"); reserved = checked(reserved + PhysicalBudget(ticket!.Request));
+        }
+        if (Indexed) foreach (string id in _authenticationTransfers) Include(id);
+        else
+        {
+            using var command = Command("SELECT id FROM transfers WHERE status='staging' LIMIT 33"); using var reader = command.ExecuteReader();
+            while (reader.Read()) Include(reader.GetString(0));
+        }
         Require(active == state.Used["activeTransfers"]);
         Need(allocated - reusable + reserved + PhysicalBudget(request) <= _options.MaxPages, "capacity_exceeded");
     }

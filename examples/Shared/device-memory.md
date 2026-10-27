@@ -113,16 +113,41 @@ The controller retains the original memory request and scope before sending. A l
 
 Serve 应在原 memoryPublicationFor 返回值显式选择同一个 profile；SDK 注册固定 TansrTerminalPersistenceV1，仍经原 MemoryPublication 权限、执行绑定、加密 journal 领取操作。终端只持久保存不透明块、永久双键和原 transfer，不提取或决定记忆。maxTransfers 配置映射为新介质的 MaxActiveTransfers；其余逻辑硬帽由 SqliteTerminalPersistenceOptions 声明，maxPages 为额外 SQLite 页帽，不等同于剩余磁盘空间。
 
+### 新来源的最小开库布局
+
+新建按需持久来源时，在 `publication` 中显式配置下面两个字段，其他身份、路径、容量与 DPAPI 配置仍按上文提供：
+
+```json
+{
+  "profile": "terminal-persistence-v1",
+  "layout": "authenticated-indexed-v2"
+}
+```
+
+此布局改变本地介质组织，不改变 TPV1 wire、原请求键或记忆策略。标准来源入口 `SqliteTerminalPersistenceStore.OpenSourceAsync(options, cancellationToken)` 明确使用认证索引布局；普通 `OpenAsync` 可通过 `Layout = TerminalPersistenceSqliteLayout.AuthenticatedIndexed` 选择同一布局。新建和重开必须始终使用同一布局、原身份和密钥。
+
+两个 Native 入口会从这一选择同步派生必需执行日志的 `ExecutorJournalSqliteLayout.AuthenticatedIndexed`，无需再配置第二个布局开关。独立使用日志时可调用 `SqliteExecutorJournal.OpenSourceAsync`，或显式设置 `SqliteExecutorJournalOptions.Layout`；新布局要求原加密 KeyProvider。普通开库只读取当前认证头，claim／query／complete 按原操作键读取并验证必要事实，不先取回全部 operation／receipt。日志布局也是持久身份的一部分，旧日志不会自动升级；不能只切换 publication 而继续混用旧格式日志路径。
+
+显式 `OperationsAsync`／`ExecutionRecovery.ReconcilePageAsync` 仍用于完整操作对账：为防止删行被当作从未执行，它先核完整 ID 与认证描述成员，再返回有界正文页，因此目录成本随永久操作数增长。标准初始化不隐式调用该完整对账入口。普通开库和精确原键读取不承担全库审计，但原未决责任、提交未知、回执及物理容量预留继续保留；只读查询不授予重放权限。
+
+现有配置省略 `layout` 时，继续使用 `legacy-audited-v1`，保留普通开库的完整审计和实际读取成本。旧库不能只改配置值变成新布局，新入口不会猜测格式、自动迁移或创建空库代替旧库。新格式旧二进制不能读写，部署前须保留原数据并核对实际消费者版本。
+
+按需开库只确认本次恢复所需的身份、密钥、当前根和责任，所选记录及正文在读取处验证；它不宣称已经审计未读取的整库。完整审计、复制和托管交接仍是显式操作。仅打开数据库或设备 polling 就绪，不等于 Serve 的原会话已恢复；初始化仍需通过共享核心的来源、恢复和安装检查。
+
 新格式使用 SqliteTerminalPersistenceStore 与 WindowsTerminalPersistenceHost。CopyToEncryptedAsync(destination, staging, keyProvider) 只复制同一新格式到新路径并重加密，完整保留 Root、永久索引、原 transfer 和 staging 材料。成功只表示复制与校验完成，切换仍 pending；当前API没有激活、源退役或writer切换方法。即使已停止原writer并结算unknown，也不会令副本变成可写。原库和钥保留；不自动导入旧六动作介质，不自动回退，不宣称仅凭 AEAD 能阻止整库旧备份回滚。
 
 ### English
 
 Both existing device-memory and combined terminal-device examples accept an explicit publication.profile of terminal-persistence-v1. Omission retains terminal-services-v1. Use a new database path and the exact flat five-field identity supplied by the trusted host. The Serve host must select the same profile. Execution, MemoryPublication permission and the encrypted journal remain shared with the original device lifecycle; the terminal does not implement memory policy.
 
+For a newly provisioned minimal source, explicitly set `publication.layout` to `authenticated-indexed-v2`, or use `SqliteTerminalPersistenceStore.OpenSourceAsync`. Reopen with the same layout, identity and key. An omitted layout retains `legacy-audited-v1` and its complete startup audit. Changing this field does not migrate an existing database; unknown formats are rejected. Selected data is verified when read, while a complete audit remains explicit. Opening a source alone does not establish Serve session readiness.
+
+Both Native consumers derive the required encrypted executor-journal layout from that same choice. Standalone callers can use `SqliteExecutorJournal.OpenSourceAsync` or the explicit journal layout option. Ordinary open and exact-key operations read only the required authenticated facts. Explicit operation enumeration/reconciliation verifies complete ID membership before returning bounded body pages; its metadata cost grows with retained history and is not part of standard initialization. Original pending work, unknown commits and capacity reservations remain authoritative; a query never authorizes replay.
+
 The new SQLite adapter atomically stores opaque blocks, permanent dual-key entries and original transfer results. Logical canonical-byte quotas and the SQLite page cap are separate. Explicit CopyToEncryptedAsync copies and re-encrypts the same new format, including pending transfers; it does not switch the live writer, import legacy media, or grant rollback authority. Keep the source and reconcile unknown results; this API does not activate the copy or perform cutover.
 
 新 profile 的同格式复制目标具有认证加密的持久只读标记；重开也只允许 head/read/lookup/query，当前API没有激活、源退役或cutover方法；不得将副本交给持续写入的执行器。
 The new profile persists an authenticated read-only marker in each copy. Reopening allows only head/read/lookup/query; the current API has no activation, writer-switch, source-retirement or cutover method; do not attach a copy to a continuously writing executor.
 
-新计划还会在原 SQLite 事务中核对实际已用/空闲页、所有在途票据的保守完整预算与 max_page_count。ready 对象不缩减这项保守预算；低物理上限可能先于逻辑限额拒绝新计划，原票据仍可按原键续办。当前按 status 扫描定位在途行，不声称百万历史下 O(1) 准入；该门也不保证 WAL 或文件系统不会遇外部满盘。
-New plans check allocated/free pages and conservative budgets for all active tickets within the original transaction. Ready objects do not reduce that budget. Admission can reject before logical limits while preserving an existing ticket. The current status lookup can scan retained history; no constant-time admission or filesystem/WAL free-space guarantee is claimed.
+新计划还会在原 SQLite 事务中核对实际已用/空闲页、所有在途票据的保守完整预算与 max_page_count。ready 对象不缩减这项保守预算；低物理上限可能先于逻辑限额拒绝新计划，原票据仍可按原键续办。旧 `legacy-audited-v1` 按 status 扫描定位在途行；新 `authenticated-indexed-v2` 从认证头内原 `maxActiveTransfers` 上限约束的 ID 集合逐点核对原票据，不扫描已结历史。认证树的历史节点仍占物理页并受 `max_page_count` 约束，不承诺无限增长、整库备份防回滚或文件系统／WAL 不会满盘。
+New plans check allocated/free pages and conservative budgets for all active tickets within the original transaction. Ready objects do not reduce that budget. Admission can reject before logical limits while preserving an existing ticket. The legacy layout may scan retained history by status; the indexed layout verifies the original tickets selected by the authenticated, maxActiveTransfers-bounded active ID set. Retained authentication nodes count toward the SQLite page cap. Neither layout guarantees unlimited growth, whole-database rollback detection, or filesystem/WAL free space.
