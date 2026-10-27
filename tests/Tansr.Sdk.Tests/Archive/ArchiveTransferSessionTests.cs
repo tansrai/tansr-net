@@ -21,8 +21,14 @@ public sealed class ArchiveTransferSessionTests
         var result = await session.PullAsync(); Assert.Equal(1, result.ArchivedRecords); Assert.True(result.Complete); Assert.Single(result.Receipts); Assert.Null(store.Pending);
         Assert.Equal(WireJson.CanonicalString(data.Ack(data.RequestIdentity)), WireJson.CanonicalString(client.LastAck!.Value));
         // 与 Windows SQLite、云副本接收器相同的真实准备器；不能只验证 IArchiveStore 测试替身。
-        var input = new ArchiveReceiveInput { Binding = client.AlterBinding(data.Binding), Status = client.AlterStatus(data.Status), Page = data.Page, Request = data.RequestIdentity,
-            Artifacts = new[] { new ArchiveArtifact("artifact", data.Body) } };
+        var input = new ArchiveReceiveInput
+        {
+            Binding = client.AlterBinding(data.Binding),
+            Status = client.AlterStatus(data.Status),
+            Page = data.Page,
+            Request = data.RequestIdentity,
+            Artifacts = new[] { new ArchiveArtifact("artifact", data.Body) }
+        };
         var batch = Tansr.Sdk.Archive.Replication.ArchiveReceiverValidation.Prepare(data.Identity, new ArchiveRecoveryFixture().Limits, null, input);
         Assert.Equal(WireJson.CanonicalString(data.Ack(data.RequestIdentity)), WireJson.CanonicalString(batch.Ack));
         Assert.Equal(data.Body, batch.Bodies["artifact"]);

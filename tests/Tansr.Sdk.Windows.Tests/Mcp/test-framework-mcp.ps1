@@ -118,6 +118,7 @@ internal static class FrameworkMcpProbe
                 server.ReleasePings.TrySetResult(true);
                 await Within(server.BothPingsWritten.Task, 3000, "Both reverse pings were not written.");
                 await Within(server.FirstReply.Task, 3000, "The reserved reply did not arrive.");
+                server.ExpectClientDisconnect();
                 await Within(client.CloseAsync(), 4000, "Close did not cancel reserved and waiting replies.");
                 await Within(Task.WhenAll(ExpectCancellation(first), ExpectCancellation(second)), 3000, "Forward requests did not cancel.");
                 Require(client.State == McpConnectionState.Closed, "Client did not close.");
@@ -164,11 +165,14 @@ internal static class FrameworkMcpProbe
         internal readonly TaskCompletionSource<bool> ReleasePings = new TaskCompletionSource<bool>();
         internal int Calls, Replies, Deletes, Cancellations, MaximumConnections;
         private int active, pingsWritten;
+        private volatile bool expectClientDisconnect;
         internal Uri Endpoint;
         internal string Diagnostics() { return "STATE calls=" + Calls + " replies=" + Replies + " active=" + active + " maximum=" + MaximumConnections + " servicePointLimit=" + ServicePointManager.FindServicePoint(Endpoint).ConnectionLimit + " trace=" + string.Join(";", trace); }
         internal Server(string value)
         { mode = value; listener.Start(); Endpoint = new Uri("http://127.0.0.1:" + ((IPEndPoint)listener.LocalEndpoint).Port + "/mcp"); loop = Accept(); }
         internal McpHttpOptions Options() { return new McpHttpOptions(Endpoint, new[] { Endpoint }) { AllowLoopbackHttp = true }; }
+        internal void ExpectClientDisconnect()
+        { Require(mode == "reverse-close", "Unexpected client-close expectation."); expectClientDisconnect = true; }
         private async Task Accept()
         {
             try { while (!stop.IsCancellationRequested) { var socket = await listener.AcceptTcpClientAsync(); sockets.Add(socket); workers.Add(Handle(socket)); } }
@@ -176,6 +180,7 @@ internal static class FrameworkMcpProbe
         }
         private async Task Handle(TcpClient socket)
         {
+            int requestHeaderBytes = 0;
             int now = Interlocked.Increment(ref active), before;
             do { before = MaximumConnections; if (before >= now) break; } while (Interlocked.CompareExchange(ref MaximumConnections, now, before) != before);
             using (socket)
@@ -183,7 +188,7 @@ internal static class FrameworkMcpProbe
             {
                 var stream = socket.GetStream(); var head = new List<byte>(); var one = new byte[1];
                 while (head.Count < 32768)
-                { if (await stream.ReadAsync(one, 0, 1, stop.Token) == 0) return; head.Add(one[0]); int n = head.Count; if (n >= 4 && head[n-4] == 13 && head[n-3] == 10 && head[n-2] == 13 && head[n-1] == 10) break; }
+                { if (await stream.ReadAsync(one, 0, 1, stop.Token) == 0) return; head.Add(one[0]); requestHeaderBytes = head.Count; int n = head.Count; if (n >= 4 && head[n-4] == 13 && head[n-3] == 10 && head[n-2] == 13 && head[n-1] == 10) break; }
                 string[] lines = Encoding.ASCII.GetString(head.ToArray()).Split(new[] { "\r\n" }, StringSplitOptions.None);
                 int length = 0; foreach (string line in lines) if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) length = int.Parse(line.Substring(15).Trim());
                 var body = new byte[length]; for (int read = 0; read < length;) { int n = await stream.ReadAsync(body, read, length-read, stop.Token); if (n == 0) return; read += n; }
@@ -215,6 +220,16 @@ internal static class FrameworkMcpProbe
                 if (Interlocked.Increment(ref pingsWritten) == 2) BothPingsWritten.TrySetResult(true);
                 await allReplies.Task;
                 await Write(stream, "data: " + json.Serialize(new { jsonrpc = "2.0", id = message["id"], result = new { ok = true } }) + "\n\n");
+            }
+            catch (IOException error)
+            {
+                var connectionError = error.InnerException as SocketException;
+                // Close can cancel a queued reply after TCP accept but before any request is sent.
+                // Only that explicitly requested, empty-connection reset is expected; real requests and other IO still fail.
+                bool expected = mode == "reverse-close" && expectClientDisconnect && requestHeaderBytes == 0 &&
+                    connectionError != null && connectionError.SocketErrorCode == SocketError.ConnectionReset;
+                if (expected) trace.Enqueue("expected-empty-connection-reset during client close");
+                else if (!stop.IsCancellationRequested) throw;
             }
             catch (Exception) { if (!stop.IsCancellationRequested) throw; }
             finally { Interlocked.Decrement(ref active); }

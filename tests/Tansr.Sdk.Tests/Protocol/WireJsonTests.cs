@@ -154,7 +154,15 @@ public sealed class WireJsonTests
         var bytes = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "contract", "sdk2-ext-v1.schema.json"));
         Assert.Equal(WireContract.SchemaSha256, WireJson.Sha256(bytes));
         using var fixture = Fixture("manifest.json");
-        Assert.Equal(WireContract.SourceRevision, fixture.RootElement.GetProperty("sourceRevision").GetString());
+        var files = fixture.RootElement.GetProperty("files");
+        var schemaLock = Assert.Single(files.EnumerateArray(), entry => entry.GetProperty("snapshot").GetString() == "contract/sdk2-ext-v1.schema.json");
+        Assert.Equal(WireContract.SchemaSha256, schemaLock.GetProperty("sha256").GetString());
+        // The schema and later contracts have their own sources; the original wire baseline remains pinned per file.
+        foreach (var path in new[] { "contract/sdk2-wire-v1.json", "contract/reference/wire-codec.ts" })
+        {
+            var sourceLock = Assert.Single(files.EnumerateArray(), entry => entry.GetProperty("snapshot").GetString() == path);
+            Assert.Equal(WireContract.SourceRevision, sourceLock.GetProperty("sourceRevision").GetString());
+        }
         Assert.Equal("separately-pinned-preview", fixture.RootElement.GetProperty("terminalServices").GetString());
     }
 

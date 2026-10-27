@@ -209,11 +209,25 @@ public sealed class PersistenceCustodyAuthorityTests
     [Fact]
     public async Task OriginalWriterQuerySupportsSettledReplayWithoutGrantingExecution()
     {
-        var request = Json(new { contract = PersistenceCustodyContract.Protocol, identity = Identity(),
-            operationId = PersistenceCustodyContract.WriterOperationId(Pst()), intentSha256 = PersistenceCustodyContract.Digest(Pst()), action = "writer-query", custody = Custody() });
+        var request = Json(new
+        {
+            contract = PersistenceCustodyContract.Protocol,
+            identity = Identity(),
+            operationId = PersistenceCustodyContract.WriterOperationId(Pst()),
+            intentSha256 = PersistenceCustodyContract.Digest(Pst()),
+            action = "writer-query",
+            custody = Custody()
+        });
         var claim = Change(Change(Claim(Pst()), "status", "settled"), "responseDigest", Hash);
-        JsonElement Response(JsonElement fact) => Json(new { contract = PersistenceCustodyContract.Protocol, identity = Identity(),
-            operationId = request.GetProperty("operationId"), intentSha256 = request.GetProperty("intentSha256"), action = "writer-query", claim = fact });
+        JsonElement Response(JsonElement fact) => Json(new
+        {
+            contract = PersistenceCustodyContract.Protocol,
+            identity = Identity(),
+            operationId = request.GetProperty("operationId"),
+            intentSha256 = request.GetProperty("intentSha256"),
+            action = "writer-query",
+            claim = fact
+        });
         var authority = new Authority { ExecuteResult = Response(claim) };
         var guard = new TerminalPersistenceCustodyAuthorityGuard(authority, () => Scope());
         var result = await guard.ExecuteAsync(request); Assert.Equal("settled", result.GetProperty("claim").GetProperty("status").GetString());

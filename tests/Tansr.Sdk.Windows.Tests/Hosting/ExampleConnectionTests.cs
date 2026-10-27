@@ -58,7 +58,8 @@ public sealed class ExampleConnectionTests
 
     private static TansrClient Client(HttpClient http, SessionContract contract = SessionContract.Sdk2OffloadV1) => new(new TansrClientOptions
     {
-        BaseUri = new Uri("https://serve.test"), TokenProvider = _ => Task.FromResult("synthetic-ticket"),
+        BaseUri = new Uri("https://serve.test"),
+        TokenProvider = _ => Task.FromResult("synthetic-ticket"),
         SessionContract = contract,
         PrincipalProvider = () => "user",
         ExecutionScopeProvider = () => Json("{\"applicationScopeId\":\"app\",\"endUserId\":\"user\",\"authorizationRevision\":\"1\"}")
